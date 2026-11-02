@@ -10,6 +10,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -1199,7 +1200,8 @@ class Search {
   // to 65%, nodes are selected deepest first and workers always plunge, so the open-node count
   // stops growing; it ends below 60% (and a resident size below 75%). The search stops only at 95%
   // of L (used or resident). Deterministic mode decides on the tree memory alone, at round
-  // barriers (det_tree_bytes_), so the outcome does not depend on timing.
+  // barriers (det_tree_bytes_), so the outcome does not depend on timing; rounds are sized to stay
+  // below these thresholds (run_deterministic, project).
   std::atomic<double> rss_checked_{-1.0};
   std::atomic<long long> rss_bytes_{0};
   std::atomic<long long> path_bytes_{0}, basis_bytes_{0};
@@ -1385,6 +1387,8 @@ class Search {
   mutable std::atomic<long long> polish_tried_{0}, polish_ok_{0}, polish_iters_{0};
   double lost_bound_ = kInf;  // min bound of subtrees dropped for numerical reasons
   double root_bound_ = -kInf;
+  double root_cs_before_ = -kInf;  // root LP bound before cuts (ROOTSTAT line)
+  int root_cs_rounds_ = 0, root_cs_cuts_ = 0;
   double det_lb_ = -kInf;  // deterministic mode: global bound after the last round's merge
   std::mutex log_mu_;
   double last_log_ = 0.0, last_mem_log_ = 0.0;
@@ -4058,6 +4062,14 @@ void Search::run_deterministic() {
   static const bool carry_plunge = std::getenv("MILP_DET_NO_CARRY") == nullptr;
   std::vector<Node> carry(V);
   std::vector<char> carried(V, 0);
+  // Memory limit: open nodes a worker may add this round (net: children queued minus nodes it
+  // closed). Memory decisions are taken only at the barriers, so without a cap one round of V
+  // workers (up to kMaxNodes new nodes each) could carry the tree past the drain threshold and on
+  // past the stop threshold before drain mode took effect. The caps are projected at the round
+  // start (project / set_caps below); far from the limit they do not bind.
+  constexpr long long kNoCap = std::numeric_limits<long long>::max();
+  std::vector<long long> grow_cap(V, kNoCap);
+  bool drain_round = false;  // the pool was in drain mode at the round start
   pool_->resize_workers(V);
   // Instrumentation (wall clock, statistics only: never used for decisions).
   using Clock = std::chrono::steady_clock;
@@ -4070,8 +4082,10 @@ void Search::run_deterministic() {
   std::vector<long long> tr_nodes(V), tr_iters(V);
   long long rounds = 0, idle_slots = 0, jobs_run = 0, jobs_dropped = 0, jobs_discarded = 0;
 
-  // Heap order of a worker's batch: best bound first, deeper first on ties, then by id.
-  auto worse = [](const Node& a, const Node& b) {
+  // Heap order of a worker's batch: best bound first, deeper first on ties, then by id; in drain
+  // mode deepest first (as the pool), then best bound.
+  auto worse = [&drain_round](const Node& a, const Node& b) {
+    if (drain_round && a.depth != b.depth) return a.depth < b.depth;
     if (a.bound != b.bound) return a.bound > b.bound;
     if (a.depth != b.depth) return a.depth < b.depth;
     return a.id > b.id;
@@ -4079,6 +4093,44 @@ void Search::run_deterministic() {
   // Deterministic work clock of a worker: its LP iterations (nodes, strong branching, dives) plus
   // those of its synchronous sub-MIPs (MILP_DET_NO_JOBS).
   auto clock_of = [](const Worker& w) { return w.lp.iterations() + w.lns.iters; };
+  // Memory projection of a round (between rounds, from deterministic data only: the tree memory and
+  // the open nodes at the round start). The round may add about as many open nodes (grow) as fit
+  // between the tree memory now and a target, at 1.5x the average bytes per open node (bases, bound
+  // paths, queue arrays: an array that doubles counts its capacity). The target is 78% of the limit
+  // outside drain mode (just past the drain threshold of 75%: drain mode starts about where it does
+  // in opportunistic mode, not after a round overshot it) and 90% in drain mode (the search stops
+  // at 95%). Where that binds, the growth goes to few workers, each with room for a plunge of
+  // kMinGrow nodes (a thin share per worker cut every plunge short: the tree then grew by one node
+  // per worker and round and never drained), and the others sit the round out. Sets grow (-1: not
+  // binding) and returns the number of workers to hand nodes to.
+  static const long long kMinGrow = static_cast<long long>(knob("MILP_DET_MEM_GROW", 64));
+  long long capped_rounds = 0, grow = -1;
+  auto project = [&]() -> int {
+    drain_round = pool_->drain();
+    grow = -1;
+    const long long limit = mem_limit_bytes();
+    if (limit <= 0) return V;
+    long long open = static_cast<long long>(pool_->size());
+    for (int t = 0; t < V; ++t) open += carried[t];
+    const long long tb = tree_bytes();
+    const long long per_node =
+        std::max<long long>(static_cast<long long>(sizeof(Node)) + 64, tb / std::max<long long>(1, open)) * 3 / 2;
+    const long long target = drain_round ? limit / 20 * 18 : limit / 100 * 78;
+    const long long g = std::max<long long>(0, (target - tb) / per_node);
+    if (g >= static_cast<long long>(V) * kMaxNodes) return V;  // cannot bind this round
+    ++capped_rounds;
+    grow = g;
+    return static_cast<int>(std::clamp<long long>(g / kMinGrow, 1, V));
+  };
+  // Splits grow over the workers that have nodes this round.
+  auto set_caps = [&](int active) {
+    std::fill(grow_cap.begin(), grow_cap.end(), kNoCap);
+    if (grow < 0) return;
+    int k = 0;
+    for (int t = 0; t < V; ++t) {
+      if (has[t]) grow_cap[t] = grow / active + (k++ < grow % active ? 1 : 0);
+    }
+  };
   auto work = [&](int t) {
     const Clock::time_point t0 = Clock::now();
     Worker& w = *ws[t];
@@ -4096,10 +4148,15 @@ void Search::run_deterministic() {
     const long long it0 = clock_of(w);
     const double sub0 = w.t_sub;
     int processed = 0;
-    auto more = [&] { return processed == 0 || (processed < kMaxNodes && clock_of(w) - it0 < round_budget); };
+    // Net open nodes this worker added (its batch, carried plunge and children against the start).
+    const long long open0 = static_cast<long long>(local.size()) + carried[t];
+    auto more = [&](long long open_now) {
+      return processed == 0 ||
+             (processed < kMaxNodes && clock_of(w) - it0 < round_budget && open_now - open0 < grow_cap[t]);
+    };
     if (batch <= 0) {
       // Old scheme: depth-first over the subtree of the single assigned node.
-      while (!local.empty() && !stop_.load() && more()) {
+      while (!local.empty() && !stop_.load() && more(static_cast<long long>(local.size()))) {
         Node cur = std::move(local.back());
         local.pop_back();
         if (cur.bound >= w.cutoff) continue;
@@ -4119,7 +4176,7 @@ void Search::run_deterministic() {
         carried[t] = 0;
         have = true;
       }
-      while (!stop_.load() && more()) {
+      while (!stop_.load() && more(static_cast<long long>(local.size()) + have)) {
         if (!have) {
           if (local.empty()) break;
           std::pop_heap(local.begin(), local.end(), worse);
@@ -4228,12 +4285,18 @@ void Search::run_deterministic() {
     // Hand out nodes in deterministic (best-bound) order with state snapshots.
     // Batch: at least `batch` nodes, and about twice the nodes a task's budget pays for (a task that
     // runs out of nodes ends early and leaves its thread idle at the barrier).
+    // Under memory pressure only the first `use` workers get nodes; the others give their plunge back.
     int assigned_count = 0;
+    const int use = project();
+    for (int t = use; t < V; ++t) {
+      if (carried[t]) pool_->push(std::move(carry[t]));
+      carried[t] = 0;
+    }
     const double node_cost = tree_node_cost();
     const int want = std::clamp(static_cast<int>(2.0 * static_cast<double>(round_budget) / node_cost), batch, 256);
-    const int per = batch <= 0 ? 1 : std::max<int>(1, std::min<int>(want, static_cast<int>(pool_->size()) / V));
+    const int per = batch <= 0 ? 1 : std::max<int>(1, std::min<int>(want, static_cast<int>(pool_->size()) / use));
     for (int k = 0; k < per; ++k) {
-      for (int t = 0; t < V; ++t) {
+      for (int t = 0; t < use; ++t) {
         Node n;
         if (!pool_->try_pop(cutoff_.load(), &n, false)) break;
         assigned[t].push_back(std::move(n));
@@ -4247,6 +4310,7 @@ void Search::run_deterministic() {
       idle_slots += !has[t];
     }
     if (assigned_count == 0) break;
+    set_caps(assigned_count);
     const int free_slots = std::max(0, max_jobs - static_cast<int>(jobs.size()));
     for (int t = 0; t < V; ++t) {
       if (!has[t]) continue;
@@ -4445,10 +4509,11 @@ void Search::run_deterministic() {
     const double cap = par_wall * T;
     log_.log(det_stats ? 0 : 2,
              "DET %d tasks, rounds %lld nodes/round %.1f  parallel %.2fs busy %.0f%% idle %.0f%% (empty tasks %lld)"
-             "  serial %.2fs (FJ wait %.2fs, job wait %.2fs)  jobs %lld (%.2fs) dropped %lld discarded %lld\n",
+             "  serial %.2fs (FJ wait %.2fs, job wait %.2fs)  jobs %lld (%.2fs) dropped %lld discarded %lld"
+             "  memory-capped rounds %lld\n",
              V, rounds, rounds ? static_cast<double>(nodes_.load()) / static_cast<double>(rounds) : 0.0, par_wall,
              cap > 0 ? 100.0 * tot_busy / cap : 0.0, cap > 0 ? 100.0 * (cap - tot_busy) / cap : 0.0, idle_slots, serial,
-             fj_wait, job_wait, jobs_run, job_secs, jobs_dropped, jobs_discarded);
+             fj_wait, job_wait, jobs_run, job_secs, jobs_dropped, jobs_discarded, capped_rounds);
     for (int t = 0; t < V; ++t) {
       log_.log(det_stats ? 0 : 2, "DET   worker %d: %lld nodes, busy %.2fs (dives %.2fs, sub-MIPs %.2fs), %lld LP iters\n",
                t, wnodes[t], busy[t], ws[t]->t_dive, ws[t]->t_sub, ws[t]->lp.iterations());
@@ -4792,9 +4857,14 @@ MipResult Search::run() {
         lurk_up_.assign(p_.num_cols(), -kInf);
         on_lp = [this](const DualSimplex& lp) { record_lurking(lp); };
       }
+      // Reduced-cost fixing between cut rounds against the current cutoff (deterministic: the one at the start).
+      const double cutoff0 = cutoff_.load();
+      std::function<double()> cutoff_fn = [this, cutoff0, det = params_.deterministic]() {
+        return det ? cutoff0 : cutoff_.load();
+      };
       const CutLoopStats cs = root_cut_loop(p_, w.lp, params_, log_, timer_, incumbent_.load(), &cut_data_,
                                             !opts_.sub_mip_heuristics || opts_.no_zerohalf,
-                                            use_pool_ ? &dropped : nullptr, on_lp, opts_.stop_flag);
+                                            use_pool_ ? &dropped : nullptr, on_lp, opts_.stop_flag, cutoff_fn);
       if (!debug_sol_.empty()) {
         const SparseMatrix& RR = w.lp.row_matrix();
         for (Index i = p_.num_rows(); i < w.lp.num_rows(); ++i) {
@@ -4815,6 +4885,9 @@ MipResult Search::run() {
         ncp_max_nnz_ = static_cast<long long>(knob("MILP_POOL_NNZ_MULT", 1.0) * static_cast<double>(std::clamp<long long>(10 * nnz, 200000, 4000000)));
         pool_publish(dropped, nullptr);
       }
+      root_cs_before_ = cs.rounds > 0 ? cs.bound_before : w.lp.objective();
+      root_cs_rounds_ = cs.rounds;
+      root_cs_cuts_ = cs.cuts_added;
       if (cs.rounds > 0) {
         log_.log(1, "Cuts: %d rounds, %d cuts, bound %.10g -> %.10g\n", cs.rounds, cs.cuts_added,
                  p_.display_sense * (cs.bound_before + p_.offset), p_.display_sense * (cs.bound_after + p_.offset));
@@ -4824,6 +4897,19 @@ MipResult Search::run() {
     fj_iters_mark_ = lp_iters_.load();
     const int nc = process(w, root, children);
     root_done_ = true;
+    {
+      // Machine-readable root summary (benchmarks/tools/rootgap.py): bound after the root node (the
+      // incumbent if the root was pruned), the root LP bound before cuts and the root cut loop.
+      double rb = incumbent_.load();
+      if (nc > 0) {
+        rb = kInf;
+        for (int k = 0; k < nc; ++k) rb = std::min(rb, std::max(children[k].bound, root_bound_));
+      }
+      log_.log(1, "ROOTSTAT bound=%.12g lp=%.12g nodelp=%.12g rounds=%d cuts=%d rows=%d time=%.3f\n",
+               p_.display_sense * (rb + p_.offset), p_.display_sense * (root_cs_before_ + p_.offset),
+               p_.display_sense * (root_bound_ + p_.offset), root_cs_rounds_, root_cs_cuts_,
+               static_cast<int>(w.lp.num_rows() - p_.num_rows()), timer_.elapsed());
+    }
     report_progress();
     pool_->set_worker_bound(0, kInf);
     root_lp_ = w.lp;  // workers start from the solved root basis
@@ -4986,6 +5072,7 @@ MipResult Search::run() {
   report_progress();
   res.nodes = nodes_.load();
   res.lp_iterations = lp_iters_.load();
+  res.mem_drains = mem_drains_.load();
   const double inc = incumbent_.load();
   res.has_solution = is_finite(inc);
   if (res.has_solution) {

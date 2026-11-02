@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## v0.2.1 — 2026-11
+
+A patch release: faster root cuts on pure integer models and a robustness fix for deterministic
+parallel mode under tight memory limits.
+
+**Benchmarks**
+- 63-instance MIPLIB 2017 subset (120 s, 4 threads): 60 solved, shifted geometric mean 11.3 s
+  (v0.2.0: 12.4 s). See [BENCHMARKS.md](BENCHMARKS.md).
+
+**Solver**
+- Deterministic parallel mode (`--deterministic`) now drains the search tree reliably near the
+  memory cap (`--mem-limit`). Before, a parallel deterministic run could stop with `MEMORY_LIMIT`
+  where a 1-thread run under the same cap proved optimality. The work between two
+  synchronization points is now sized so that the tree stays below the cap. Reruns stay
+  identical, and runs that stay well below the cap are unchanged.
+
+**Root cuts**
+- c-MIR path aggregation continues through general integer columns on pure integer models (root cut loop,
+  work-capped, not on dual degenerate root LPs): mzzv11 / mzzv42z are now solved at the root (4 threads:
+  51 s -> 17 s and 15 s -> 3.3 s).
+- Clique cuts are extended to maximal cliques by zero-valued literals.
+- `benchmarks/tools/rootgap.py`: root gap closed per instance vs SCIP / HiGHS (node limit 1) and the known
+  optimum; the solver prints a machine-readable `ROOTSTAT` line after each root.
+
 ## v0.2.0 — 2026-11
 
 popso becomes usable as a library and on all three major platforms: a C API and Python bindings,
