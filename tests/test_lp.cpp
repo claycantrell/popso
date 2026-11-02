@@ -1,0 +1,169 @@
+// Tests for the dual simplex: warm starts, bound changes, row addition/removal.
+
+#include <random>
+
+#include "milp/lp/simplex.hpp"
+#include "test_framework.hpp"
+
+using namespace milp;
+
+namespace {
+
+struct RandomLp {
+  SparseMatrix A;
+  std::vector<double> c, cl, cu, rl, ru;
+};
+
+// Bounded, feasible-ish random LP (all columns boxed so it is never unbounded).
+RandomLp random_lp(std::mt19937& rng, Index m, Index n) {
+  RandomLp lp;
+  std::vector<Index> J, I;
+  std::vector<double> V;
+  for (Index j = 0; j < n; ++j)
+    for (Index i = 0; i < m; ++i)
+      if (rng() % 100 < 30) J.push_back(j), I.push_back(i), V.push_back(static_cast<int>(rng() % 21) - 10);
+  lp.A = SparseMatrix::from_triplets(n, m, J, I, V);
+  for (Index j = 0; j < n; ++j) {
+    lp.c.push_back(static_cast<int>(rng() % 21) - 10);
+    lp.cl.push_back(-static_cast<double>(rng() % 5));
+    lp.cu.push_back(static_cast<double>(rng() % 5));
+  }
+  for (Index i = 0; i < m; ++i) {
+    lp.rl.push_back(-static_cast<double>(rng() % 30));
+    lp.ru.push_back(static_cast<double>(rng() % 30));
+  }
+  return lp;
+}
+
+LpStatus cold_solve(const RandomLp& lp, double* obj) {
+  DualSimplex s;
+  s.load(lp.A, lp.c, lp.cl, lp.cu, lp.rl, lp.ru);
+  LpStatus st = s.solve(LpOptions{});
+  *obj = s.objective();
+  return st;
+}
+
+}  // namespace
+
+TEST(lp_warm_start_after_bound_changes) {
+  std::mt19937 rng(3);
+  for (int t = 0; t < 200; ++t) {
+    RandomLp lp = random_lp(rng, 1 + rng() % 20, 1 + rng() % 30);
+    DualSimplex s;
+    s.load(lp.A, lp.c, lp.cl, lp.cu, lp.rl, lp.ru);
+    REQUIRE(s.solve(LpOptions{}) == LpStatus::Optimal);
+    // Tighten a few bounds and resolve warm; compare with a cold solve.
+    for (int k = 0; k < 3; ++k) {
+      Index j = rng() % lp.c.size();
+      double v = s.x()[j];
+      if (rng() % 2) lp.cu[j] = std::max(lp.cl[j], std::floor(v));
+      else lp.cl[j] = std::min(lp.cu[j], std::ceil(v));
+      s.set_col_bounds(j, lp.cl[j], lp.cu[j]);
+    }
+    LpStatus warm = s.solve(LpOptions{});
+    double cold_obj;
+    LpStatus cold = cold_solve(lp, &cold_obj);
+    CHECK(warm == cold);
+    if (warm == LpStatus::Optimal && cold == LpStatus::Optimal) CHECK_NEAR(s.objective(), cold_obj, 1e-6);
+  }
+}
+
+TEST(lp_add_and_remove_rows) {
+  std::mt19937 rng(5);
+  for (int t = 0; t < 200; ++t) {
+    const Index m = 1 + rng() % 15, n = 1 + rng() % 25;
+    RandomLp lp = random_lp(rng, m, n);
+    DualSimplex s;
+    s.load(lp.A, lp.c, lp.cl, lp.cu, lp.rl, lp.ru);
+    REQUIRE(s.solve(LpOptions{}) == LpStatus::Optimal);
+    // Add two random rows (as a "cut"), compare with cold solve of the extended LP.
+    std::vector<Index> start{0}, idx;
+    std::vector<double> val, lb, ub;
+    std::vector<Index> J(lp.A.index.size()), I;
+    for (Index j = 0; j < n; ++j)
+      for (Index p = lp.A.begin(j); p < lp.A.end(j); ++p) J[p] = j;
+    I = lp.A.index;
+    std::vector<double> V = lp.A.value;
+    for (int r = 0; r < 2; ++r) {
+      for (Index j = 0; j < n; ++j) {
+        if (rng() % 3) continue;
+        double a = static_cast<int>(rng() % 11) - 5;
+        if (a == 0) continue;
+        idx.push_back(j), val.push_back(a);
+        J.push_back(j), I.push_back(m + r), V.push_back(a);
+      }
+      start.push_back(static_cast<Index>(idx.size()));
+      double act = 0;
+      for (Index k = start[r]; k < start[r + 1]; ++k) act += val[k] * s.x()[idx[k]];
+      lb.push_back(-kInf);
+      ub.push_back(std::floor(act) - 1.0);  // cuts off the current point
+      lp.rl.push_back(lb.back());
+      lp.ru.push_back(ub.back());
+    }
+    s.add_rows(2, start, idx, val, lb, ub);
+    LpStatus warm = s.solve(LpOptions{});
+    RandomLp ext = lp;
+    ext.A = SparseMatrix::from_triplets(n, m + 2, J, I, V);
+    double cold_obj;
+    LpStatus cold = cold_solve(ext, &cold_obj);
+    CHECK(warm == cold);
+    if (warm != LpStatus::Optimal || cold != LpStatus::Optimal) continue;
+    CHECK_NEAR(s.objective(), cold_obj, 1e-6);
+    // Remove basic (slack) rows and resolve: objective must not increase.
+    std::vector<Index> slack;
+    for (Index i = 0; i < m + 2; ++i)
+      if (s.row_is_basic(i)) slack.push_back(i);
+    const double before = s.objective();
+    s.remove_rows(slack);
+    CHECK(s.num_rows() == m + 2 - static_cast<Index>(slack.size()));
+    REQUIRE(s.solve(LpOptions{}) == LpStatus::Optimal);
+    CHECK_NEAR(s.objective(), before, 1e-6);
+  }
+}
+
+TEST(lp_tableau_row_consistency) {
+  std::mt19937 rng(11);
+  for (int t = 0; t < 50; ++t) {
+    RandomLp lp = random_lp(rng, 2 + rng() % 10, 2 + rng() % 15);
+    DualSimplex s;
+    s.load(lp.A, lp.c, lp.cl, lp.cu, lp.rl, lp.ru);
+    REQUIRE(s.solve(LpOptions{}) == LpStatus::Optimal);
+    const Index N = s.num_cols() + s.num_rows();
+    for (Index b : std::vector<Index>(s.basic_vars())) {
+      std::vector<double> row;
+      REQUIRE(s.tableau_row(b, row));
+      // x_b + sum_{nonbasic} row_j x_j = 0 (since [A I] x = 0).
+      double v = s.var_value(b);
+      for (Index j = 0; j < N; ++j)
+        if (s.status(j) != VarStatus::Basic) v += row[j] * s.var_value(j);
+      CHECK_NEAR(v, 0.0, 1e-7);
+      CHECK_NEAR(row[b], 1.0, 1e-9);
+    }
+  }
+}
+
+TEST(lp_tableau_row_sparse_matches_dense) {
+  std::mt19937 rng(12);
+  for (int t = 0; t < 50; ++t) {
+    RandomLp lp = random_lp(rng, 2 + rng() % 12, 2 + rng() % 20);
+    DualSimplex s;
+    s.load(lp.A, lp.c, lp.cl, lp.cu, lp.rl, lp.ru);
+    REQUIRE(s.solve(LpOptions{}) == LpStatus::Optimal);
+    const Index N = s.num_cols() + s.num_rows();
+    std::vector<double> sparse(N, 0.0);
+    std::vector<Index> nz;
+    for (Index b : std::vector<Index>(s.basic_vars())) {
+      std::vector<double> dense;
+      REQUIRE(s.tableau_row(b, dense));
+      for (Index j : nz) sparse[j] = 0.0;
+      REQUIRE(s.tableau_row(b, sparse, nz));
+      for (size_t k = 1; k < nz.size(); ++k) CHECK(nz[k - 1] < nz[k]);
+      std::vector<char> listed(N, 0);
+      for (Index j : nz) listed[j] = 1;
+      for (Index j = 0; j < N; ++j) {
+        CHECK(sparse[j] == dense[j]);  // bit-identical
+        if (!listed[j]) CHECK(dense[j] == 0.0);
+      }
+    }
+  }
+}

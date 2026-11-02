@@ -1,0 +1,15 @@
+build/
+build-*/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+benchmarks/miplib/
+benchmarks/results/tmp/
+*.sol.tmp
+.vscode/
+.idea/
+.claude/
+
+# local-only data and tools (never committed)
+private/

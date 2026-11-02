@@ -1,0 +1,1120 @@
+{
+ "source": "https://miplib.zib.de/downloads/miplib2017-v37.solu",
+ "instances": {
+  "30n20b8": {
+   "status": "optimal",
+   "objective": 302.0
+  },
+  "50v-10": {
+   "status": "optimal",
+   "objective": 3311.1799841
+  },
+  "CMS750_4": {
+   "status": "optimal",
+   "objective": 252.0
+  },
+  "air05": {
+   "status": "optimal",
+   "objective": 26374.0,
+   "num_vars": 7195,
+   "num_cons": 426,
+   "num_nonzeros": 52121,
+   "num_binaries": 7195,
+   "num_integers": 7195,
+   "highs": {
+    "status": "optimal",
+    "objective": 26373.999999999996,
+    "time": 22.87,
+    "time_limit": 300
+   }
+  },
+  "app1-1": {
+   "status": "optimal",
+   "objective": -3.0,
+   "num_vars": 2480,
+   "num_cons": 4926,
+   "num_nonzeros": 18275,
+   "num_binaries": 1225,
+   "num_integers": 1225,
+   "highs": {
+    "status": "optimal",
+    "objective": -2.9999999999999996,
+    "time": 19.76,
+    "time_limit": 300
+   }
+  },
+  "app1-2": {
+   "status": "optimal",
+   "objective": -41.0
+  },
+  "beasleyC3": {
+   "status": "optimal",
+   "objective": 753.9999999999128,
+   "num_vars": 2500,
+   "num_cons": 1750,
+   "num_nonzeros": 5000,
+   "num_binaries": 1250,
+   "num_integers": 1250,
+   "highs": {
+    "status": "optimal",
+    "objective": 754.0000000000002,
+    "time": 16.23,
+    "time_limit": 300
+   }
+  },
+  "binkar10_1": {
+   "status": "optimal",
+   "objective": 6742.200024,
+   "num_vars": 2298,
+   "num_cons": 1026,
+   "num_nonzeros": 4496,
+   "num_binaries": 170,
+   "num_integers": 170,
+   "highs": {
+    "status": "optimal",
+    "objective": 6742.200024000001,
+    "time": 30.94,
+    "time_limit": 300
+   },
+   "note": "Official .solu 6741.38002 is only reached by violating integrality/bounds by up to 8.2e-7 on 7 variables (inside a 1e-6 tolerance). With integrality enforced at 1e-6, HiGHS 1.15 and SCIP 10 and ours all prove 6742.200024; that value is used as the reference (2026-11-02).",
+   "solu_official": 6741.38002393972
+  },
+  "blp-ic98": {
+   "status": "optimal",
+   "objective": 4491.44758395
+  },
+  "bppc4-08": {
+   "status": "optimal",
+   "objective": 53.0
+  },
+  "cbs-cta": {
+   "status": "optimal",
+   "objective": 0.0,
+   "num_vars": 24793,
+   "num_cons": 10112,
+   "num_nonzeros": 64388,
+   "num_binaries": 2467,
+   "num_integers": 2467,
+   "highs": {
+    "status": "optimal",
+    "objective": 0.0,
+    "time": 46.0,
+    "time_limit": 300
+   }
+  },
+  "chromaticindex512-7": {
+   "status": "optimal",
+   "objective": 4.0
+  },
+  "cod105": {
+   "status": "optimal",
+   "objective": -12.0,
+   "num_vars": 1024,
+   "num_cons": 1024,
+   "num_nonzeros": 57344,
+   "num_binaries": 1024,
+   "num_integers": 1024,
+   "highs": {
+    "status": "optimal",
+    "objective": -11.999999999999298,
+    "time": 82.68,
+    "time_limit": 300
+   }
+  },
+  "cost266-UUE": {
+   "status": "optimal",
+   "objective": 25148940.55999998
+  },
+  "csched007": {
+   "status": "optimal",
+   "objective": 350.9999999999955
+  },
+  "csched008": {
+   "status": "optimal",
+   "objective": 173.0
+  },
+  "dano3_3": {
+   "status": "optimal",
+   "objective": 576.34463303,
+   "num_vars": 13873,
+   "num_cons": 3202,
+   "num_nonzeros": 79655,
+   "num_binaries": 69,
+   "num_integers": 69,
+   "highs": {
+    "status": "optimal",
+    "objective": 576.3446330306425,
+    "time": 79.63,
+    "time_limit": 300
+   }
+  },
+  "dano3_5": {
+   "status": "optimal",
+   "objective": 576.9249159565619
+  },
+  "decomp2": {
+   "status": "optimal",
+   "objective": -160.0,
+   "num_vars": 14387,
+   "num_cons": 10765,
+   "num_nonzeros": 64073,
+   "num_binaries": 14387,
+   "num_integers": 14387,
+   "highs": {
+    "status": "optimal",
+    "objective": -160.0,
+    "time": 4.9,
+    "time_limit": 300
+   }
+  },
+  "drayage-100-23": {
+   "status": "optimal",
+   "objective": 103333.87407,
+   "num_vars": 11090,
+   "num_cons": 4630,
+   "num_nonzeros": 41550,
+   "num_binaries": 11025,
+   "num_integers": 11025,
+   "highs": {
+    "status": "optimal",
+    "objective": 103333.87407302856,
+    "time": 0.63,
+    "time_limit": 300
+   }
+  },
+  "drayage-25-23": {
+   "status": "optimal",
+   "objective": 101282.647018,
+   "num_vars": 11090,
+   "num_cons": 4630,
+   "num_nonzeros": 41550,
+   "num_binaries": 11025,
+   "num_integers": 11025,
+   "highs": {
+    "status": "optimal",
+    "objective": 101282.64701843262,
+    "time": 1.79,
+    "time_limit": 300
+   }
+  },
+  "eil33-2": {
+   "status": "optimal",
+   "objective": 934.007915999999,
+   "num_vars": 4516,
+   "num_cons": 32,
+   "num_nonzeros": 44243,
+   "num_binaries": 4516,
+   "num_integers": 4516,
+   "highs": {
+    "status": "optimal",
+    "objective": 934.0079160000269,
+    "time": 130.05,
+    "time_limit": 300
+   }
+  },
+  "enlight_hard": {
+   "status": "optimal",
+   "objective": 37.0,
+   "num_vars": 200,
+   "num_cons": 100,
+   "num_nonzeros": 560,
+   "num_binaries": 100,
+   "num_integers": 200,
+   "highs": {
+    "status": "optimal",
+    "objective": 37.00000000000006,
+    "time": 13.08,
+    "time_limit": 300
+   }
+  },
+  "exp-1-500-5-5": {
+   "status": "optimal",
+   "objective": 65887.0,
+   "num_vars": 990,
+   "num_cons": 550,
+   "num_nonzeros": 1980,
+   "num_binaries": 250,
+   "num_integers": 250,
+   "highs": {
+    "status": "optimal",
+    "objective": 65886.99999999965,
+    "time": 5.4,
+    "time_limit": 300
+   }
+  },
+  "fhnw-binpack4-48": {
+   "status": "optimal",
+   "objective": 0.0
+  },
+  "fiball": {
+   "status": "optimal",
+   "objective": 138.0,
+   "num_vars": 34219,
+   "num_cons": 3707,
+   "num_nonzeros": 104792,
+   "num_binaries": 33960,
+   "num_integers": 34218,
+   "highs": {
+    "status": "optimal",
+    "objective": 138.0,
+    "time": 112.79,
+    "time_limit": 300
+   }
+  },
+  "gen-ip054": {
+   "status": "optimal",
+   "objective": 6840.96564179
+  },
+  "germanrr": {
+   "status": "optimal",
+   "objective": 47095869.649
+  },
+  "glass4": {
+   "status": "optimal",
+   "objective": 1200012599.972384
+  },
+  "gmu-35-40": {
+   "status": "optimal",
+   "objective": -2406733.3688
+  },
+  "gmu-35-50": {
+   "status": "optimal",
+   "objective": -2607958.33
+  },
+  "graphdraw-domain": {
+   "status": "optimal",
+   "objective": 19685.99997550038
+  },
+  "h80x6320d": {
+   "status": "optimal",
+   "objective": 6382.099048245999,
+   "num_vars": 12640,
+   "num_cons": 6558,
+   "num_nonzeros": 31521,
+   "num_binaries": 6320,
+   "num_integers": 6320,
+   "highs": {
+    "status": "optimal",
+    "objective": 6382.099049980758,
+    "time": 9.93,
+    "time_limit": 120
+   }
+  },
+  "ic97_potential": {
+   "status": "optimal",
+   "objective": 3941.99993090225
+  },
+  "icir97_tension": {
+   "status": "optimal",
+   "objective": 6375.0
+  },
+  "irp": {
+   "status": "optimal",
+   "objective": 12159.49283539698,
+   "num_vars": 20315,
+   "num_cons": 39,
+   "num_nonzeros": 98254,
+   "num_binaries": 20315,
+   "num_integers": 20315,
+   "highs": {
+    "status": "optimal",
+    "objective": 12159.492836,
+    "time": 16.39,
+    "time_limit": 120
+   }
+  },
+  "leo1": {
+   "status": "optimal",
+   "objective": 404227536.16
+  },
+  "lotsize": {
+   "status": "optimal",
+   "objective": 1480195.0
+  },
+  "mas74": {
+   "status": "optimal",
+   "objective": 11801.18572
+  },
+  "mas76": {
+   "status": "optimal",
+   "objective": 40005.05398999999,
+   "num_vars": 151,
+   "num_cons": 12,
+   "num_nonzeros": 1640,
+   "num_binaries": 150,
+   "num_integers": 150,
+   "highs": {
+    "status": "optimal",
+    "objective": 40005.05414074198,
+    "time": 83.44,
+    "time_limit": 120
+   }
+  },
+  "mc11": {
+   "status": "optimal",
+   "objective": 11688.99999999966,
+   "num_vars": 3040,
+   "num_cons": 1920,
+   "num_nonzeros": 6080,
+   "num_binaries": 1520,
+   "num_integers": 1520,
+   "highs": {
+    "status": "optimal",
+    "objective": 11689.0,
+    "time": 25.26,
+    "time_limit": 120
+   }
+  },
+  "mcsched": {
+   "status": "optimal",
+   "objective": 211913.0
+  },
+  "mik-250-20-75-4": {
+   "status": "optimal",
+   "objective": -52301.0,
+   "num_vars": 270,
+   "num_cons": 195,
+   "num_nonzeros": 9270,
+   "num_binaries": 75,
+   "num_integers": 250,
+   "highs": {
+    "status": "optimal",
+    "objective": -52301.00000000069,
+    "time": 9.33,
+    "time_limit": 120
+   }
+  },
+  "milo-v12-6-r2-40-1": {
+   "status": "optimal",
+   "objective": 326481.14282799
+  },
+  "mzzv11": {
+   "status": "optimal",
+   "objective": -21718.0,
+   "num_vars": 10240,
+   "num_cons": 9499,
+   "num_nonzeros": 134603,
+   "num_binaries": 9989,
+   "num_integers": 10240,
+   "highs": {
+    "status": "optimal",
+    "objective": -21718.0,
+    "time": 74.73,
+    "time_limit": 120
+   }
+  },
+  "mzzv42z": {
+   "status": "optimal",
+   "objective": -20540.0
+  },
+  "n2seq36q": {
+   "status": "optimal",
+   "objective": 52200.0
+  },
+  "n5-3": {
+   "status": "optimal",
+   "objective": 8104.999999993999,
+   "num_vars": 2550,
+   "num_cons": 1062,
+   "num_nonzeros": 9900,
+   "num_binaries": 0,
+   "num_integers": 150,
+   "highs": {
+    "status": "optimal",
+    "objective": 8105.000000000005,
+    "time": 17.32,
+    "time_limit": 120
+   }
+  },
+  "neos-1122047": {
+   "status": "optimal",
+   "objective": 161.0
+  },
+  "neos-1171448": {
+   "status": "optimal",
+   "objective": -309.0,
+   "num_vars": 4914,
+   "num_cons": 13206,
+   "num_nonzeros": 131859,
+   "num_binaries": 2457,
+   "num_integers": 2457,
+   "highs": {
+    "status": "optimal",
+    "objective": -308.9999999999999,
+    "time": 114.06,
+    "time_limit": 120
+   }
+  },
+  "neos-1171737": {
+   "status": "optimal",
+   "objective": -195.0
+  },
+  "neos-1445765": {
+   "status": "optimal",
+   "objective": -17783.0,
+   "num_vars": 20617,
+   "num_cons": 2147,
+   "num_nonzeros": 40230,
+   "num_binaries": 2150,
+   "num_integers": 2150,
+   "highs": {
+    "status": "optimal",
+    "objective": -17783.0,
+    "time": 52.69,
+    "time_limit": 120
+   }
+  },
+  "neos-1456979": {
+   "status": "optimal",
+   "objective": 176.0
+  },
+  "neos-1582420": {
+   "status": "optimal",
+   "objective": 90.99999999999996,
+   "num_vars": 10100,
+   "num_cons": 10180,
+   "num_nonzeros": 24814,
+   "num_binaries": 10000,
+   "num_integers": 10100,
+   "highs": {
+    "status": "optimal",
+    "objective": 90.99999999999993,
+    "time": 17.95,
+    "time_limit": 120
+   }
+  },
+  "neos-2978193-inde": {
+   "status": "optimal",
+   "objective": -2.38806169,
+   "num_vars": 20800,
+   "num_cons": 396,
+   "num_nonzeros": 41600,
+   "num_binaries": 64,
+   "num_integers": 64,
+   "highs": {
+    "status": "optimal",
+    "objective": -2.3880616860000012,
+    "time": 27.83,
+    "time_limit": 120
+   }
+  },
+  "neos-3004026-krka": {
+   "status": "optimal",
+   "objective": 0.0
+  },
+  "neos-3083819-nubu": {
+   "status": "optimal",
+   "objective": 6307996.0,
+   "num_vars": 8644,
+   "num_cons": 4725,
+   "num_nonzeros": 24048,
+   "num_binaries": 0,
+   "num_integers": 8644,
+   "highs": {
+    "status": "optimal",
+    "objective": 6307996.000000001,
+    "time": 6.7,
+    "time_limit": 120
+   }
+  },
+  "neos-3216931-puriri": {
+   "status": "optimal",
+   "objective": 71320.0
+  },
+  "neos-3381206-awhea": {
+   "status": "optimal",
+   "objective": 453.0,
+   "num_vars": 2375,
+   "num_cons": 479,
+   "num_nonzeros": 4275,
+   "num_binaries": 475,
+   "num_integers": 2375,
+   "highs": {
+    "status": "optimal",
+    "objective": 453.0,
+    "time": 0.48,
+    "time_limit": 120
+   }
+  },
+  "neos-3627168-kasai": {
+   "status": "optimal",
+   "objective": 988585.6199999998,
+   "num_vars": 1462,
+   "num_cons": 1655,
+   "num_nonzeros": 5158,
+   "num_binaries": 535,
+   "num_integers": 535,
+   "highs": {
+    "status": "optimal",
+    "objective": 988585.6199999939,
+    "time": 58.19,
+    "time_limit": 120
+   }
+  },
+  "neos-4338804-snowy": {
+   "status": "optimal",
+   "objective": 1471.0
+  },
+  "neos-4387871-tavua": {
+   "status": "optimal",
+   "objective": 33.384729927
+  },
+  "neos-4738912-atrato": {
+   "status": "optimal",
+   "objective": 283627956.595
+  },
+  "neos-4954672-berkel": {
+   "status": "optimal",
+   "objective": 2612710.0
+  },
+  "neos-5107597-kakapo": {
+   "status": "optimal",
+   "objective": 3644.99999999952
+  },
+  "neos-827175": {
+   "status": "optimal",
+   "objective": 112.00152,
+   "num_vars": 32504,
+   "num_cons": 14187,
+   "num_nonzeros": 110790,
+   "num_binaries": 21350,
+   "num_integers": 21350,
+   "highs": {
+    "status": "optimal",
+    "objective": 112.00152,
+    "time": 3.17,
+    "time_limit": 120
+   }
+  },
+  "neos-911970": {
+   "status": "optimal",
+   "objective": 54.76,
+   "num_vars": 888,
+   "num_cons": 107,
+   "num_nonzeros": 3408,
+   "num_binaries": 840,
+   "num_integers": 840,
+   "highs": {
+    "status": "optimal",
+    "objective": 54.75999999999199,
+    "time": 6.62,
+    "time_limit": 120
+   }
+  },
+  "neos-933966": {
+   "status": "optimal",
+   "objective": 318.0
+  },
+  "neos-950242": {
+   "status": "optimal",
+   "objective": 4.0,
+   "num_vars": 5760,
+   "num_cons": 34224,
+   "num_nonzeros": 104160,
+   "num_binaries": 5520,
+   "num_integers": 5760,
+   "highs": {
+    "status": "optimal",
+    "objective": 3.999999999999986,
+    "time": 20.46,
+    "time_limit": 120
+   }
+  },
+  "neos-960392": {
+   "status": "optimal",
+   "objective": -238.0
+  },
+  "neos17": {
+   "status": "optimal",
+   "objective": 0.1500025774,
+   "num_vars": 535,
+   "num_cons": 486,
+   "num_nonzeros": 4931,
+   "num_binaries": 300,
+   "num_integers": 300,
+   "highs": {
+    "status": "optimal",
+    "objective": 0.15000257742257742,
+    "time": 5.58,
+    "time_limit": 120
+   }
+  },
+  "neos5": {
+   "status": "optimal",
+   "objective": 15.0,
+   "num_vars": 63,
+   "num_cons": 63,
+   "num_nonzeros": 2016,
+   "num_binaries": 53,
+   "num_integers": 53,
+   "highs": {
+    "status": "optimal",
+    "objective": 14.999999999984242,
+    "time": 58.32,
+    "time_limit": 120
+   }
+  },
+  "neos859080": {
+   "status": "infeasible",
+   "objective": null,
+   "num_vars": 160,
+   "num_cons": 164,
+   "num_nonzeros": 1280,
+   "num_binaries": 80,
+   "num_integers": 160,
+   "highs": {
+    "status": "infeasible",
+    "objective": null,
+    "time": 0.85,
+    "time_limit": 120
+   }
+  },
+  "nexp-150-20-8-5": {
+   "status": "optimal",
+   "objective": 231.0
+  },
+  "ns1208400": {
+   "status": "optimal",
+   "objective": 2.0,
+   "num_vars": 2883,
+   "num_cons": 4289,
+   "num_nonzeros": 81746,
+   "num_binaries": 2880,
+   "num_integers": 2880,
+   "highs": {
+    "status": "optimal",
+    "objective": 2.000000000000062,
+    "time": 52.32,
+    "time_limit": 120
+   }
+  },
+  "ns1830653": {
+   "status": "optimal",
+   "objective": 20622.0
+  },
+  "nu25-pr12": {
+   "status": "optimal",
+   "objective": 53904.99999999999,
+   "num_vars": 5868,
+   "num_cons": 2313,
+   "num_nonzeros": 17712,
+   "num_binaries": 5832,
+   "num_integers": 5868,
+   "highs": {
+    "status": "optimal",
+    "objective": 53905.0,
+    "time": 2.46,
+    "time_limit": 120
+   }
+  },
+  "p200x1188c": {
+   "status": "optimal",
+   "objective": 15078.0,
+   "num_vars": 2376,
+   "num_cons": 1388,
+   "num_nonzeros": 4752,
+   "num_binaries": 1188,
+   "num_integers": 1188,
+   "highs": {
+    "status": "optimal",
+    "objective": 15077.999999999996,
+    "time": 0.39,
+    "time_limit": 120
+   }
+  },
+  "pg": {
+   "status": "optimal",
+   "objective": -8674.34260712,
+   "num_vars": 2700,
+   "num_cons": 125,
+   "num_nonzeros": 5200,
+   "num_binaries": 100,
+   "num_integers": 100,
+   "highs": {
+    "status": "optimal",
+    "objective": -8674.342607117189,
+    "time": 3.22,
+    "time_limit": 120
+   }
+  },
+  "pg5_34": {
+   "status": "optimal",
+   "objective": -14339.35345
+  },
+  "piperout-08": {
+   "status": "optimal",
+   "objective": 125054.9999999999,
+   "num_vars": 10399,
+   "num_cons": 14589,
+   "num_nonzeros": 44959,
+   "num_binaries": 10245,
+   "num_integers": 10375,
+   "highs": {
+    "status": "optimal",
+    "objective": 125055.0,
+    "time": 12.38,
+    "time_limit": 120
+   }
+  },
+  "piperout-27": {
+   "status": "optimal",
+   "objective": 8123.999999999973,
+   "num_vars": 11659,
+   "num_cons": 18442,
+   "num_nonzeros": 54662,
+   "num_binaries": 11514,
+   "num_integers": 11635,
+   "highs": {
+    "status": "optimal",
+    "objective": 8124.0,
+    "time": 18.8,
+    "time_limit": 120
+   }
+  },
+  "pk1": {
+   "status": "optimal",
+   "objective": 11.0
+  },
+  "qap10": {
+   "status": "optimal",
+   "objective": 339.9999999983871,
+   "num_vars": 4150,
+   "num_cons": 1820,
+   "num_nonzeros": 18200,
+   "num_binaries": 4150,
+   "num_integers": 4150,
+   "highs": {
+    "status": "optimal",
+    "objective": 339.9999999999973,
+    "time": 40.33,
+    "time_limit": 120
+   }
+  },
+  "ran14x18-disj-8": {
+   "status": "optimal",
+   "objective": 3712.0
+  },
+  "reblock115": {
+   "status": "optimal",
+   "objective": -36800603.2332
+  },
+  "rmatr100-p10": {
+   "status": "optimal",
+   "objective": 423.0,
+   "num_vars": 7359,
+   "num_cons": 7260,
+   "num_nonzeros": 21877,
+   "num_binaries": 100,
+   "num_integers": 100,
+   "highs": {
+    "status": "optimal",
+    "objective": 422.9999999999975,
+    "time": 57.68,
+    "time_limit": 120
+   }
+  },
+  "rmatr200-p5": {
+   "status": "optimal",
+   "objective": 4521.0
+  },
+  "rocI-4-11": {
+   "status": "optimal",
+   "objective": -6020203.0
+  },
+  "rococoB10-011000": {
+   "status": "optimal",
+   "objective": 19449.0
+  },
+  "rococoC10-001000": {
+   "status": "optimal",
+   "objective": 11460.0
+  },
+  "roll3000": {
+   "status": "optimal",
+   "objective": 12889.999992,
+   "num_vars": 1166,
+   "num_cons": 2295,
+   "num_nonzeros": 29386,
+   "num_binaries": 246,
+   "num_integers": 738,
+   "highs": {
+    "status": "optimal",
+    "objective": 12890.000000000633,
+    "time": 24.9,
+    "time_limit": 120
+   }
+  },
+  "sct2": {
+   "status": "optimal",
+   "objective": -230.9891623
+  },
+  "seymour1": {
+   "status": "optimal",
+   "objective": 410.76370139,
+   "num_vars": 1372,
+   "num_cons": 4944,
+   "num_nonzeros": 33549,
+   "num_binaries": 451,
+   "num_integers": 451,
+   "highs": {
+    "status": "optimal",
+    "objective": 410.7637013945249,
+    "time": 96.9,
+    "time_limit": 120
+   }
+  },
+  "sp150x300d": {
+   "status": "optimal",
+   "objective": 69.0,
+   "num_vars": 600,
+   "num_cons": 450,
+   "num_nonzeros": 1200,
+   "num_binaries": 300,
+   "num_integers": 300,
+   "highs": {
+    "status": "optimal",
+    "objective": 69.0,
+    "time": 0.05,
+    "time_limit": 120
+   }
+  },
+  "supportcase18": {
+   "status": "optimal",
+   "objective": 48.0
+  },
+  "supportcase26": {
+   "status": "optimal",
+   "objective": 1745.123813
+  },
+  "supportcase40": {
+   "status": "optimal",
+   "objective": 24256.3122898
+  },
+  "swath1": {
+   "status": "optimal",
+   "objective": 379.07129575,
+   "num_vars": 6805,
+   "num_cons": 884,
+   "num_nonzeros": 34965,
+   "num_binaries": 2306,
+   "num_integers": 2306,
+   "highs": {
+    "status": "optimal",
+    "objective": 379.07129574999965,
+    "time": 18.15,
+    "time_limit": 120
+   }
+  },
+  "swath3": {
+   "status": "optimal",
+   "objective": 397.76134365,
+   "num_vars": 6805,
+   "num_cons": 884,
+   "num_nonzeros": 34965,
+   "num_binaries": 2706,
+   "num_integers": 2706,
+   "highs": {
+    "status": "optimal",
+    "objective": 397.76134364999996,
+    "time": 100.66,
+    "time_limit": 120
+   }
+  },
+  "timtab1": {
+   "status": "optimal",
+   "objective": 764771.99999978,
+   "num_vars": 397,
+   "num_cons": 171,
+   "num_nonzeros": 829,
+   "num_binaries": 77,
+   "num_integers": 171,
+   "highs": {
+    "status": "optimal",
+    "objective": 764771.9999997799,
+    "time": 51.0,
+    "time_limit": 120
+   }
+  },
+  "tr12-30": {
+   "status": "optimal",
+   "objective": 130595.9999999999
+  },
+  "trento1": {
+   "status": "optimal",
+   "objective": 5189487.0
+  },
+  "uct-subprob": {
+   "status": "optimal",
+   "objective": 314.0
+  },
+  "unitcal_7": {
+   "status": "optimal",
+   "objective": 19635558.244
+  },
+  "wachplan": {
+   "status": "optimal",
+   "objective": -8.0
+  }
+ },
+ "highs_note": "HiGHS 1.15 single-thread, rel/abs gap 1e-9, Apple M-series, 3-6 concurrent solves; time_limit is the limit used in the selection run",
+ "sets": {
+  "subset": [
+   "air05",
+   "app1-1",
+   "beasleyC3",
+   "binkar10_1",
+   "cbs-cta",
+   "cod105",
+   "dano3_3",
+   "decomp2",
+   "drayage-100-23",
+   "drayage-25-23",
+   "eil33-2",
+   "enlight_hard",
+   "exp-1-500-5-5",
+   "fiball",
+   "h80x6320d",
+   "irp",
+   "mas76",
+   "mc11",
+   "mik-250-20-75-4",
+   "mzzv11",
+   "n5-3",
+   "neos-1171448",
+   "neos-1445765",
+   "neos-1582420",
+   "neos-2978193-inde",
+   "neos-3083819-nubu",
+   "neos-3381206-awhea",
+   "neos-3627168-kasai",
+   "neos-827175",
+   "neos-911970",
+   "neos-950242",
+   "neos17",
+   "neos5",
+   "neos859080",
+   "ns1208400",
+   "nu25-pr12",
+   "p200x1188c",
+   "pg",
+   "piperout-08",
+   "piperout-27",
+   "qap10",
+   "rmatr100-p10",
+   "roll3000",
+   "seymour1",
+   "sp150x300d",
+   "swath1",
+   "swath3",
+   "timtab1"
+  ],
+  "wide": [
+   "30n20b8",
+   "50v-10",
+   "air05",
+   "app1-1",
+   "app1-2",
+   "beasleyC3",
+   "binkar10_1",
+   "blp-ic98",
+   "bppc4-08",
+   "cbs-cta",
+   "chromaticindex512-7",
+   "CMS750_4",
+   "cod105",
+   "cost266-UUE",
+   "csched007",
+   "csched008",
+   "dano3_3",
+   "dano3_5",
+   "decomp2",
+   "drayage-100-23",
+   "drayage-25-23",
+   "eil33-2",
+   "enlight_hard",
+   "exp-1-500-5-5",
+   "fhnw-binpack4-48",
+   "fiball",
+   "gen-ip054",
+   "germanrr",
+   "glass4",
+   "gmu-35-40",
+   "gmu-35-50",
+   "graphdraw-domain",
+   "h80x6320d",
+   "ic97_potential",
+   "icir97_tension",
+   "irp",
+   "leo1",
+   "lotsize",
+   "mas74",
+   "mas76",
+   "mc11",
+   "mcsched",
+   "mik-250-20-75-4",
+   "milo-v12-6-r2-40-1",
+   "mzzv11",
+   "mzzv42z",
+   "n2seq36q",
+   "n5-3",
+   "neos-1122047",
+   "neos-1171448",
+   "neos-1171737",
+   "neos-1445765",
+   "neos-1456979",
+   "neos-1582420",
+   "neos-2978193-inde",
+   "neos-3004026-krka",
+   "neos-3083819-nubu",
+   "neos-3216931-puriri",
+   "neos-3381206-awhea",
+   "neos-3627168-kasai",
+   "neos-4338804-snowy",
+   "neos-4387871-tavua",
+   "neos-4738912-atrato",
+   "neos-4954672-berkel",
+   "neos-5107597-kakapo",
+   "neos-827175",
+   "neos-911970",
+   "neos-933966",
+   "neos-950242",
+   "neos-960392",
+   "neos17",
+   "neos5",
+   "neos859080",
+   "nexp-150-20-8-5",
+   "ns1208400",
+   "ns1830653",
+   "nu25-pr12",
+   "p200x1188c",
+   "pg",
+   "pg5_34",
+   "piperout-08",
+   "piperout-27",
+   "pk1",
+   "qap10",
+   "ran14x18-disj-8",
+   "reblock115",
+   "rmatr100-p10",
+   "rmatr200-p5",
+   "rocI-4-11",
+   "rococoB10-011000",
+   "rococoC10-001000",
+   "roll3000",
+   "sct2",
+   "seymour1",
+   "sp150x300d",
+   "supportcase18",
+   "supportcase26",
+   "supportcase40",
+   "swath1",
+   "swath3",
+   "timtab1",
+   "tr12-30",
+   "trento1",
+   "uct-subprob",
+   "unitcal_7",
+   "wachplan"
+  ]
+ }
+}

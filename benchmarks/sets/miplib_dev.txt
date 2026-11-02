@@ -1,0 +1,12 @@
+benchmarks/miplib/eil33-2.mps
+benchmarks/miplib/enlight_hard.mps
+benchmarks/miplib/h80x6320d.mps
+benchmarks/miplib/mas76.mps
+benchmarks/miplib/neos-2978193-inde.mps
+benchmarks/miplib/neos5.mps
+benchmarks/miplib/piperout-08.mps
+benchmarks/miplib/rmatr100-p10.mps
+benchmarks/miplib/seymour1.mps
+benchmarks/miplib/swath3.mps
+benchmarks/miplib/roll3000.mps
+benchmarks/miplib/mc11.mps
