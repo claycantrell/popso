@@ -471,7 +471,7 @@ def main(argv=None):
     print(f"instances {n}  solved {solved}  unsolved {by.get(UNSOLVED, 0)}  memlimit {by.get(MEMLIMIT, 0)}  "
           f"errors {by.get(ERROR, 0)}  "
           f"WRONG {len(wrong)}")
-    print(f"shifted geometric mean time (shift 1s, unsolved = {tl:g}s): ours {summary['sgm_time']:.3f}s", end="")
+    print(f"shifted geometric mean time (shift 1s, unsolved = {tl:g}s): popso {summary['sgm_time']:.3f}s", end="")
     for key in REF_SOLVERS:
         if f"ref_{key}_sgm_time" in summary:
             print(f" | {key} {summary[f'ref_{key}_sgm_time']:.3f}s "
@@ -480,7 +480,7 @@ def main(argv=None):
     for key in REF_SOLVERS:
         if f"ref_{key}_sgm_time" in summary and summary[f"ref_{key}_instances"] != n:
             print(f"  (on the {summary[f'ref_{key}_instances']} instances with {key} times: "
-                  f"ours {summary[f'ours_sgm_time_on_{key}_set']:.3f}s)")
+                  f"popso {summary[f'ours_sgm_time_on_{key}_set']:.3f}s)")
     print("  note: reference times are from reference/solutions.json (measured separately, "
           "possibly on another machine / with a longer time limit)")
 

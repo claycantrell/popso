@@ -16,31 +16,31 @@ _Last updated 2026-11-02, for popso v0.1.0 (measured on its pre-release developm
     time limit, and the answer passed the independent check.
   - **Shifted geometric mean** of the run times uses a shift of 1 s; an unsolved instance
     counts as 120 s. Lower is better.
-- Gap tolerance: we run at a relative gap of 1e-6; the reference solvers run at 1e-9.
+- Gap tolerance: popso runs at a relative gap of 1e-6; the reference solvers run at 1e-9.
 - Caveats:
-  - Our MIPLIB numbers come from a single seed.
+  - The popso MIPLIB numbers come from a single seed.
   - The reference times were measured separately, partly while other jobs were running.
   - Read small differences as noise.
 
 ## MIPLIB 2017 subset
 
 63 instances from [MIPLIB 2017](https://miplib.zib.de), listed in
-[`benchmarks/sets/miplib_wide_core.txt`](benchmarks/sets/miplib_wide_core.txt). Ours and
+[`benchmarks/sets/miplib_wide_core.txt`](benchmarks/sets/miplib_wide_core.txt). popso and
 HiGHS use 4 threads; SCIP's branch-and-bound is single-threaded.
 
 ![MIPLIB: instances solved vs. time](docs/miplib_core.svg)
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| ours | 59/63 | 13.2 |
+| popso | 59/63 | 13.2 |
 | HiGHS | 53/63 | 18.9 |
 | SCIP | 50/63 | 21.3 |
 
-We are fastest on 29 of the 63 instances.
+popso is fastest on 29 of the 63 instances.
 
 <details><summary>Per instance (seconds; TL = time limit; bold = fastest)</summary>
 
-| instance | ours | HiGHS | SCIP |
+| instance | popso | HiGHS | SCIP |
 |---|---|---|---|
 | 30n20b8 | TL | TL | **116.6** |
 | CMS750_4 | 116.6 | TL | **77.0** |
@@ -128,13 +128,13 @@ All solvers use 1 thread.
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| ours | 116/118 | 1.0 |
+| popso | 116/118 | 1.0 |
 | HiGHS | 113/118 | 1.5 |
 | SCIP | 111/118 | 1.7 |
 
 <details><summary>Per instance (seconds; TL = time limit; bold = fastest)</summary>
 
-| instance | ours | HiGHS | SCIP |
+| instance | popso | HiGHS | SCIP |
 |---|---|---|---|
 | binpack_hard_1 | TL | 26.8 | **3.1** |
 | binpack_large_1 | 0.4 | **0.1** | 0.3 |
@@ -265,7 +265,7 @@ python3 -m venv .venv && .venv/bin/pip install -r benchmarks/requirements.txt
 .venv/bin/python benchmarks/run.py --solver build/popso --set miplib_wide_core -t 120 --threads 4 --mem-limit 2048
 .venv/bin/python benchmarks/run.py --solver build/popso -t 120 --threads 1 --mem-limit 2048
 # tables and plots from a result file
-.venv/bin/python benchmarks/tools/readme_table.py benchmarks/results/<run>.json --solvers ours,highs,scip
+.venv/bin/python benchmarks/tools/readme_table.py benchmarks/results/<run>.json --solvers popso,highs,scip
 .venv/bin/python benchmarks/tools/plot_profile.py benchmarks/results/<run>.json --title "..." --out docs/<name>.svg
 ```
 

@@ -16,7 +16,7 @@ instances, and is faster overall, than the open-source solvers HiGHS and SCIP:
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| ours | 59/63 | 13.2 |
+| popso | 59/63 | 13.2 |
 | HiGHS 1.15 | 53/63 | 18.9 |
 | SCIP 10 | 50/63 | 21.3 |
 

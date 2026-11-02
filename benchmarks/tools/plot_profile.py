@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SVG plot "instances solved vs. time" (ours vs. the reference solvers).
+"""SVG plot "instances solved vs. time" (popso vs. the reference solvers).
 
 One step line per solver: y = number of instances solved within t seconds,
 x = t on a log scale.  Higher and further left is better; the right end of a
@@ -26,7 +26,7 @@ sys.path.insert(0, str(BENCH))
 from run import load_references  # noqa: E402
 
 SOLVED = ("optimal", "infeasible", "unbounded", "inf_or_unbd")
-NAMES = {"ours": "ours", "highs": "HiGHS", "scip": "SCIP"}
+NAMES = {"ours": "popso", "highs": "HiGHS", "scip": "SCIP"}
 # categorical slots 1-3 (validated light / dark), fixed per solver
 COLORS = {"ours": ("#2a78d6", "#3987e5"), "highs": ("#eb6834", "#d95926"), "scip": ("#1baf7a", "#199e70")}
 
@@ -126,12 +126,12 @@ def main(argv=None):
     ap.add_argument("--title", required=True)
     ap.add_argument("--subtitle", default="")
     ap.add_argument("--time-limit", type=float, default=120.0)
-    ap.add_argument("--solvers", default="ours,highs,scip")
+    ap.add_argument("--solvers", default="popso,highs,scip")
     ap.add_argument("--reference", default=str(BENCH / "reference" / "solutions.json"))
     ap.add_argument("--miplib-solu", default=str(BENCH / "reference" / "miplib_solu.json"))
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
-    solvers = [s.strip() for s in args.solvers.split(",") if s.strip()]
+    solvers = ["ours" if s.strip() == "popso" else s.strip() for s in args.solvers.split(",") if s.strip()]
     refs = load_references(args.reference, args.miplib_solu)
     times, n = solve_times(args.result, solvers, refs)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

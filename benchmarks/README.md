@@ -36,7 +36,7 @@ expressions, constraints, MPS writer; only numpy is needed), and the
 reference solves use HiGHS and SCIP.
 
 **README tables.** `tools/readme_table.py <run.json>` prints the summary and
-per-instance comparison tables (ours vs HiGHS / SCIP) used in the
+per-instance comparison tables (popso vs HiGHS / SCIP) used in the
 top-level README.
 
 ## Memory and parallelism (shared machine!)
@@ -204,7 +204,7 @@ candidates and 8 instances with 150k-200k nonzeros.  HiGHS (4 threads) and
 SCIP (single-threaded; it has no parallel B&B) reference runs with 120 s are in
 `reference/solutions.json` (entries carry `ref_runs` with limits/threads;
 `meta.updates` lists the partial runs).  At 120 s only 62 of the 106 are
-solved by any of HiGHS / SCIP / ours; `sets/miplib_wide_core.txt` (63) is
+solved by any of HiGHS / SCIP / popso; `sets/miplib_wide_core.txt` (63) is
 those plus binkar10_1, the useful subset for 120 s A/B runs.
 
 `run.py --set NAME` (repeatable; a file or a name in `sets/`) runs a list

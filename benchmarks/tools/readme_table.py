@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Markdown comparison tables (ours vs reference solvers) for README.md.
+"""Markdown comparison tables (popso vs reference solvers) for README.md.
 
 Reads one run.py result file (our times; any class other than ok/noref counts
 as unsolved) and the reference times from reference/solutions.json +
@@ -21,7 +21,7 @@ sys.path.insert(0, str(BENCH))
 from run import load_references, sgm  # noqa: E402
 
 SOLVED = ("optimal", "infeasible", "unbounded", "inf_or_unbd")
-NAMES = {"ours": "ours", "highs": "HiGHS", "scip": "SCIP"}
+NAMES = {"ours": "popso", "highs": "HiGHS", "scip": "SCIP"}
 
 
 def main(argv=None):
@@ -29,7 +29,7 @@ def main(argv=None):
     ap.add_argument("result", help="run.py result .json")
     ap.add_argument("--reference", default=str(BENCH / "reference" / "solutions.json"))
     ap.add_argument("--miplib-solu", default=str(BENCH / "reference" / "miplib_solu.json"))
-    ap.add_argument("--solvers", default="ours,highs,scip")
+    ap.add_argument("--solvers", default="popso,highs,scip")
     ap.add_argument("--no-instances", action="store_true", help="summary table only")
     args = ap.parse_args(argv)
 
@@ -38,7 +38,7 @@ def main(argv=None):
     tl = (d.get("meta", {}).get("time_limit") if isinstance(d, dict) else None) or \
         (d.get("summary", {}).get("time_limit") if isinstance(d, dict) else None) or 120.0
     refs = load_references(args.reference, args.miplib_solu)
-    solvers = [s.strip() for s in args.solvers.split(",") if s.strip()]
+    solvers = ["ours" if s.strip() == "popso" else s.strip() for s in args.solvers.split(",") if s.strip()]
 
     table = {}  # instance -> solver -> effective time (tl = unsolved), or None if not run
     for r in recs:
