@@ -338,6 +338,14 @@ static void test_quadratic(void) {
   CHECK_OK(popso_add_var(m, -10.0, 10.0, -2.0, POPSO_CONTINUOUS, "x", &x));
   CHECK_OK(popso_add_var(m, -10.0, 10.0, -4.0, POPSO_CONTINUOUS, "y", &y));
   {
+    /* Invalid entries are rejected before anything is solved. */
+    const int bad0 = 7, ok0 = 0;
+    const double v0 = 1.0;
+    CHECK(popso_add_q_entries(m, 1, &bad0, &ok0, &v0) == POPSO_ERROR_INVALID_ARGUMENT);
+    CHECK(popso_set_q(m, 1, &ok0, &bad0, &v0) == POPSO_ERROR_INVALID_ARGUMENT);
+    CHECK(popso_num_q_nonzeros(m) == 0);
+  }
+  {
     /* x^2 + y^2 + x y: Q_xx = 2, Q_yy = 2, Q_xy = 1 (upper triangle given: stored lower). */
     const int rows[3] = {0, 1, 0}, cols[3] = {0, 1, 1};
     const double vals[3] = {2.0, 1.0, 1.0};

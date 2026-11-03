@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.1 — 2026-11
+
+**Fixes**
+- Windows (MSVC): C API calls that reject their arguments deep inside the library (for example
+  `popso_add_q_entries` with an out-of-range variable index) aborted the process instead of
+  returning `POPSO_ERROR_INVALID_ARGUMENT`. The shared library is now compiled with `/EHs`
+  instead of MSVC's default `/EHsc`, which assumes that `extern "C"` functions never throw.
+
 ## v0.4.0 — 2026-11
 
 New problem classes: convex quadratic programs (QP) and mixed-integer convex quadratic programs

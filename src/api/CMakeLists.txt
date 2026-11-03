@@ -6,6 +6,12 @@ target_include_directories(popso_shared PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(popso_shared PRIVATE milp_lib)
 target_compile_definitions(popso_shared PRIVATE POPSO_BUILDING_LIBRARY POPSO_VERSION="${PROJECT_VERSION}")
 target_compile_options(popso_shared PRIVATE ${MILP_WARNINGS})
+if(MSVC)
+  # The C API translates C++ exceptions into error codes inside its extern "C" functions. MSVC's
+  # default /EHsc assumes extern "C" functions never throw, which can turn such a throw into a
+  # fast-fail abort (0xc0000409); /EHc- keeps /EHs only.
+  target_compile_options(popso_shared PRIVATE /EHc-)
+endif()
 # libpopso.so / libpopso.dylib / popso.dll next to the popso executable; only the C API is exported.
 set_target_properties(popso_shared PROPERTIES
   OUTPUT_NAME popso
