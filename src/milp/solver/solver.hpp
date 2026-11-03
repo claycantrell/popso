@@ -21,6 +21,7 @@ enum class Status {
   IterationLimit,
   Interrupted,
   NumericalError,
+  NonConvex,  // the quadratic objective is not convex (minimization) / concave (maximization)
 };
 
 const char* to_string(Status s);
@@ -42,6 +43,8 @@ struct SolverParams {
   int racing = 1;             // concurrent differently-seeded searches sharing incumbents (opportunistic mode)
   bool deterministic = false;  // reproducible parallel search (same seed + threads -> same result); slower
   bool presolve = true;
+  // Symmetry handling: detection, symmetry-breaking rows, orbitopal fixing, orbital branching.
+  bool symmetry = true;
   LpMethod lp_method = LpMethod::Auto;
   // Logical constraints (semi-continuous, SOS, indicators): largest big-M coefficient of their
   // reformulation; beyond it (or without finite bounds) they are enforced by branching. 0: always branching.
@@ -54,6 +57,7 @@ struct SolveStats {
   long long nodes = 0;
   long long lp_iterations = 0;
   double root_bound = -kInf;
+  long long barrier_iterations = 0;  // interior-point iterations (QP and MIQP relaxations)
 };
 
 struct SolveResult {
@@ -62,9 +66,20 @@ struct SolveResult {
   double objective = kInf;   // in the model's original sense
   double bound = -kInf;      // best dual bound, original sense
   std::vector<double> x;     // primal solution (if has_solution)
+  // Duals (continuous QPs solved to optimality; empty otherwise): row duals y and reduced costs
+  // d = grad f(x) - A^T y with f the model's objective (c + Q x). Minimization: y_i >= 0 at an
+  // active row lower bound, <= 0 at an upper one, d_j >= 0 at a column lower bound, <= 0 at an
+  // upper one, 0 in between; maximization: the opposite signs.
+  std::vector<double> row_dual;
+  std::vector<double> reduced_cost;
+  bool has_duals = false;  // row_dual and reduced_cost are set (the model may have no rows)
   SolveStats stats;
 };
 
+// Models with a quadratic objective (Model::q_*) are presolved by qp/qp_presolve.hpp and solved as
+// convex QPs by the barrier method (no basis: x, the objective and the duals; see qp/qp.hpp) or,
+// with integer columns, by the MIQP branch-and-bound of qp/miqp.hpp. A nonconvex objective gives
+// Status::NonConvex.
 SolveResult solve(const Model& model, const SolverParams& params);
 
 // Solves with a starting solution: one value per model column, NaN = not given

@@ -1,7 +1,9 @@
 #pragma once
 // Interior-point (barrier) solver for
 //
-//   min c^T x   s.t.  row_lb <= A x <= row_ub,  col_lb <= x <= col_ub
+//   min c^T x + 1/2 x^T Q x   s.t.  row_lb <= A x <= row_ub,  col_lb <= x <= col_ub
+//
+// (Q = 0: an LP; else a convex QP, Q positive semidefinite).
 //
 // Mehrotra's predictor-corrector primal-dual method with Gondzio's multiple centrality
 // correctors. The problem is brought to the form A' x' = b, l <= x' <= u (fixed columns are
@@ -16,13 +18,17 @@
 //   [   A              delta I   ] [dy] = [r2]
 //
 // with H = X_l^-1 Z_l + X_u^-1 Z_u diagonal. For LP (Q = 0) it is reduced to the normal
-// equations (A Theta A^T + delta I) dy = r2 + A Theta r1, Theta = (H + rho I)^-1, factored by the
+// equations (A Theta A^T + delta I) dy = r2 + A Theta r1, Theta = (H + rho I)^-1 (plus Q's
+// diagonal when Q is diagonal), factored by the
 // supernodal sparse Cholesky (cholesky.hpp, AMD ordering). Dense columns of A are left out of the
 // factorization (only their diagonal enters it) and handled by preconditioned conjugate
 // gradients on the full matrix, which also refines every solve. The KktSolver class in
-// barrier.cpp is the only place that knows about the reduction: a convex QP needs Q in the
-// (1,1) block, i.e. a quasi-definite augmented-system factorization behind the same interface
-// (or normal equations when Q is diagonal).
+// barrier.cpp is the only place that knows about the reduction: a QP with off-diagonal Hessian
+// entries always uses the quasi-definite augmented system with Q in the (1,1) block, a diagonal
+// Hessian either form. The QP iteration is the LP one with the dual residual
+// c + Q x - A^T y - z_l + z_u and the objectives c^T x + 1/2 x^T Q x (primal) and
+// b^T y + l^T z_l - u^T z_u - 1/2 x^T Q x (dual). Convexity is the caller's responsibility
+// (see qp.hpp): an indefinite Q makes the (1,1) pivots change sign and the method fail.
 //
 // Infeasibility: the method is an infeasible-start IPM. Diverging iterates (dual or primal
 // values growing without bound while the residuals stall) are reported as suspected primal or
@@ -52,18 +58,22 @@ struct IpmOptions {
   const std::atomic<bool>* stop = nullptr;  // stops the method (status TimeLimit) once set
   // The log shows log_sense * (objective + log_offset) (the user's objective of a presolved problem).
   double log_offset = 0.0, log_sense = 1.0;
+  // The relative duality gap is |pobj - dobj| / (1 + |objective|) with the objective including
+  // this constant (and the fixed columns' part) when gap_with_offset is set: a QP whose objective
+  // is a small difference of large terms is then solved to an absolute accuracy that matches it.
+  bool gap_with_offset = false;
 };
 
 struct IpmResult {
   IpmStatus status = IpmStatus::NumericalError;
   int iterations = 0;
-  double objective = 0.0;  // c^T x of the returned point
+  double objective = 0.0;  // c^T x (+ 1/2 x^T Q x) of the returned point
   // Of the returned point in the original problem: max violation of rows and bounds, max dual
   // infeasibility (reduced costs of the wrong sign), relative duality gap.
   double primal_infeas = kInf, dual_infeas = kInf, rel_gap = kInf;
   std::vector<double> x;  // per column
   std::vector<double> y;  // row duals, d = c - A^T y
-  std::vector<double> d;  // reduced costs per column
+  std::vector<double> d;  // reduced costs per column, d = c + Q x - A^T y
   double time = 0.0;
   double analysis_time = 0.0;  // orderings and symbolic factorizations
   double factor_time = 0.0;    // numerical factorizations
@@ -75,9 +85,10 @@ struct IpmResult {
   bool approximate = false;
 };
 
-// A is CSC with cost.size() columns and row_lb.size() rows.
+// A is CSC with cost.size() columns and row_lb.size() rows. Q (may be null): the lower triangle
+// (row >= column) of a positive semidefinite Hessian, CSC, cost.size() x cost.size().
 IpmResult ipm_solve(const SparseMatrix& A, const std::vector<double>& cost, const std::vector<double>& col_lb,
                     const std::vector<double>& col_ub, const std::vector<double>& row_lb,
-                    const std::vector<double>& row_ub, const IpmOptions& opt);
+                    const std::vector<double>& row_ub, const IpmOptions& opt, const SparseMatrix* Q = nullptr);
 
 }  // namespace milp

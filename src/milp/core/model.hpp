@@ -1,11 +1,18 @@
 #pragma once
-// The user-facing MILP model:
+// The user-facing MILP / (MI)QP model:
 //
-//   min/max  c^T x + offset
+//   min/max  c^T x + 1/2 x^T Q x + offset
 //   s.t.     row_lb <= A x <= row_ub
 //            col_lb <=   x <= col_ub
 //            x_j integer for j in integer columns
 //            logical constraints (below)
+//
+// Q is symmetric and stored as its lower triangle (q_row >= q_col) in triplet
+// form; duplicate entries are summed (q_lower() assembles the matrix). An
+// off-diagonal entry (i, j) stands for both Q_ij and Q_ji, so it contributes
+// Q_ij x_i x_j to the objective, a diagonal entry 1/2 Q_jj x_j^2. The solver
+// requires a convex objective (Q positive semidefinite when minimizing,
+// negative semidefinite when maximizing).
 //
 // Rows are ranged; equality rows have row_lb == row_ub, free rows (other
 // than the objective) are allowed. The constraint matrix is stored by column
@@ -63,6 +70,10 @@ struct Model {
 
   SparseMatrix A;  // CSC, num_major = num_cols, num_minor = num_rows
 
+  // Quadratic objective (lower triangle triplets, see above). Empty: a linear objective.
+  std::vector<Index> q_row, q_col;
+  std::vector<double> q_val;
+
   // Logical constraints.
   std::vector<SosConstraint> sos;
   std::vector<IndicatorConstraint> indicators;
@@ -75,8 +86,14 @@ struct Model {
   // Semi-continuous / semi-integer columns, SOS sets or indicator constraints present.
   bool has_logical() const { return !sos.empty() || !indicators.empty() || num_semi() > 0; }
   bool is_mip() const { return num_integers() > 0 || has_logical(); }
+  bool has_quadratic() const;  // some nonzero Q entry
 
-  // Objective value of x in the original sense (including offset).
+  // Adds v to Q_ij (and Q_ji): stored at the lower triangle position.
+  void add_q(Index i, Index j, double v);
+  // Q's lower triangle as a CSC num_cols x num_cols matrix (duplicates summed, zeros dropped).
+  SparseMatrix q_lower() const;
+
+  // Objective value of x in the original sense (including offset and the quadratic term).
   double objective_value(const std::vector<double>& x) const;
 
   // Maximum absolute violation of bounds, rows, integrality and logical

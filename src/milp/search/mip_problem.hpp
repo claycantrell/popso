@@ -27,6 +27,11 @@ struct MipProblem {
   double offset = 0.0;  // added to cost^T x
   double display_sense = 1.0;  // -1 if the user model maximizes (for logging only)
   std::vector<Implication> implications;  // usually empty; presolve and symmetry handling are off otherwise
+  // Quadratic objective 1/2 x^T Q x (lower triangle, CSC; sign-adjusted for minimization). Empty
+  // (no entries) for a MILP; branch_and_bound() and presolve only handle that case (MIQPs are
+  // solved by miqp_solve, see qp/miqp.hpp).
+  SparseMatrix Q;
+  bool quadratic() const { return Q.nnz() > 0; }
 
   Index num_cols() const { return static_cast<Index>(cost.size()); }
   Index num_rows() const { return static_cast<Index>(row_lb.size()); }
@@ -34,7 +39,7 @@ struct MipProblem {
   // Build from a user model; returns false if integer bounds are inconsistent.
   static bool from_model(const Model& m, MipProblem* out);
 
-  double objective(const std::vector<double>& x) const;
+  double objective(const std::vector<double>& x) const;  // offset + c^T x (+ 1/2 x^T Q x)
   // Max violation of bounds, rows, integrality and implications (|x[col]| where x[z] rounds to zval).
   double max_violation(const std::vector<double>& x, double* int_viol = nullptr) const;
   // Fixes col at 0 in [lb, ub] for every implication whose z is fixed at zval there, and z at the

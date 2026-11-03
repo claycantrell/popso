@@ -118,6 +118,9 @@ LogicalReformulation reformulate_logical(const Model& in, double max_big_m) {
   m.obj_offset = in.obj_offset;
   m.col_names = in.col_names;
   m.obj = in.obj;
+  m.q_row = in.q_row;  // the quadratic objective only involves original columns
+  m.q_col = in.q_col;
+  m.q_val = in.q_val;
   m.col_lb = in.col_lb;
   m.col_ub = in.col_ub;
   m.col_type = in.col_type;

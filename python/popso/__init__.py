@@ -1,4 +1,4 @@
-"""popso: Python bindings (ctypes) for the popso LP/MILP solver.
+"""popso: Python bindings (ctypes) for the popso LP/MILP/QP/MIQP solver.
 
     import popso
     m = popso.Model("example")
@@ -33,6 +33,7 @@ from .model import (
     Model,
     Params,
     PopsoError,
+    QuadExpr,
     Result,
     Var,
     read_lp,
@@ -44,6 +45,6 @@ __version__ = version()
 
 __all__ = [
     "BINARY", "CONTINUOUS", "INF", "INTEGER", "MAXIMIZE", "MINIMIZE", "PARAMS", "SEMICONTINUOUS", "SEMIINTEGER",
-    "SOS1", "SOS2", "Constr", "Constraint", "LinExpr", "Model", "Params", "PopsoError", "Result", "Var",
+    "SOS1", "SOS2", "Constr", "Constraint", "LinExpr", "Model", "Params", "PopsoError", "QuadExpr", "Result", "Var",
     "library_path", "read_lp", "read_mps", "version",
 ]

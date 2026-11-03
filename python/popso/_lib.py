@@ -92,6 +92,10 @@ _PROTOTYPES = {
     "popso_set_objective_constant": (_c_int, [_vp, _c_double]),
     "popso_set_obj_coef": (_c_int, [_vp, _c_int, _c_double]),
     "popso_set_objective": (_c_int, [_vp, _c_int, _pi, _pd]),
+    "popso_set_q": (_c_int, [_vp, _c_int, _pi, _pi, _pd]),
+    "popso_add_q_entries": (_c_int, [_vp, _c_int, _pi, _pi, _pd]),
+    "popso_num_q_nonzeros": (_c_int, [_vp]),
+    "popso_get_q": (_c_int, [_vp, _c_int, _pi, _pi, _pd]),
     "popso_num_vars": (_c_int, [_vp]),
     "popso_num_rows": (_c_int, [_vp]),
     "popso_num_nonzeros": (_c_ll, [_vp]),
@@ -118,6 +122,9 @@ _PROTOTYPES = {
     "popso_get_solve_time": (_c_int, [_vp, _pd]),
     "popso_get_solution": (_c_int, [_vp, _pd, _c_int]),
     "popso_write_solution": (_c_int, [_vp, _c_char_p]),
+    "popso_has_duals": (_c_int, [_vp]),
+    "popso_get_duals": (_c_int, [_vp, _pd, _c_int]),
+    "popso_get_reduced_costs": (_c_int, [_vp, _pd, _c_int]),
 }
 
 for _name, (_res, _args) in _PROTOTYPES.items():

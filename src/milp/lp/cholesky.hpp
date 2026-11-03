@@ -48,6 +48,9 @@ class SparseCholesky {
   long long factor_nnz() const { return factor_nnz_; }  // nonzeros of L (incl. diagonal)
   double flops() const { return flops_; }              // multiply-adds of one factorization
   Index num_dropped() const { return dropped_; }
+  // Dropped pivots of the wrong sign (negative for a +1 column): the matrix is not positive
+  // (quasi-)definite. A convexity test factors Q + small * I and checks for these.
+  Index num_wrong_sign() const { return wrong_sign_; }
   Index num_supernodes() const { return static_cast<Index>(sn_first_.size()) - 1; }
   const std::vector<Index>& perm() const { return perm_; }
 
@@ -97,6 +100,7 @@ class SparseCholesky {
   long long factor_nnz_ = 0;
   double flops_ = 0.0;
   Index dropped_ = 0;
+  Index wrong_sign_ = 0;
   Index nnz_in_ = 0;
   bool too_large_ = false;
 };

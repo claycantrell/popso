@@ -23,6 +23,19 @@ std::string format_solution(const Model& model, const SolveResult& result);
 // Throws std::runtime_error on I/O failure.
 void write_solution(const std::string& path, const Model& model, const SolveResult& result);
 
+// Dual values (SolveResult::row_dual / reduced_cost; continuous QPs) as text:
+//
+//   # Duals for model <name>
+//   # Status = OPTIMAL
+//   row <rowname> <dual>
+//   ...
+//   col <varname> <reduced cost>
+//   ...
+//
+// Without duals only the comment lines (and "# No dual values") are written.
+std::string format_duals(const Model& model, const SolveResult& result);
+void write_duals(const std::string& path, const Model& model, const SolveResult& result);
+
 // Reads "<name> <value>" lines (lines starting with '#' and blank lines are
 // skipped) and maps them onto the model's columns. Columns not mentioned in
 // the file are NaN (partial solutions are allowed, e.g. for warm starts).

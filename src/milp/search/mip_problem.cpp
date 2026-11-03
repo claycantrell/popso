@@ -18,6 +18,10 @@ bool MipProblem::from_model(const Model& m, MipProblem* out) {
   p.row_lb = m.row_lb;
   p.row_ub = m.row_ub;
   p.is_int.assign(m.num_cols(), 0);
+  if (m.has_quadratic()) {
+    p.Q = m.q_lower();
+    for (double& v : p.Q.value) v *= sense;
+  }
   bool ok = true;
   for (Index j = 0; j < m.num_cols(); ++j) {
     if (!is_integral_type(m.col_type[j])) continue;
@@ -34,6 +38,8 @@ bool MipProblem::from_model(const Model& m, MipProblem* out) {
 double MipProblem::objective(const std::vector<double>& x) const {
   double v = offset;
   for (Index j = 0; j < num_cols(); ++j) v += cost[j] * x[j];
+  for (Index j = 0; j < Q.num_major; ++j)
+    for (Index k = Q.begin(j); k < Q.end(j); ++k) v += (Q.index[k] == j ? 0.5 : 1.0) * Q.value[k] * x[Q.index[k]] * x[j];
   return v;
 }
 

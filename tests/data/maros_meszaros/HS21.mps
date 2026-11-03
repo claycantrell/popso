@@ -1,0 +1,21 @@
+NAME HS21
+ROWS
+ N  OBJ
+ G  R0
+COLUMNS
+    C0  OBJ  0.0
+    C0  R0  10.0
+    C1  OBJ  0.0
+    C1  R0  -1.0
+RHS
+    RHS  OBJ  100.0
+    RHS  R0  10.0
+BOUNDS
+ LO BND  C0  2.0
+ UP BND  C0  50.0
+ LO BND  C1  -50.0
+ UP BND  C1  50.0
+QUADOBJ
+    C0  C0  0.02
+    C1  C1  2.0
+ENDATA

@@ -53,7 +53,7 @@ double to_inf(double v) {
   return v;
 }
 
-enum class T : uint8_t { Name, Number, Le, Ge, Eq, Plus, Minus, Colon, Arrow, Eof };
+enum class T : uint8_t { Name, Number, Le, Ge, Eq, Plus, Minus, Colon, Arrow, LBracket, RBracket, Caret, Star, Slash, Eof };
 
 struct Token {
   T type;
@@ -114,7 +114,10 @@ class LpParser {
   void parse_objective();
   // Parses a linear expression; stops at an operator, a label, a keyword or
   // the end. Returns the number of terms; `nvars` counts variable terms.
-  int parse_expr(double& constant, int& nvars);
+  // quad: a quadratic part "[ ... ] [/ 2]" is allowed (objective).
+  int parse_expr(double& constant, int& nvars, bool quad = false);
+  // "[ a x ^ 2 + b x * y ... ] [/ d]" after its sign; adds sign / d times the terms to Q.
+  void parse_quadratic(double sign);
   double parse_signed_number(const char* what);
   void parse_constraint();
   void parse_bound();
@@ -152,6 +155,10 @@ class LpParser {
   std::vector<Index> trip_col_, trip_row_;
   std::vector<double> trip_val_;
 
+  // Quadratic objective (lower triangle triplets, see Model).
+  std::vector<Index> q_row_, q_col_;
+  std::vector<double> q_val_;
+
   // Current expression terms (column, coefficient), in order of appearance.
   std::vector<std::pair<Index, double>> terms_;
   std::vector<double> acc_;     // dense accumulator indexed by column
@@ -169,6 +176,11 @@ std::string LpParser::describe(const Token& t) {
     case T::Minus: return "'-'";
     case T::Colon: return "':'";
     case T::Arrow: return "'->'";
+    case T::LBracket: return "'['";
+    case T::RBracket: return "']'";
+    case T::Caret: return "'^'";
+    case T::Star: return "'*'";
+    case T::Slash: return "'/'";
     case T::Eof: return "end of file";
   }
   return "?";
@@ -213,7 +225,12 @@ void LpParser::tokenize() {
     Token t{T::Eof, line_start, line, {}, 0.0};
     line_start = false;
     const char* s = p;
-    if (is_digit(c) || (c == '.' && p + 1 < end && is_digit(p[1]))) {
+    if (c == '/' && !toks_.empty() && toks_.back().type == T::RBracket) {
+      // "[ ... ] / 2": the divisor of a quadratic objective part ('/' also starts names).
+      ++p;
+      t.type = T::Slash;
+      t.text = string_view(s, 1);
+    } else if (is_digit(c) || (c == '.' && p + 1 < end && is_digit(p[1]))) {
       while (p < end && is_digit(*p)) ++p;
       if (p < end && *p == '.') {
         ++p;
@@ -284,11 +301,10 @@ void LpParser::tokenize() {
           else t.type = T::Minus;
           break;
         case ':': t.type = T::Colon; break;
-        case '[':
-        case ']':
-        case '^':
-          fail(std::string("quadratic terms ('") + c + "') are not supported yet");
-          break;  // (fail throws)
+        case '[': t.type = T::LBracket; break;
+        case ']': t.type = T::RBracket; break;
+        case '^': t.type = T::Caret; break;
+        case '*': t.type = T::Star; break;
         default: {
           char msg[64];
           if (static_cast<unsigned char>(c) >= 32 && c != 127) std::snprintf(msg, sizeof(msg), "unexpected character '%c'", c);
@@ -396,7 +412,71 @@ Index LpParser::col(string_view name) {
   return it->second;
 }
 
-int LpParser::parse_expr(double& constant, int& nvars) {
+void LpParser::parse_quadratic(double sign) {
+  ++pos_;  // '['
+  struct QTerm {
+    Index i, j;
+    double a;
+  };
+  std::vector<QTerm> qt;
+  for (int count = 0;; ++count) {
+    if (cur().type == T::RBracket) {
+      ++pos_;
+      break;
+    }
+    if (cur().type == T::Eof || at_keyword()) error("missing ']' after the quadratic terms");
+    double s = 1.0;
+    bool had_sign = false;
+    while (cur().type == T::Plus || cur().type == T::Minus) {
+      if (cur().type == T::Minus) s = -s;
+      had_sign = true;
+      ++pos_;
+    }
+    if (count > 0 && !had_sign) error("expected '+' or '-' before " + describe(cur()));
+    double a = s;
+    if (cur().type == T::Number) {
+      a *= cur().value;
+      if (!std::isfinite(a)) error("infinite quadratic coefficient");
+      ++pos_;
+    }
+    if (!is_var_name(pos_)) error("expected a variable in the quadratic terms, found " + describe(cur()));
+    const Index i = col(cur().text);
+    ++pos_;
+    Index j = i;
+    if (cur().type == T::Caret) {
+      ++pos_;
+      if (cur().type != T::Number || cur().value != 2.0) error("only squares ('^ 2') are allowed in the quadratic terms");
+      ++pos_;
+      j = i;
+    } else if (cur().type == T::Star) {
+      ++pos_;
+      if (!is_var_name(pos_)) error("expected a variable after '*', found " + describe(cur()));
+      j = col(cur().text);
+      ++pos_;
+    } else {
+      error("linear terms are not allowed inside '[ ]' (expected '^ 2' or '* <variable>' after '" +
+            std::string(col_names_[i]) + "')");
+    }
+    qt.push_back({i, j, a});
+  }
+  double div = 1.0;
+  if (cur().type == T::Slash) {
+    ++pos_;
+    if (cur().type != T::Number || !(cur().value > 0.0) || !std::isfinite(cur().value))
+      error("expected a positive number after '/', found " + describe(cur()));
+    div = cur().value;
+    ++pos_;
+  }
+  // Objective term a x_i x_j (after sign and divisor): Q_ii = 2a for a square, Q_ij = a otherwise.
+  for (const QTerm& t : qt) {
+    const double a = sign * t.a / div;
+    q_row_.push_back(std::max(t.i, t.j));
+    q_col_.push_back(std::min(t.i, t.j));
+    q_val_.push_back(t.i == t.j ? 2.0 * a : a);
+  }
+}
+
+int LpParser::parse_expr(double& constant, int& nvars, bool quad) {
   int count = 0;
   nvars = 0;
   for (;;) {
@@ -409,8 +489,18 @@ int LpParser::parse_expr(double& constant, int& nvars) {
       had_sign = true;
       ++pos_;
     }
+    if (cur().type == T::Caret || cur().type == T::Star) {
+      error(std::string("unexpected ") + describe(cur()) + ": quadratic terms must be written inside '[ ]' in the " +
+            "objective (quadratic constraints are not supported yet)");
+    }
     if (count > 0 && !had_sign) error("expected '+' or '-' before " + describe(t));
     const Token& u = cur();
+    if (u.type == T::LBracket) {
+      if (!quad) error("quadratic constraints are not supported yet");
+      parse_quadratic(sign);
+      ++count;
+      continue;
+    }
     if (u.type == T::Number) {
       const double v = sign * u.value;
       ++pos_;
@@ -442,7 +532,7 @@ void LpParser::parse_objective() {
   terms_.clear();
   double constant = 0.0;
   int nvars = 0;
-  parse_expr(constant, nvars);
+  parse_expr(constant, nvars, true);
   for (const auto& [j, v] : terms_) obj_[j] += v;
   terms_.clear();
   if (!std::isfinite(constant)) error("infinite constant term in objective");
@@ -760,6 +850,9 @@ Model LpParser::parse() {
   m.A = SparseMatrix::from_triplets(static_cast<Index>(n), static_cast<Index>(nr), trip_col_, trip_row_, trip_val_);
   m.sos = std::move(sos_);
   m.indicators = std::move(indicators_);
+  m.q_row = std::move(q_row_);
+  m.q_col = std::move(q_col_);
+  m.q_val = std::move(q_val_);
   try {
     m.validate();
   } catch (const std::exception& e) {

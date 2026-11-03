@@ -135,6 +135,7 @@ int from_status(milp::Status s) {
     case milp::Status::IterationLimit: return POPSO_STATUS_ITERATION_LIMIT;
     case milp::Status::Interrupted: return POPSO_STATUS_INTERRUPTED;
     case milp::Status::NumericalError: return POPSO_STATUS_NUMERICAL_ERROR;
+    case milp::Status::NonConvex: return POPSO_STATUS_NONCONVEX;
   }
   return POPSO_STATUS_UNKNOWN;
 }
@@ -261,6 +262,7 @@ const char* popso_status_string(int status) {
     case POPSO_STATUS_INTERRUPTED: return "INTERRUPTED";
     case POPSO_STATUS_NUMERICAL_ERROR: return "NUMERICAL_ERROR";
     case POPSO_STATUS_UNKNOWN: return "UNKNOWN";
+    case POPSO_STATUS_NONCONVEX: return "NONCONVEX";
     default: return "INVALID";
   }
 }
@@ -533,6 +535,88 @@ int popso_set_objective(popso_model* m, int nnz, const int* vars, const double* 
   });
 }
 
+namespace {
+
+void add_q_impl(popso_model* m, int nnz, const int* rows, const int* cols, const double* vals, const char* what) {
+  if (nnz < 0 || (nnz > 0 && (!rows || !cols || !vals))) fail(POPSO_ERROR_INVALID_ARGUMENT, std::string(what) + ": invalid entries");
+  for (int k = 0; k < nnz; ++k) {
+    check_var(m, rows[k]);
+    check_var(m, cols[k]);
+    if (!std::isfinite(vals[k])) fail(POPSO_ERROR_INVALID_ARGUMENT, std::string(what) + ": coefficient must be finite");
+  }
+  for (int k = 0; k < nnz; ++k) m->model.add_q(rows[k], cols[k], vals[k]);
+}
+
+// The Hessian in canonical form (lower triangle, duplicates merged, column-major order).
+void compact_q(popso_model* m) {
+  milp::Model& md = m->model;
+  const milp::SparseMatrix Q = md.q_lower();
+  md.q_row.clear();
+  md.q_col.clear();
+  md.q_val.clear();
+  for (Index j = 0; j < Q.num_major; ++j) {
+    for (Index k = Q.begin(j); k < Q.end(j); ++k) {
+      md.q_row.push_back(Q.index[k]);
+      md.q_col.push_back(j);
+      md.q_val.push_back(Q.value[k]);
+    }
+  }
+}
+
+}  // namespace
+
+int popso_set_q(popso_model* m, int nnz, const int* rows, const int* cols, const double* vals) {
+  return guarded(m, [&] {
+    milp::Model backup_q = milp::Model{};
+    backup_q.q_row.swap(m->model.q_row);
+    backup_q.q_col.swap(m->model.q_col);
+    backup_q.q_val.swap(m->model.q_val);
+    try {
+      add_q_impl(m, nnz, rows, cols, vals, "set_q");
+    } catch (...) {
+      m->model.q_row.swap(backup_q.q_row);
+      m->model.q_col.swap(backup_q.q_col);
+      m->model.q_val.swap(backup_q.q_val);
+      throw;
+    }
+    compact_q(m);
+    touched(m);
+  });
+}
+
+int popso_add_q_entries(popso_model* m, int nnz, const int* rows, const int* cols, const double* vals) {
+  return guarded(m, [&] {
+    add_q_impl(m, nnz, rows, cols, vals, "add_q_entries");
+    compact_q(m);
+    touched(m);
+  });
+}
+
+int popso_num_q_nonzeros(popso_model* m) {
+  if (!m) return -1;
+  int n = -1;
+  if (guarded(m, [&] {
+        compact_q(m);
+        n = static_cast<int>(m->model.q_val.size());
+      }) != POPSO_OK)
+    return -1;
+  return n;
+}
+
+int popso_get_q(popso_model* m, int size, int* rows, int* cols, double* vals) {
+  return guarded(m, [&] {
+    compact_q(m);
+    const int n = static_cast<int>(m->model.q_val.size());
+    if (size < n) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_q: the arrays need " + std::to_string(n) + " entries");
+    if (n > 0 && (!rows || !cols || !vals)) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_q: null array");
+    for (int k = 0; k < n; ++k) {
+      rows[k] = m->model.q_row[k];
+      cols[k] = m->model.q_col[k];
+      vals[k] = m->model.q_val[k];
+    }
+  });
+}
+
 int popso_num_vars(const popso_model* m) { return m ? m->model.num_cols() : -1; }
 int popso_num_rows(const popso_model* m) { return m ? m->model.num_rows() : -1; }
 int popso_num_sos(const popso_model* m) { return m ? static_cast<int>(m->model.sos.size()) : -1; }
@@ -791,6 +875,30 @@ int popso_get_solution(const popso_model* m, double* x, int size) {
     const Index n = m->model.num_cols();
     if (!x || size < n) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_solution: buffer smaller than the number of variables");
     for (Index j = 0; j < n; ++j) x[j] = m->result.x[j];
+  });
+}
+
+int popso_has_duals(const popso_model* m) { return m && m->solved && m->result.has_duals ? 1 : 0; }
+
+int popso_get_duals(const popso_model* m, double* y, int size) {
+  return guarded(m, [&] {
+    check_solved(m);
+    if (!m->result.has_duals)
+      fail(POPSO_ERROR_NO_SOLUTION, "no dual values (available for continuous QPs solved to optimality)");
+    const Index rows = m->model.num_rows();
+    if (!y || size < rows) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_duals: buffer smaller than the number of rows");
+    for (Index i = 0; i < rows; ++i) y[i] = m->result.row_dual[i];
+  });
+}
+
+int popso_get_reduced_costs(const popso_model* m, double* d, int size) {
+  return guarded(m, [&] {
+    check_solved(m);
+    if (!m->result.has_duals)
+      fail(POPSO_ERROR_NO_SOLUTION, "no reduced costs (available for continuous QPs solved to optimality)");
+    const Index n = m->model.num_cols();
+    if (!d || size < n) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_reduced_costs: buffer smaller than the number of variables");
+    for (Index j = 0; j < n; ++j) d[j] = m->result.reduced_cost[j];
   });
 }
 

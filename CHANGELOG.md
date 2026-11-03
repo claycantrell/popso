@@ -2,6 +2,97 @@
 
 ## Unreleased
 
+## v0.4.0 — 2026-11
+
+New problem classes: convex quadratic programs (QP) and mixed-integer convex quadratic programs
+(MIQP): a quadratic objective `c'x + 1/2 x'Qx` with linear constraints. Also better c-MIR cuts
+and symmetry-breaking reductions for MILP.
+
+**Benchmarks**
+- 63-instance MIPLIB 2017 subset (120 s, 4 threads): 59 solved, shifted geometric mean 10.5 s
+  (v0.3.0: 60, 11.4 s); over three seeds 10.5 / 10.9 / 11.4 s against 11.4 / 11.4 / 11.1 s.
+  The instance count differs by two instances just above the time limit.
+- Generated models, now 148 including 18 QPs and MIQPs (1 thread): 147 solved; SCIP solves 134,
+  HiGHS 125 of the 130 it handles (no SOS, indicator or MIQP).
+- Maros–Meszaros convex QP test set: all 97 convex problems of the 98 smallest, 32 of the 40
+  larger ones (60 s).
+
+**Quadratic objectives**
+- Model: a symmetric Q stored as its lower triangle. Input: MPS `QUADOBJ` (one triangle),
+  `QMATRIX` and CPLEX `QSECTION` (whole matrix); LP-format objective terms
+  `[ 2 x ^ 2 + 3 x * y ] / 2`. The MPS writer writes `QUADOBJ`. Quadratic constraints (MPS
+  `QCMATRIX` or a `QSECTION` of another row, brackets in LP constraints) are rejected with a
+  "not supported yet" error.
+- Convexity check before solving (sparse Cholesky of the unit-diagonal scaled Q plus a tiny
+  shift; a negative pivot means a negative eigenvalue). A nonconvex objective (concave
+  objective when maximizing) gets the new status `NONCONVEX` (C API `POPSO_STATUS_NONCONVEX`).
+- Continuous QPs: the barrier method with Q in the Newton system (augmented system, or the normal
+  equations when Q is diagonal), no crossover; infeasibility and unboundedness are confirmed
+  by the simplex on auxiliary LPs. Once the dual regularization's error dominates the primal
+  residual, the Newton systems are refined against the unregularized matrix (problems with
+  large optimal duals such as YAO stalled otherwise).
+- Dual values of continuous QPs: row duals and reduced costs (d = c + Qx - A'y) of the
+  barrier's final point, in the model's objective sense. CLI `--duals <file>` (`row <name>
+  <value>` / `col <name> <value>` lines), C API `popso_has_duals`, `popso_get_duals`,
+  `popso_get_reduced_costs`, Python `Result.duals`, `Result.reduced_costs`, `Result.dual(c)`,
+  `Result.reduced_cost(x)`. Not for LPs, MILPs and MIQPs.
+- Presolve for quadratic models (QP and MIQP): fixed and empty columns (their quadratic terms
+  folded into the costs and the objective constant), dual fixing of columns without quadratic
+  terms, empty, free and singleton rows, redundant row sides and infeasibility from row
+  activities, integer bounds from activities (MIQP). No column substitution, so the Hessian
+  stays as it is; the duals are carried back (a singleton row whose bound is active takes the
+  reduced cost of its column). The convexity test runs on the presolved Hessian (a cross term
+  with a fixed column is linear).
+- MIQPs: branch-and-bound (best bound with plunging, domain propagation of the rows),
+  deterministic. The root relaxation is solved by the barrier; the nodes by a dual active-set
+  method (Goldfarb–Idnani on the KKT system of the working set: dense Cholesky of the free
+  columns' Hessian plus a Schur complement of the active rows, later working-set changes as
+  borders of that factorization), warm-started from the parent's working set and, when it is
+  still cached, its factorization; a singular Hessian gets a tiny proximal term. Node bounds
+  are safe Lagrangian bounds (valid for any primal point and row multipliers by convexity),
+  which also give reduced-cost tightening of integer bounds at the nodes and at the root.
+  Reliability branching (strong branching by the active-set method on candidates with fewer
+  than 4 pseudocost observations), plunging into the child with the smaller pseudocost
+  estimate. Heuristics: rounding, a QP dive and feasibility jump on the objective linearized
+  at the root solution. The barrier remains the fallback when the active-set method fails.
+  Compared with barrier relaxations at every node: miqprand_large 4.9 s -> 0.3 s,
+  miqprand_hard (new) 43 s -> 2.7 s, miqpport_hard (new) 13.4 s -> 0.8 s.
+- C API: `popso_set_q`, `popso_add_q_entries`, `popso_num_q_nonzeros`, `popso_get_q`. Python:
+  `popso.QuadExpr` (products and squares of variables and linear expressions) in
+  `set_objective`, `Model.get_q()`.
+- Benchmarks: new families `portfolio`, `lsq` (constrained least squares) and the MIQPs
+  `miqpport` (cardinality-constrained portfolio) and `miqprand`; the solution checker
+  recomputes quadratic objectives; `benchmarks/tools/qp_fuzz.py` compares random QPs and MIQPs
+  with HiGHS and SCIP; `benchmarks/tools/maros_meszaros.py` fetches and converts the
+  Maros–Meszaros QP test set. The 16 generated QP/MIQP instances are solved in a shifted
+  geometric mean of 0.25 s (2 threads; references: HiGHS 1.5 s on 14, SCIP 5.6 s on 12).
+- Maros–Meszaros (qpbenchmark's collection, 2 threads): the 98 problems up to 60 KB are all
+  solved (97 convex, 1.8 s in total; VALUES is reported as nonconvex); of the 40 larger ones
+  (60 s limit) 32 are solved (BOYD1/2, CONT-300, EXDATA among them); LISWET1, 7-10 and 12 end
+  with a numerical error and CVXQP1_L / CVXQP3_L at the time limit.
+
+**Symmetry**
+- Symmetry-breaking reductions from a stabilizer chain (Schreier-Sims table / SST): after
+  presolve, leaders whose orbit contains columns in conflict with them (a row forbids both at
+  1) give x_leader >= x_follower rows and fix the conflicting followers to 0, then the search
+  continues in (a subgroup of) the leader's stabilizer. Used when the fixings remove at least
+  10% of the columns; the problem is presolved again and the remaining symmetry is handled as
+  before (packing orbitopes, orbital branching). cod105: 1024 -> 341 columns, solved at the
+  root (12 s -> 1-3 s).
+- CLI `--symmetry on|off` (default on) switches all symmetry handling.
+
+**Fixes**
+- Barrier: inequality rows with fixed columns had their slack bounds shifted twice (the
+  crossover repaired the point, so LP results were right, but the interior solution was not).
+
+**Cutting planes**
+- c-MIR path aggregation now eliminates a continuous column through the tight row with the largest
+  LP dual (the rows that prove the LP bound) instead of the first tight row found (not for columns
+  with a simple variable upper bound x <= u y, where the old order suits fixed-charge paths). On the
+  63-instance MIPLIB subset the root node closes 65.2% of the root gap on average (63.8% before;
+  SCIP 64.6% with node limit 1); neos17 goes from 18% to 94% of its root gap closed and solves in
+  about 1 s instead of 4-6 s. End to end the subset is unchanged (60 s / 120 s A/Bs within noise).
+
 ## v0.3.1 — 2026-11
 
 Benchmark update; the solver is the same as in v0.3.0.

@@ -331,6 +331,8 @@ def main(argv=None):
     ap.add_argument("--ref-cache", default=str(BENCH / "results" / "rootgap_refs.json"))
     ap.add_argument("--no-refs", action="store_true", help="only use cached reference results")
     ap.add_argument("--no-ours", action="store_true")
+    ap.add_argument("--ref-threads", type=int, help="thread count of the cached reference results to use "
+                    "(default: --threads; e.g. 4 for the committed cache while ours runs with 2)")
     ap.add_argument("--env", action="append", default=[], help="KEY=VALUE for our solver (repeatable)")
     ap.add_argument("--report", help="print the table of a result .json and exit")
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"), help="compare ours in two result .json files and exit")
@@ -381,8 +383,9 @@ def main(argv=None):
         e = {"optimum": ref.get("objective") if ref.get("status") == "optimal" else None}
         lp0 = cached(f"lp0|{name}", lambda: lp0_highs(p, args.time_limit, args.threads))
         e["lp0"] = lp0 if isinstance(lp0, (int, float)) else None
-        e["refs"] = {rn: cached(f"{rn}|{name}|{args.threads}|{args.time_limit}",
-                                lambda rn=rn: REFS[rn](p, args.threads, args.time_limit, args.mem_limit))
+        rt = args.ref_threads or args.threads
+        e["refs"] = {rn: cached(f"{rn}|{name}|{rt}|{args.time_limit}",
+                                lambda rn=rn: REFS[rn](p, rt, args.time_limit, args.mem_limit))
                      for rn in ref_names}
         if not args.no_ours:
             print(f"[ours] {name}", file=sys.stderr, flush=True)

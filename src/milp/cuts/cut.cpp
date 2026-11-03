@@ -42,6 +42,7 @@ void CutData::build(const MipProblem& p) {
   const Index n = p.num_cols();
   vlb.assign(n, {});
   vub.assign(n, {});
+  row_vb.assign(n, 0);
   num_implied_vbs = 0;
   if (const char* v = std::getenv("MILP_NO_IMPLIED_VB")) implied_vbs = !(*v && *v != '0');
   if (const char* v = std::getenv("MILP_NO_PROBE_VB")) probe_vbs = !(*v && *v != '0');
@@ -53,6 +54,7 @@ void CutData::build(const MipProblem& p) {
     if (p.is_int[j]) std::swap(j, k), std::swap(a, c);
     // Need j continuous, k integer and not fixed.
     if (p.is_int[j] || !p.is_int[k] || p.col_lb[k] == p.col_ub[k]) continue;
+    row_vb[j] = 1;
     // a x + c y <= up  ->  a > 0: x <= up/a - (c/a) y (VUB), a < 0: VLB.
     if (is_finite(p.row_ub[i])) {
       VarBound vb{k, -c / a, p.row_ub[i] / a};

@@ -116,12 +116,19 @@ class LinExpr:
         return NotImplemented if r is NotImplemented else -r
 
     def __mul__(self, k):
+        if isinstance(k, (Var, LinExpr)):
+            return QuadExpr._product(self, LinExpr._of(k))
         if not isinstance(k, numbers.Real):
-            return NotImplemented  # only linear expressions
+            return NotImplemented
         k = float(k)
         return LinExpr({j: c * k for j, c in self.terms.items()}, self.constant * k, self._model)
 
     __rmul__ = __mul__
+
+    def __pow__(self, e):
+        if e != 2:
+            return NotImplemented  # only squares
+        return QuadExpr._product(self, self)
 
     def __truediv__(self, k):
         if not isinstance(k, numbers.Real):
@@ -170,6 +177,103 @@ class LinExpr:
         return " + ".join(parts)
 
 
+class QuadExpr:
+    """A quadratic expression: sum(coef * x_i * x_j) + a linear part. Built by multiplying variables or
+    linear expressions (x * y, x * x, x ** 2, (x + y) * (x - 2 * z)); only allowed as an objective
+    (quadratic constraints are not supported)."""
+
+    __slots__ = ("quad", "linear")
+
+    def __init__(self, quad=None, linear=None):
+        self.quad = dict(quad) if quad else {}  # (i, j) with i >= j -> coefficient of x_i * x_j
+        self.linear = linear if linear is not None else LinExpr()
+
+    @staticmethod
+    def _product(a, b):
+        if a._model is not None and b._model is not None and a._model is not b._model:
+            raise ValueError("cannot combine variables of different models")
+        q = {}
+        for i, ci in a.terms.items():
+            for j, cj in b.terms.items():
+                key = (max(i, j), min(i, j))
+                q[key] = q.get(key, 0.0) + ci * cj
+        model = a._model or b._model
+        lin = LinExpr(None, a.constant * b.constant, model)
+        if a.constant != 0.0:
+            lin = lin + LinExpr({j: c * a.constant for j, c in b.terms.items()}, 0.0, model)
+        if b.constant != 0.0:
+            lin = lin + LinExpr({j: c * b.constant for j, c in a.terms.items()}, 0.0, model)
+        return QuadExpr(q, lin)
+
+    @property
+    def _model(self):
+        return self.linear._model
+
+    @property
+    def constant(self):
+        return self.linear.constant
+
+    def _combine(self, other, sign):
+        if isinstance(other, QuadExpr):
+            q = dict(self.quad)
+            for k, c in other.quad.items():
+                q[k] = q.get(k, 0.0) + sign * c
+            lin = self.linear._combine(other.linear, sign)
+            return QuadExpr(q, lin)
+        o = LinExpr._of(other)
+        if o is None:
+            return NotImplemented
+        return QuadExpr(self.quad, self.linear._combine(o, sign))
+
+    def __add__(self, other):
+        return self._combine(other, 1.0)
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        return self._combine(other, -1.0)
+
+    def __rsub__(self, other):
+        r = self._combine(other, -1.0)
+        return NotImplemented if r is NotImplemented else -r
+
+    def __mul__(self, k):
+        if not isinstance(k, numbers.Real):
+            return NotImplemented  # degree 2 at most
+        k = float(k)
+        return QuadExpr({key: c * k for key, c in self.quad.items()}, self.linear * k)
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, k):
+        if not isinstance(k, numbers.Real):
+            return NotImplemented
+        return self * (1.0 / float(k))
+
+    def __neg__(self):
+        return self * -1.0
+
+    def __pos__(self):
+        return self
+
+    def _no_constraint(self, other):
+        raise TypeError("quadratic constraints are not supported yet (a QuadExpr can only be an objective)")
+
+    __le__ = __ge__ = __eq__ = _no_constraint
+    __hash__ = None
+
+    def value(self, result):
+        """Value of the expression at a solve result's solution."""
+        x = result.x
+        return self.linear.value(result) + sum(c * x[i] * x[j] for (i, j), c in self.quad.items())
+
+    def __repr__(self):
+        name = (lambda j: self._model.var(j).name) if self._model else (lambda j: "x%d" % j)
+        parts = ["%g*%s*%s" % (c, name(i), name(j)) if i != j else "%g*%s^2" % (c, name(i))
+                 for (i, j), c in self.quad.items()]
+        return " + ".join(parts + [repr(self.linear)])
+
+
 class Var:
     """A model variable (a handle: index + model). Supports arithmetic into LinExpr."""
 
@@ -204,6 +308,9 @@ class Var:
         return self._expr() * k
 
     __rmul__ = __mul__
+
+    def __pow__(self, e):
+        return self._expr() ** e
 
     def __truediv__(self, k):
         return self._expr() / k
@@ -365,9 +472,15 @@ class Result:
 
     status: "OPTIMAL", "INFEASIBLE", "TIME_LIMIT", ...; objective / x are None without a solution.
     Index it with a Var, a variable name or an index: result[x], result["x"], result[0].
+
+    duals (one per constraint) and reduced_costs (one per variable): continuous QPs solved to
+    optimality only, else None. d = c + Q x - A^T y; when minimizing, a dual is >= 0 at an active
+    lower and <= 0 at an active upper bound (opposite signs when maximizing). result.dual(c) and
+    result.reduced_cost(x) look single values up.
     """
 
-    def __init__(self, model, status, objective, bound, gap, nodes, lp_iterations, time, x):
+    def __init__(self, model, status, objective, bound, gap, nodes, lp_iterations, time, x, duals=None,
+                 reduced_costs=None):
         self._model = model
         self.status = status
         self.objective = objective
@@ -377,6 +490,8 @@ class Result:
         self.lp_iterations = lp_iterations
         self.time = time
         self.x = x
+        self.duals = duals
+        self.reduced_costs = reduced_costs
 
     @property
     def has_solution(self):
@@ -389,12 +504,26 @@ class Result:
     def __getitem__(self, key):
         if self.x is None:
             raise ValueError("no solution (status %s)" % self.status)
+        if isinstance(key, QuadExpr):
+            return key.value(self)
         if isinstance(key, (LinExpr, Var)):
             return LinExpr._of(key).value(self)
         return self.x[self._model._var_index(key)]
 
     def value(self, key):
         return self[key]
+
+    def dual(self, constr):
+        """Dual value of a constraint (a Constr or a row index)."""
+        if self.duals is None:
+            raise ValueError("no dual values (continuous QPs solved to optimality only; status %s)" % self.status)
+        return self.duals[constr.index if isinstance(constr, Constr) else int(constr)]
+
+    def reduced_cost(self, key):
+        """Reduced cost of a variable (a Var, a name or an index)."""
+        if self.reduced_costs is None:
+            raise ValueError("no reduced costs (continuous QPs solved to optimality only; status %s)" % self.status)
+        return self.reduced_costs[self._model._var_index(key)]
 
     def as_dict(self):
         """{variable name: value} (empty without a solution)."""
@@ -410,7 +539,8 @@ class Result:
 # ---------------------------------------------------------------- model
 
 class Model:
-    """An LP/MILP model: min/max c^T x + constant s.t. lb <= A x <= ub, bounds and integrality."""
+    """An LP/MILP/QP/MIQP model: min/max c^T x (+ 1/2 x^T Q x) + constant s.t. lb <= A x <= ub, bounds and
+    integrality."""
 
     def __init__(self, name=None):
         h = lib.popso_create()
@@ -605,15 +735,39 @@ class Model:
         return out.value
 
     def set_objective(self, expr, sense=None):
-        """Sets the objective (an expression, Var, number or {var: coef} dict) and optionally the sense."""
+        """Sets the objective (an expression, Var, number or {var: coef} dict) and optionally the sense.
+        A QuadExpr (x * y, x ** 2, ...) gives a quadratic objective, which must be convex when
+        minimizing (concave when maximizing); any other objective removes the quadratic part."""
+        rows, cols, qv = [], [], []
+        if isinstance(expr, QuadExpr):
+            if expr._model is not None and expr._model is not self:
+                raise ValueError("expression of another model")
+            for (i, j), c in expr.quad.items():
+                if c != 0.0:
+                    # c x_i x_j = 1/2 x'Qx with Q_ij = Q_ji = c, or Q_ii = 2c.
+                    rows.append(i)
+                    cols.append(j)
+                    qv.append(2.0 * c if i == j else c)
+            expr = expr.linear
         if isinstance(expr, numbers.Real):
             idx, val, const = [], [], float(expr)
         else:
             idx, val, const = self._coeffs(expr)
         self._check(lib.popso_set_objective(self._h, len(idx), _iarray(idx), _darray(val)))
         self._check(lib.popso_set_objective_constant(self._h, const))
+        self._check(lib.popso_set_q(self._h, len(qv), _iarray(rows), _iarray(cols), _darray(qv)))
         if sense is not None:
             self.sense = sense
+
+    def get_q(self):
+        """The objective's quadratic part as the lower triangle of Q (objective c'x + 1/2 x'Qx):
+        a list of (row, column, value) with row >= column."""
+        n = lib.popso_num_q_nonzeros(self._h)
+        if n < 0:
+            self._check(1)
+        r, c, v = (ctypes.c_int * n)(), (ctypes.c_int * n)(), (ctypes.c_double * n)()
+        self._check(lib.popso_get_q(self._h, n, r, c, v))
+        return [(r[k], c[k], v[k]) for k in range(n)]
 
     @property
     def sense(self):
@@ -702,9 +856,17 @@ class Model:
             buf = (ctypes.c_double * n)()
             self._check(lib.popso_get_solution(h, buf, n))
             x = list(buf)
+        duals = reduced_costs = None
+        if lib.popso_has_duals(h):
+            rows, n = self.num_constrs, self.num_vars
+            ybuf, dbuf = (ctypes.c_double * max(rows, 1))(), (ctypes.c_double * max(n, 1))()
+            self._check(lib.popso_get_duals(h, ybuf, rows))
+            self._check(lib.popso_get_reduced_costs(h, dbuf, n))
+            duals, reduced_costs = list(ybuf)[:rows], list(dbuf)[:n]
         return Result(self, _dec(lib.popso_status_string(status)), objective, get_d(lib.popso_get_bound),
                       get_d(lib.popso_get_gap), get_ll(lib.popso_get_node_count),
-                      get_ll(lib.popso_get_lp_iterations), get_d(lib.popso_get_solve_time), x)
+                      get_ll(lib.popso_get_lp_iterations), get_d(lib.popso_get_solve_time), x, duals,
+                      reduced_costs)
 
     def write_solution(self, filename):
         self._check(lib.popso_write_solution(self._h, _enc(os.fspath(filename))))

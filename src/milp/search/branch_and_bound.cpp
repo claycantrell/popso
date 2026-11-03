@@ -4876,7 +4876,7 @@ void Search::barrier_root(DualSimplex& lp) {
 }
 
 void Search::detect_symmetry_root() {
-  if (std::getenv("MILP_NO_SYMMETRY") != nullptr || !opts_.sub_mip_heuristics) return;
+  if (std::getenv("MILP_NO_SYMMETRY") != nullptr || !params_.symmetry || !opts_.sub_mip_heuristics) return;
   if (!p_.implications.empty()) return;  // the implications are not part of the symmetry detection
   if (std::find(p_.is_int.begin(), p_.is_int.end(), 1) == p_.is_int.end()) return;
   SymmetryOptions so;

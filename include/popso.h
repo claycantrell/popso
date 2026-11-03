@@ -1,5 +1,5 @@
 /*
- * popso C API: build or read an LP/MILP model, solve it and query the result.
+ * popso C API: build or read an LP, MILP, QP or MIQP model, solve it and query the result.
  *
  *   popso_model* m = popso_create();
  *   int x, y;
@@ -24,6 +24,12 @@
  *    used from different threads concurrently. Note that the memory limit is
  *    also checked against the resident size of the whole process.
  *  - Changing the model discards the last result.
+ *  - The objective may have a quadratic part 1/2 x^T Q x (popso_set_q). It
+ *    must be convex (Q positive semidefinite when minimizing, negative
+ *    semidefinite when maximizing; otherwise the status is
+ *    POPSO_STATUS_NONCONVEX). Continuous QPs are solved by the barrier
+ *    method (no basis); with integer variables by branch-and-bound on QP
+ *    relaxations. Quadratic constraints are not supported.
  *  - Besides linear rows, a model may have semi-continuous and semi-integer
  *    variables, SOS1/SOS2 constraints and indicator constraints. They are
  *    reformulated with auxiliary binaries internally; solutions and queries
@@ -96,6 +102,7 @@ extern "C" {
 #define POPSO_STATUS_INTERRUPTED 9
 #define POPSO_STATUS_NUMERICAL_ERROR 10
 #define POPSO_STATUS_UNKNOWN 11
+#define POPSO_STATUS_NONCONVEX 12 /* the quadratic objective is not convex (concave when maximizing) */
 
 typedef struct popso_model popso_model;
 
@@ -176,6 +183,20 @@ POPSO_API int popso_set_objective_constant(popso_model* m, double constant);
 POPSO_API int popso_set_obj_coef(popso_model* m, int var, double value);
 POPSO_API int popso_set_objective(popso_model* m, int nnz, const int* vars, const double* vals);
 
+/* Quadratic objective term 1/2 x^T Q x, Q symmetric. Entries are given as
+ * (rows[k], cols[k], vals[k]) from either triangle: an off-diagonal entry
+ * (i, j) sets both Q_ij and Q_ji (give each pair once), a diagonal entry Q_jj
+ * contributes 1/2 Q_jj x_j^2. Example: x^2 + 3 x y is Q_xx = 2, Q_xy = 3.
+ * Repeated entries are summed. popso_set_q replaces Q (nnz = 0 removes it),
+ * popso_add_q_entries adds to it. */
+POPSO_API int popso_set_q(popso_model* m, int nnz, const int* rows, const int* cols, const double* vals);
+POPSO_API int popso_add_q_entries(popso_model* m, int nnz, const int* rows, const int* cols, const double* vals);
+/* Number of nonzeros of Q's lower triangle (-1 on a bad handle). */
+POPSO_API int popso_num_q_nonzeros(popso_model* m);
+/* Copies Q's lower triangle (rows[k] >= cols[k], sorted by column, then row)
+ * into the arrays, which must hold popso_num_q_nonzeros() entries (size). */
+POPSO_API int popso_get_q(popso_model* m, int size, int* rows, int* cols, double* vals);
+
 /* ---- Model queries (return -1 / NULL / NaN on a bad handle or index) ---- */
 
 POPSO_API int popso_num_vars(const popso_model* m);
@@ -250,6 +271,16 @@ POPSO_API int popso_get_solution(const popso_model* m, double* x, int size);
 /* Writes the result as a "name value" solution file (status and objective in
  * '#' comment lines; values only if a solution is known). */
 POPSO_API int popso_write_solution(const popso_model* m, const char* filename);
+/* Dual values, available for continuous QPs (quadratic objective, no integer
+ * variables) solved to optimality; from the barrier's final iterate, so they
+ * satisfy the KKT conditions to the solver's tolerance. Row duals y and reduced
+ * costs d = c + Q x - A^T y; minimization: y_i >= 0 at an active row lower
+ * bound, <= 0 at an upper one, d_j >= 0 at a variable's lower bound, <= 0 at
+ * its upper one; maximization: the opposite signs. popso_has_duals returns 1 if
+ * they are available; the getters fail with POPSO_ERROR_NO_SOLUTION otherwise. */
+POPSO_API int popso_has_duals(const popso_model* m);
+POPSO_API int popso_get_duals(const popso_model* m, double* y, int size);          /* size >= rows */
+POPSO_API int popso_get_reduced_costs(const popso_model* m, double* d, int size);  /* size >= vars */
 
 #ifdef __cplusplus
 } /* extern "C" */

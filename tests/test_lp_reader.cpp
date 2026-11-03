@@ -389,8 +389,11 @@ TEST(lp_reader_keywords_only_at_line_start) {
 }
 
 TEST(lp_reader_errors) {
-  CHECK(error_contains("min\n x + [ x ^ 2 ] / 2\nst\n x >= 1\nend\n", "<string>:2: quadratic terms"));
-  CHECK(error_contains("min\n x\nst\n c: x ^ 2 <= 1\nend\n", "quadratic terms"));
+  CHECK(error_contains("min\n x\nst\n c: x + [ x ^ 2 ] <= 1\nend\n", "<string>:4: quadratic constraints are not supported"));
+  CHECK(error_contains("min\n x\nst\n c: x ^ 2 <= 1\nend\n", "quadratic terms must be written inside '[ ]'"));
+  CHECK(error_contains("min\n x + [ x ^ 3 ] / 2\nst\n x >= 1\nend\n", "only squares"));
+  CHECK(error_contains("min\n x + [ x ^ 2 + y ] / 2\nst\n x >= 1\nend\n", "linear terms are not allowed inside"));
+  CHECK(error_contains("min\n x + [ x ^ 2\nst\n x >= 1\nend\n", "missing ']'"));
   CHECK(error_contains("min\n x\nst\n x[1] >= 1\nend\n", "brackets are not allowed"));
   CHECK(error_contains("min\n x\nst\n c: b <-> x >= 1\nend\n", "equivalence constraints"));
   CHECK(error_contains("min\n x\nst\n c: b = 2 -> x >= 1\nend\n", "the indicator value must be 0 or 1"));
@@ -408,7 +411,7 @@ TEST(lp_reader_errors) {
   CHECK(error_contains("min\n x\nst\n c1: 1 <= x + y >= 2\nend\n", "two '<=' or two '>='"));
   CHECK(error_contains("min\n x\nst\n c1: x >= 1\n c1: x <= 2\nend\n", "<string>:5: duplicate constraint name 'c1'"));
   CHECK(error_contains("min\n x y\nst\n x >= 1\nend\n", "<string>:2: expected '+' or '-' before 'y'"));
-  CHECK(error_contains("min\n x\nst\n c: x + 3 * y >= 1\nend\n", "unexpected character '*'"));
+  CHECK(error_contains("min\n x\nst\n c: x + 3 * y >= 1\nend\n", "unexpected '*'"));
   CHECK(error_contains("min\n x\nst\n x >= 1\nbounds\n x <= y\nend\n", "<string>:6: expected a number for the bound"));
   CHECK(error_contains("min\n x\nst\n x >= 1\nbounds\n x >= inf\nend\n", "lower bound +inf"));
   CHECK(error_contains("min\n x\nst\n x >= 1\nbounds\n 2 x <= 5\nend\n", "expected '<=', '>=' or '=' in bound"));

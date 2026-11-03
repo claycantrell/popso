@@ -129,6 +129,8 @@ class MirSeparator : public Separator {
   std::vector<char> row_used_;                // problem row is in the current path
   std::vector<std::pair<double, Index>> starts_;  // start rows of the paths, best first
   std::vector<double> row_dist_;              // distance of a problem row's logical from its bounds
+  std::vector<double> row_dual_;              // |LP dual| of a problem row, relative to ||c|| (path row choice)
+  bool dual_choice_ = [] { const char* v = std::getenv("MILP_MIR_DUALROW"); return !(v && *v == '0'); }();
   // Per column (built on first use in a call): positions k in its column of the problem rows whose
   // logical is within kTightDist of a bound, the only candidates for path elimination (app1-1 has
   // continuous columns in 1225 rows, scanned at every aggregation step otherwise).
@@ -410,7 +412,13 @@ double MirSeparator::best_cut(double b, Cut* cut) {
     for (const IntTerm& t : ints_) beta -= t.a * (t.comp ? t.u : t.l);
     return beta;
   };
-  // Divisor candidates: coefficients of integer variables strictly inside their bounds.
+  // Divisor candidates: coefficients of integer variables strictly inside their bounds, up to 8
+  // (MILP_MIR_MAXDELTA; 64 gave binkar10_1 +5 and rococoC10-001000 +4 points of root gap, but miplib_dev
+  // at 60 s / 2 threads 1.06-1.11x slower vs 1.02x with 8, gap_large_1 4 -> 8 s).
+  static const size_t max_deltas = [] {
+    const char* v = std::getenv("MILP_MIR_MAXDELTA");
+    return v ? static_cast<size_t>(std::max(1, std::atoi(v))) : size_t{8};
+  }();
   std::vector<double>& deltas = deltas_;
   deltas.clear();
   double amax = 0.0;
@@ -421,8 +429,9 @@ double MirSeparator::best_cut(double b, Cut* cut) {
     if (d < 1e-6 * amax || d < 1e-9) continue;
     bool dup = false;
     for (double e : deltas) dup = dup || std::abs(e - d) <= 1e-9 * d;
+    work_count_ += static_cast<long long>(deltas.size());
     if (!dup) deltas.push_back(d);
-    if (deltas.size() >= 8) break;
+    if (deltas.size() >= max_deltas) break;
   }
   if (deltas.empty()) return -1.0;
   prepare_norm();
@@ -902,9 +911,13 @@ void MirSeparator::aggregate_path(Index i0, double sign, std::vector<Cut>& out) 
     // more efficacious one (SCIP's SCIPcalcBestCut, 1.8x) made cflp_medium_1 slower over 6 seeds; the
     // flow cover only where c-MIR fails is neutral there and gave the best unitcal_7 root bound.
     Cut fc;
-    const double fc_eff = flowcover_ && try_flowcover(&fc) ? last_eff_ : -1.0;
     last_eff_ = -1.0;
     const bool have_mir = try_cut(0.0, &cut);
+    const double mir_eff = last_eff_;
+    // The flow cover only where it can be taken: no c-MIR cut (or MILP_FC_WIN set); it doubled the c-MIR
+    // separation time on app1-1 when tried on every aggregation.
+    const double fc_eff = flowcover_ && (!have_mir || fc_win_ < 1e29) && try_flowcover(&fc) ? last_eff_ : -1.0;
+    last_eff_ = mir_eff;
     if (fc_eff > 0.0 && (!have_mir || fc_eff > fc_win_ * last_eff_)) {
       out.push_back(std::move(fc));
       if (++found >= kCutsPerPath) return;
@@ -943,7 +956,7 @@ void MirSeparator::aggregate_path(Index i0, double sign, std::vector<Cut>& out) 
     // substituted by it in the transformation, and its path should follow the flow balances, as
     // in lot sizing: x_t <= M y_t, s_t-1 + x_t = d_t + s_t).
     Index rbest = -1;
-    double sbest = kInf, mbest = 0.0;
+    double sbest = kInf, mbest = 0.0, dbest_row = -1.0;
     const bool prefer_int = ctx_->data.vub[jbest].empty() && ctx_->data.vlb[jbest].empty();
     if (tight_beg_[jbest] < 0) {
       tight_beg_[jbest] = static_cast<Index>(tight_k_.size());
@@ -966,7 +979,18 @@ void MirSeparator::aggregate_path(Index i0, double sign, std::vector<Cut>& out) 
       if (rlen > max_len) continue;
       if (rlen == 2 && (p.is_int[R.index[R.begin(r)]] || p.is_int[R.index[R.begin(r) + 1]])) continue;  // VB row
       if (prefer_int && !row_int_[r]) slack += 1.0;
-      if (slack < sbest) sbest = slack, rbest = r, mbest = mult;
+      // Among equally tight rows: the one with the largest LP dual (as SCIP's aggregation row score: the
+      // rows that prove the LP bound; neos17 pairs an observation row with a contradicting one), then
+      // the sparser one; otherwise the first tight row in column order. Not for integer eliminations
+      // (mzzv42z root 100 -> 98%) nor columns with a variable bound from a two-variable row (x <= u y:
+      // the balance rows of lot sizing / fixed charge paths are taken in order; by dual, mc11 went from
+      // 15-23 s to 24-120 s over 3 seeds, exp-1-500-5-5 1 -> 3 s).
+      const double ds = dual_choice_ && !is_int(jbest) && !ctx_->data.row_vb[jbest]
+                            ? row_dual_[r] + 1e-3 / (1.0 + static_cast<double>(rlen))
+                            : 0.0;
+      if (slack < sbest - 1e-12 || (slack <= sbest + 1e-12 && ds > dbest_row)) {
+        sbest = slack, rbest = r, mbest = mult, dbest_row = ds;
+      }
     }
     if (rbest < 0) return;
     add_row(rbest, mbest);
@@ -1067,6 +1091,13 @@ void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   for (Index i = 0; i < m0; ++i) {
     ContTerm t;
     row_dist_[i] = bound_distance(n_ + i, &t);
+  }
+  if (dual_choice_) {
+    double cn = 0.0;
+    for (Index j = 0; j < n_; ++j) cn += p.cost[j] * p.cost[j];
+    cn = std::max(std::sqrt(cn), 1e-9);
+    row_dual_.resize(m0);
+    for (Index i = 0; i < m0; ++i) row_dual_[i] = std::min(1.0, std::abs(lp.reduced_cost(n_ + i)) / cn);
   }
   if (flowcover_ && !tableau_) {
     row_minact_.assign(m0, 0.0);

@@ -17,6 +17,7 @@
 #include "milp/core/model.hpp"
 #include "milp/search/mip_problem.hpp"
 #include "milp/search/orbitope.hpp"
+#include "milp/search/sst.hpp"
 #include "milp/search/symmetry.hpp"
 #include "milp/solver/solver.hpp"
 #include "test_framework.hpp"
@@ -39,6 +40,14 @@ void set_env(const char* name, bool on) {
 #else
   if (on) setenv(name, "1", 1);
   else unsetenv(name);
+#endif
+}
+
+void set_env_value(const char* name, const char* value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
 #endif
 }
 
@@ -473,10 +482,12 @@ void compare(const Model& m, int variant, int& checked, long long& branched) {
   const Outcome a = run(m, false, threads, presolve, det);
   const Outcome b = run(m, true, threads, presolve, det);
   CHECK(b.feasible);
-  // Orbital branching alone (orbitopal fixing off) on the same model.
+  // Orbital branching alone (orbitopal fixing and symmetry-breaking rows off) on the same model.
   set_env("MILP_NO_ORBITOPE", true);
+  set_env_value("MILP_SST", "0");
   const Outcome c = run(m, true, threads, presolve, det);
   set_env("MILP_NO_ORBITOPE", false);
+  set_env("MILP_SST", false);
   CHECK(c.feasible);
   branched += c.nodes > 1;
   if (a.status == Status::Optimal && c.status == Status::Optimal) {
@@ -682,4 +693,229 @@ TEST(orbitope_canonical_solutions_survive_fixing) {
     ++tested;
   }
   CHECK(tested >= 3);
+}
+
+namespace {
+
+// Number of column permutations mapping p onto itself (brute force, n <= 8).
+long long count_automorphisms(const MipProblem& p) {
+  const Index n = p.num_cols();
+  std::vector<Index> sigma(n);
+  for (Index j = 0; j < n; ++j) sigma[j] = j;
+  long long cnt = 0;
+  do {
+    cnt += maps_onto_itself(p, sigma);
+  } while (std::next_permutation(sigma.begin(), sigma.end()));
+  return cnt;
+}
+
+// Optimum of a pure binary problem by enumeration (kInf if infeasible).
+double enumerate_binary(const MipProblem& p) {
+  const Index n = p.num_cols(), m = p.num_rows();
+  const SparseMatrix R = p.A.transpose();
+  double best = kInf;
+  std::vector<double> x(n);
+  for (long long mask = 0; mask < (1LL << n); ++mask) {
+    bool ok = true;
+    for (Index j = 0; j < n && ok; ++j) {
+      x[j] = static_cast<double>((mask >> j) & 1);
+      ok = x[j] >= p.col_lb[j] && x[j] <= p.col_ub[j];
+    }
+    for (Index r = 0; r < m && ok; ++r) {
+      double a = 0.0;
+      for (Index k = R.begin(r); k < R.end(r); ++k) a += R.value[k] * x[R.index[k]];
+      ok = a >= p.row_lb[r] - 1e-9 && a <= p.row_ub[r] + 1e-9;
+    }
+    if (ok) best = std::min(best, p.objective(x));
+  }
+  return best;
+}
+
+// Small pure binary models with symmetry: independent sets on vertex-transitive graphs (weights
+// equal or equal on orbits of a rotation), colorings, bin packing, a covering design.
+Model small_symmetric_binary(std::mt19937& rng, int t) {
+  switch (t % 5) {
+    case 0: {
+      const int n = 8 + rng() % 7;
+      std::vector<std::pair<int, int>> e;
+      for (int d = 1; d <= n / 2; ++d) {
+        if (d == 1 || rng() % 3 == 0) {
+          for (int i = 0; i < n; ++i) {
+            if (d * 2 != n || i < d) e.emplace_back(i, (i + d) % n);
+          }
+        }
+      }
+      std::vector<double> w;
+      if (rng() % 2) {
+        // Weights invariant under the rotation by 2 (n even) or none.
+        for (int i = 0; i < n; ++i) w.push_back(n % 2 == 0 ? 1.0 + (i % 2) : 1.0);
+      }
+      return independent_set(n, e, w);
+    }
+    case 1: {
+      // Hypercube Q4 with its antipodal pairs also in conflict, or the Petersen graph.
+      if (rng() % 2) {
+        std::vector<std::pair<int, int>> e;
+        for (int v = 0; v < 16; ++v) {
+          for (int b = 0; b < 4; ++b) {
+            if (v < (v ^ (1 << b))) e.emplace_back(v, v ^ (1 << b));
+          }
+          if (v < 15 - v) e.emplace_back(v, 15 - v);
+        }
+        return independent_set(16, e);
+      }
+      std::vector<std::pair<int, int>> pet = cycle(5);
+      for (auto [a, b] : std::vector<std::pair<int, int>>{{5, 7}, {7, 9}, {9, 6}, {6, 8}, {8, 5}}) pet.emplace_back(a, b);
+      for (int i = 0; i < 5; ++i) pet.emplace_back(i, i + 5);
+      return independent_set(10, pet);
+    }
+    case 2: {
+      std::vector<std::pair<int, int>> e;
+      const int nv = 3 + rng() % 2;
+      for (int u = 0; u < nv; ++u)
+        for (int v = u + 1; v < nv; ++v)
+          if (rng() % 3) e.emplace_back(u, v);
+      return coloring(nv, e, 3);
+    }
+    case 3: {
+      std::vector<int> sizes;
+      for (int i = 0; i < 4; ++i) sizes.push_back(2 + rng() % 3);
+      return bin_packing(sizes, 3, 6);
+    }
+    default: {
+      // Circulant covering (each triple i, i + d, i + 2d + 1 has a chosen column) with a
+      // cardinality row: symmetric under the rotations.
+      const int n = 9 + rng() % 6;
+      ModelBuilder b;
+      for (int j = 0; j < n; ++j) b.add_col("x" + std::to_string(j), 1, 0, 1, VarType::Binary);
+      const int d = 1 + rng() % 3;
+      for (int i = 0; i < n; ++i) {
+        const Index r = b.add_row("c" + std::to_string(i), 1, kInf);
+        b.add_coef(r, i, 1);
+        b.add_coef(r, (i + d) % n, 1);
+        b.add_coef(r, (i + 2 * d + 1) % n, 1);
+      }
+      const Index r = b.add_row("card", 2, n - 1);
+      for (int j = 0; j < n; ++j) b.add_coef(r, j, 1);
+      return b.build();
+    }
+  }
+}
+
+}  // namespace
+
+TEST(symmetry_group_order_matches_brute_force) {
+  // The automorphism search on small random symmetric models: the group order from the
+  // stabilizer chain equals the number of column automorphisms found by brute force.
+  std::mt19937 rng(5);
+  int compared = 0;
+  for (int t = 0; t < scaled(60); ++t) {
+    ModelBuilder b;
+    const int n = 3 + rng() % 6;
+    std::vector<double> cost(n);
+    for (int j = 0; j < n; ++j) cost[j] = static_cast<double>(rng() % 2);
+    for (int j = 0; j < n; ++j) b.add_col("x" + std::to_string(j), cost[j], 0, 1, VarType::Binary);
+    // Random graph-like rows (pairs with coefficient 1 or 2), so that there is often symmetry.
+    const int nr = 1 + rng() % (2 * n);
+    for (int r = 0; r < nr; ++r) {
+      const Index row = b.add_row("r" + std::to_string(r), -kInf, 1 + rng() % 2);
+      const int u = rng() % n, v = (u + 1 + rng() % (n - 1)) % n;
+      const double c = 1.0 + rng() % 2;
+      b.add_coef(row, u, c);
+      b.add_coef(row, v, c);
+    }
+    const MipProblem p = to_problem(b.build());
+    const Symmetry s = detect_symmetry(p);
+    CHECK(all_generators_valid(p, s));
+    if (s.aborted) continue;
+    const long long bf = count_automorphisms(p);
+    CHECK_NEAR(group_order(s), static_cast<double>(bf), 0.5);
+    ++compared;
+  }
+  CHECK(compared >= scaled(50));
+  // Complete graph K6: S6.
+  std::vector<std::pair<int, int>> k6;
+  for (int u = 0; u < 6; ++u)
+    for (int v = u + 1; v < 6; ++v) k6.emplace_back(u, v);
+  const MipProblem p = to_problem(independent_set(6, k6));
+  CHECK_NEAR(group_order(detect_symmetry(p)), 720.0, 0.5);
+}
+
+TEST(sst_rows_keep_the_optimum) {
+  // Symmetry-breaking rows and fixings (search/sst.hpp) on small symmetric binary models: the
+  // optimum by enumeration is unchanged, for both modes, several seeds and with the generators of
+  // packing orbitopes skipped or not.
+  std::mt19937 rng(17);
+  int reduced = 0, fixed = 0;
+  for (int t = 0; t < scaled(60); ++t) {
+    const MipProblem p = to_problem(small_symmetric_binary(rng, t));
+    if (p.num_cols() > 18) continue;
+    const Symmetry s = detect_symmetry(p);
+    CHECK(all_generators_valid(p, s));
+    const double opt = enumerate_binary(p);
+    std::vector<char> used;
+    detect_packing_orbitopes(p, s, &used);
+    for (int variant = 0; variant < 4; ++variant) {
+      SstOptions o;
+      o.mode = 1 + variant % 2;
+      o.seed = static_cast<uint64_t>(t * 7 + variant);
+      const SstResult r = sst_reductions(p, s, variant < 2 ? std::vector<char>{} : used, o);
+      // Rows only between columns of one orbit (equal data), fixings only of binaries.
+      for (const auto& [l, f] : r.rows) {
+        CHECK(l != f);
+        CHECK(p.cost[l] == p.cost[f] && p.col_lb[l] == p.col_lb[f] && p.col_ub[l] == p.col_ub[f]);
+      }
+      if (r.empty()) continue;
+      ++reduced;
+      fixed += !r.fixed_zero.empty();
+      const MipProblem q = apply_sst(p, r);
+      const double opt2 = enumerate_binary(q);
+      if (std::abs(opt2 - opt) > 1e-9) {
+        std::fprintf(stderr, "  model %d variant %d: optimum %g, with SST rows %g (%zu rows, %zu fixed)\n", t, variant,
+                     opt, opt2, r.rows.size(), r.fixed_zero.size());
+        CHECK(false);
+      }
+    }
+  }
+  CHECK(reduced >= scaled(60));
+  CHECK(fixed >= 10);
+}
+
+TEST(symmetry_solves_match_enumeration) {
+  // End to end with all symmetry handling (SST rows, orbitopal fixing, orbital branching) against
+  // enumeration, opportunistic with 1 / 3 threads and deterministic with 2.
+  std::mt19937 rng(23);
+  set_env("MILP_NO_ZEROHALF", true);
+  set_env_value("MILP_SST_MIN_FIX", "0");  // symmetry-breaking rows whenever they fix something
+  int checked = 0;
+  for (int t = 0; t < scaled(40); ++t) {
+    const Model m = small_symmetric_binary(rng, t);
+    const MipProblem p = to_problem(m);
+    if (p.num_cols() > 18) continue;
+    const double opt = enumerate_binary(p);
+    for (int variant = 0; variant < 3; ++variant) {
+      SolverParams sp;
+      sp.verbosity = 0;
+      sp.threads = variant == 0 ? 1 : variant == 1 ? 3 : 2;
+      sp.deterministic = variant == 2;
+      sp.time_limit = 5;
+      sp.mip_rel_gap = 0.0;
+      sp.mip_abs_gap = 1e-9;
+      const SolveResult r = solve(m, sp);
+      if (opt == kInf) {
+        CHECK(r.status == Status::Infeasible);
+        continue;
+      }
+      REQUIRE(r.status == Status::Optimal);
+      CHECK(m.violation(r.x).max() <= 1e-6);
+      if (std::abs(r.objective - opt) > 1e-6) {
+        std::fprintf(stderr, "  model %d variant %d: optimum %g, solve %g\n", t, variant, opt, r.objective);
+        CHECK(false);
+      }
+      ++checked;
+    }
+  }
+  set_env("MILP_NO_ZEROHALF", false);
+  set_env("MILP_SST_MIN_FIX", false);
+  CHECK(checked >= scaled(90));
 }

@@ -55,8 +55,9 @@ class TestExpressions(unittest.TestCase):
         self.assertNotEqual(x, y)
         with self.assertRaises(TypeError):
             bool(x + y <= 1)
+        self.assertIsInstance(x * y, popso.QuadExpr)
         with self.assertRaises(TypeError):
-            x * y  # nonlinear
+            x * y * x  # degree 3
 
     def test_mixing_models_is_rejected(self):
         a, b = popso.Model(), popso.Model()
@@ -267,6 +268,95 @@ class TestLogical(unittest.TestCase):
             self.assertEqual(m2.var("z").vtype, popso.BINARY)
             r2 = m2.solve(threads=1)
             self.assertAlmostEqual(r2.objective, 6.0, places=6)  # a = 2 with z = 0
+
+
+
+class TestQuadratic(unittest.TestCase):
+    def test_quadexpr_operators(self):
+        m = popso.Model()
+        x, y = m.add_var(name="x"), m.add_var(name="y")
+        q = 2 * x * x + 3 * x * y - y + 1
+        self.assertIsInstance(q, popso.QuadExpr)
+        self.assertEqual(q.quad, {(0, 0): 2.0, (1, 0): 3.0})
+        self.assertEqual(q.linear.terms, {1: -1.0})
+        self.assertEqual(q.constant, 1.0)
+        p = (x + 1) * (y - 2)  # x y - 2 x + y - 2
+        self.assertEqual(p.quad, {(1, 0): 1.0})
+        self.assertEqual(p.linear.terms, {0: -2.0, 1: 1.0})
+        self.assertEqual(p.constant, -2.0)
+        self.assertEqual((x ** 2 - q).quad, {(0, 0): -1.0, (1, 0): -3.0})
+        self.assertEqual((q / 2).quad[(0, 0)], 1.0)
+        with self.assertRaises(TypeError):
+            m.add_constr(x * y <= 1)
+        with self.assertRaises(TypeError):
+            x * y * x  # noqa: B018 (degree 3)
+
+    def test_qp_and_miqp(self):
+        m = popso.Model()
+        x = m.add_var(lb=-10, ub=10, name="x")
+        y = m.add_var(lb=-10, ub=10, name="y")
+        m.add_constr(x + y >= 1)
+        # min (x - 1)^2 + (y - 2)^2 + x y  ->  x^2 + y^2 + x y - 2 x - 4 y + 5
+        obj = (x - 1) ** 2 + (y - 2) ** 2 + x * y
+        m.set_objective(obj)
+        self.assertEqual(sorted(m.get_q()), [(0, 0, 2.0), (1, 0, 1.0), (1, 1, 2.0)])
+        r = m.solve(threads=1)
+        self.assertEqual(r.status, "OPTIMAL")
+        # Unconstrained optimum: 2x + y = 2, x + 2y = 4 -> x = 0, y = 2 (feasible).
+        self.assertAlmostEqual(r[x], 0.0, places=5)
+        self.assertAlmostEqual(r[y], 2.0, places=5)
+        self.assertAlmostEqual(r.objective, r[obj], places=7)
+        self.assertAlmostEqual(r.objective, 1.0, places=6)
+        # Duals: the row is inactive; x - y <= -2.5 binds (x = -0.25, y = 2.25, dual -0.25).
+        self.assertEqual(len(r.duals), 1)
+        self.assertAlmostEqual(r.duals[0], 0.0, places=6)
+        self.assertAlmostEqual(r.reduced_cost(x), 0.0, places=6)
+        cap = m.add_constr(x - y <= -2.5, name="cap")
+        r = m.solve(threads=1)
+        self.assertAlmostEqual(r.objective, 1.0625, places=6)
+        self.assertAlmostEqual(r.dual(cap), -0.25, places=6)
+        self.assertAlmostEqual(r.duals[0], 0.0, places=6)
+        self.assertAlmostEqual(r.reduced_cost("y"), 0.0, places=6)
+        m.sense = popso.MAXIMIZE
+        m.set_objective(-1 * obj)
+        r = m.solve(threads=1)
+        self.assertAlmostEqual(r.objective, -1.0625, places=6)
+        self.assertAlmostEqual(r.dual(cap), 0.25, places=6)
+        mi = popso.Model()
+        a = mi.add_var(lb=-5, ub=5, vtype=popso.INTEGER, name="a")
+        b = mi.add_var(lb=-5, ub=5, name="b")
+        mi.set_objective((a - 0.6) ** 2 + (b - a - 0.3) ** 2)
+        r2 = mi.solve(threads=1)
+        self.assertEqual(r2.status, "OPTIMAL")
+        self.assertIsNone(r2.duals)
+        with self.assertRaises(ValueError):
+            r2.reduced_cost(a)
+        self.assertAlmostEqual(r2[a], 1.0, places=6)
+        self.assertAlmostEqual(r2.objective, 0.16, places=6)
+        # Replacing the objective by a linear one removes Q.
+        mi.set_objective(a + b)
+        self.assertEqual(mi.get_q(), [])
+
+    def test_nonconvex_and_files(self):
+        m = popso.Model()
+        x = m.add_var(lb=-1, ub=1, name="x")
+        m.set_objective(-1 * x * x)
+        self.assertEqual(m.solve(threads=1).status, "NONCONVEX")
+        m.sense = popso.MAXIMIZE
+        r = m.solve(threads=1)
+        self.assertEqual(r.status, "OPTIMAL")
+        self.assertAlmostEqual(r.objective, 0.0, places=6)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "q.mps")
+            m.write_mps(path)
+            m2 = popso.read_mps(path)
+            self.assertEqual(m2.get_q(), [(0, 0, -2.0)])
+            lp = os.path.join(d, "q.lp")
+            with open(lp, "w") as f:
+                f.write("min\n obj: x + [ x ^ 2 + 4 x * y + 6 y ^ 2 ] / 2\nst\n c: x + y >= 1\nend\n")
+            m3 = popso.read_lp(lp)
+            self.assertEqual(sorted(m3.get_q()), [(0, 0, 1.0), (1, 0, 2.0), (1, 1, 6.0)])
+            self.assertEqual(m3.solve(threads=1).status, "OPTIMAL")
 
 
 if __name__ == "__main__":

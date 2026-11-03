@@ -1,0 +1,23 @@
+NAME ZECEVIC2
+ROWS
+ N  OBJ
+ L  R0
+ L  R1
+COLUMNS
+    C0  OBJ  -2.0
+    C0  R0  1.0
+    C0  R1  1.0
+    C1  OBJ  -3.0
+    C1  R0  1.0
+    C1  R1  4.0
+RHS
+    RHS  R0  2.0
+    RHS  R1  4.0
+BOUNDS
+ LO BND  C0  0.0
+ UP BND  C0  10.0
+ LO BND  C1  0.0
+ UP BND  C1  10.0
+QUADOBJ
+    C1  C1  4.0
+ENDATA

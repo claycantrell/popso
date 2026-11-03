@@ -131,6 +131,25 @@ CONFIG = [
     ("indsched", "small", 1, dict(n=6)),
     ("indsched", "medium", 1, dict(n=8)),
     ("indsched", "large", 1, dict(n=10)),
+    # ---- quadratic objectives: convex QP (barrier) and MIQP (branch-and-bound on QP relaxations)
+    ("portfolio", "tiny", 1, dict(n=10, k=3, umax=0.3)),
+    ("portfolio", "small", 1, dict(n=60, k=5)),
+    ("portfolio", "medium", 1, dict(n=300, k=10)),
+    ("portfolio", "large", 1, dict(n=2000, k=15, factor_form=True, umax=0.02)),
+    ("lsq", "tiny", 1, dict(rows=20, cols=8, density=0.5)),
+    ("lsq", "small", 1, dict(rows=150, cols=50, density=0.15)),
+    ("lsq", "medium", 1, dict(rows=1500, cols=400, density=0.02)),
+    ("lsq", "large", 1, dict(rows=5000, cols=1500, density=0.005)),
+    ("miqpport", "tiny", 1, dict(n=8, K=3, risk=20.0)),
+    ("miqpport", "small", 1, dict(n=30, K=5, risk=20.0)),
+    ("miqpport", "medium", 1, dict(n=60, K=6, risk=20.0)),
+    ("miqpport", "large", 1, dict(n=100, K=8, risk=30.0)),
+    ("miqprand", "tiny", 1, dict(n=6, m=3)),
+    ("miqprand", "small", 1, dict(n=20, m=10)),
+    ("miqprand", "medium", 1, dict(n=40, m=20)),
+    ("miqprand", "large", 1, dict(n=60, m=30)),
+    ("miqpport", "hard", 1, dict(n=200, K=12, risk=40.0)),
+    ("miqprand", "hard", 1, dict(n=70, m=35)),
 ]
 
 

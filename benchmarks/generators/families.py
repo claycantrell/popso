@@ -10,6 +10,7 @@ get explicit finite or infinite bounds (no reliance on MARKER defaults).
 from __future__ import annotations
 
 import math
+from math import inf as INF
 
 import numpy as np
 
@@ -660,6 +661,112 @@ def build_indsched(rng, n, pmax=20):
     return md
 
 
+# ------------------------------------------------- quadratic objectives (QP / MIQP)
+
+def _covariance(rng, n, k):
+    """Factor-model covariance F F^T / k + diag(d) (positive definite), returned as (F / sqrt(k), d)."""
+    F = rng.normal(0.0, 1.0, (n, k)) * rng.uniform(0.05, 0.3, n)[:, None]
+    d = rng.uniform(0.001, 0.02, n)
+    return F / math.sqrt(k), d
+
+
+def build_portfolio(rng, n, k=5, factor_form=False, risk=1.0, umax=0.1, sectors=5):
+    """Markowitz portfolio (continuous QP): min risk * x'Sigma x - mu'x, sum x = 1,
+    0 <= x_j <= umax, sector caps.  Dense Sigma (n(n+1)/2 Hessian entries), or with
+    factor_form the factor exposures y = F'x as variables (diagonal Hessian)."""
+    F, d = _covariance(rng, n, k)
+    mu = rng.uniform(0.0, 0.15, n) + 0.3 * (F @ rng.uniform(0.0, 1.0, k))
+    md = _model("portfolio")
+    x = [md.add_var(lb=0.0, ub=umax, obj=-float(mu[j]), name=f"x{j}") for j in range(n)]
+    md.add_constr(qsum(x) == 1.0, "budget")
+    sec = rng.integers(0, sectors, n)
+    for s_ in range(sectors):
+        members = [x[j] for j in range(n) if sec[j] == s_]
+        if members:
+            md.add_constr(qsum(members) <= 0.35, f"sector{s_}")
+    if factor_form:
+        for f in range(k):
+            y = md.add_var(lb=-INF, ub=INF, name=f"y{f}")
+            md.add_constr(_lin([float(F[j, f]) for j in range(n)], x) - y == 0.0, f"factor{f}")
+            md.add_quad(y, y, risk)
+        for j in range(n):
+            md.add_quad(x[j], x[j], risk * float(d[j]))
+    else:
+        S = F @ F.T + np.diag(d)
+        for i in range(n):
+            md.add_quad(x[i], x[i], risk * float(S[i, i]))
+            for j in range(i):
+                md.add_quad(x[i], x[j], 2.0 * risk * float(S[i, j]))
+    return md
+
+
+def build_lsq(rng, rows, cols, density=0.2, box=1.0):
+    """Constrained least squares (continuous QP): min ||A x - b||^2 with residual
+    variables r = A x - b (diagonal Hessian over r), -box <= x <= box and a few
+    linear side constraints."""
+    md = _model("lsq")
+    x = [md.add_var(lb=-box, ub=box, name=f"x{j}") for j in range(cols)]
+    x_true = rng.uniform(-1.5 * box, 1.5 * box, cols)  # partly outside the box: active bounds
+    for i in range(rows):
+        nz = max(1, int(rng.binomial(cols, density)))
+        idx = rng.choice(cols, nz, replace=False)
+        a = rng.normal(0.0, 1.0, nz)
+        b = float(a @ x_true[idx]) + float(rng.normal(0.0, 0.1))
+        r = md.add_var(lb=-INF, ub=INF, name=f"r{i}")
+        md.add_constr(_lin(a, [x[j] for j in idx]) - r == b, f"res{i}")
+        md.add_quad(r, r, 1.0)
+    for t in range(max(1, cols // 20)):
+        idx = rng.choice(cols, min(cols, 5), replace=False)
+        md.add_constr(qsum(x[j] for j in idx) <= 0.5 * box, f"side{t}")
+    return md
+
+
+def build_miqp_portfolio(rng, n, K, k=4, risk=2.0, lmin=0.05, umax=0.4):
+    """Cardinality-constrained portfolio (MIQP): min risk * x'Sigma x - mu'x,
+    sum x = 1, at most K assets held (z binary), lmin z_j <= x_j <= umax z_j."""
+    F, d = _covariance(rng, n, k)
+    S = F @ F.T + np.diag(d)
+    mu = rng.uniform(0.0, 0.2, n)
+    md = _model("miqpport")
+    x = [md.add_var(lb=0.0, ub=umax, obj=-float(mu[j]), name=f"x{j}") for j in range(n)]
+    z = [md.add_var(vtype="B", name=f"z{j}") for j in range(n)]
+    md.add_constr(qsum(x) == 1.0, "budget")
+    md.add_constr(qsum(z) <= K, "card")
+    for j in range(n):
+        md.add_constr(x[j] - umax * z[j] <= 0.0, f"on{j}")
+        md.add_constr(x[j] - lmin * z[j] >= 0.0, f"min{j}")
+    for i in range(n):
+        md.add_quad(x[i], x[i], risk * float(S[i, i]))
+        for j in range(i):
+            md.add_quad(x[i], x[j], 2.0 * risk * float(S[i, j]))
+    return md
+
+
+def build_miqp_rand(rng, n, m, frac_int=0.5, imax=5):
+    """Random convex MIQP: dense Q = G G^T + 0.1 I, general integers in [-imax, imax]
+    and continuous columns in boxes, random inequality rows feasible at a random point."""
+    G = rng.normal(0.0, 1.0, (n, max(2, n // 2)))
+    Q = G @ G.T + 0.1 * np.eye(n)
+    md = _model("miqprand")
+    x0 = rng.uniform(-imax, imax, n)
+    xs = []
+    for j in range(n):
+        if rng.random() < frac_int:
+            xs.append(md.add_var(lb=-imax, ub=imax, vtype="I", obj=float(rng.normal(0, 5)), name=f"x{j}"))
+        else:
+            xs.append(md.add_var(lb=-imax, ub=imax, obj=float(rng.normal(0, 5)), name=f"x{j}"))
+    for i in range(m):
+        idx = rng.choice(n, max(2, n // 3), replace=False)
+        a = np.round(rng.normal(0.0, 3.0, len(idx)), 2)
+        act = float(a @ x0[idx])
+        md.add_constr(_lin(a, [xs[j] for j in idx]) <= round(act + abs(rng.normal(0, 2)), 2), f"r{i}")
+    for i in range(n):
+        md.add_quad(xs[i], xs[i], 0.5 * float(Q[i, i]))
+        for j in range(i):
+            md.add_quad(xs[i], xs[j], float(Q[i, j]))
+    return md
+
+
 BUILDERS = {
     "knapsack": build_knapsack,
     "mkp": build_mkp,
@@ -684,4 +791,8 @@ BUILDERS = {
     "semilot": build_semilot,
     "pwlnet": build_pwlnet,
     "indsched": build_indsched,
+    "portfolio": build_portfolio,
+    "lsq": build_lsq,
+    "miqpport": build_miqp_portfolio,
+    "miqprand": build_miqp_rand,
 }

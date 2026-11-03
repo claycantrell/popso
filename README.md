@@ -5,7 +5,7 @@
 [![ci](https://github.com/gozwei/popso/actions/workflows/ci.yml/badge.svg)](https://github.com/gozwei/popso/actions/workflows/ci.yml)
 
 **popso** (Polkowski's Optimization Solver) is an open-source solver for **mixed-integer linear programs (MILP)** and **linear programs
-(LP)**. It is written from scratch in C++20 using only the standard library.
+(LP)**, and, since v0.4, for **convex quadratic programs (QP)** and **mixed-integer convex quadratic programs (MIQP)**. It is written from scratch in C++20 using only the standard library.
 
 This is a fun side project by [Marcin Polkowski](https://marcinpolkowski.com). The goal is
 a fully open-source solver that holds its own against the best solvers on real
@@ -18,7 +18,7 @@ instances, and is faster overall, than the open-source solvers HiGHS and SCIP:
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| popso | 60/63 | 11.4 |
+| popso | 59/63 | 10.5 |
 | HiGHS 1.15 | 53/63 | 18.9 |
 | SCIP 10 | 50/63 | 21.3 |
 
@@ -57,7 +57,8 @@ The solver reads a model in MPS format (free or fixed) or in the CPLEX LP format
 a summary. Besides continuous, integer and binary variables, models may have
 semi-continuous and semi-integer variables, SOS1/SOS2 constraints and indicator
 constraints (MPS `SC`/`SI` bounds, `SOS` and `INDICATORS` sections; LP `Semi-Continuous` and
-`SOS` sections and `b = 1 -> ...` constraints). The format is chosen by the file extension (`.lp` is LP, anything else MPS,
+`SOS` sections and `b = 1 -> ...` constraints). The objective may have a convex quadratic part
+(see [Quadratic objectives](#quadratic-objectives-qp-and-miqp) below). The format is chosen by the file extension (`.lp` is LP, anything else MPS,
 case-insensitive); `--format lp|mps` overrides it:
 
 ```
@@ -84,6 +85,7 @@ x1 1
 |---|---|
 | `--sol <file>` | write the solution file |
 | `--start <file>` | starting solution in the same `name value` format; may be partial (see below) |
+| `--duals <file>` | write row duals and reduced costs (`row <name> <value>` / `col <name> <value>` lines; continuous QPs) |
 | `--format <mps\|lp>` | input format (default: from the file extension) |
 | `--time-limit <sec>` | wall-clock time limit (default: none) |
 | `--threads <n>` | number of threads (0 = all cores, the default) |
@@ -102,6 +104,57 @@ x1 1
 with `--sol`. A complete feasible start becomes the first incumbent. If only some values are given, or
 the start is infeasible, the given integer values are fixed and the rest is completed by a short
 sub-MIP. If that fails, the start is ignored and the log says so.
+
+### Quadratic objectives (QP and MIQP)
+
+The objective can be `c'x + 1/2 x'Qx` with a symmetric Q. In MPS, Q comes in a `QUADOBJ` section
+(one triangle; an off-diagonal entry stands for both Q_ij and Q_ji) or in a `QMATRIX` / CPLEX
+`QSECTION` section (the whole matrix). In the LP format, the quadratic terms go in brackets in the
+objective:
+
+```
+Minimize
+ obj: - x - 2 y + [ 2 x ^ 2 + 2 x * y + 4 y ^ 2 ] / 2
+Subject To
+ c1: x + y <= 3
+End
+```
+
+- The objective must be **convex**: Q positive semidefinite when minimizing, negative
+  semidefinite when maximizing. popso checks this before solving (a sparse factorization of the
+  scaled Q) and reports the status `NONCONVEX` otherwise; Q that is semidefinite only up to a
+  relative 1e-6 (round-off in the input) is accepted with that much added to its diagonal.
+- **Presolve** for quadratic models removes fixed and empty columns (their quadratic terms move
+  into the linear part), fixes columns without quadratic terms by dual arguments, turns
+  singleton rows into bounds and drops empty and redundant rows; no column is substituted.
+- **Continuous QPs** are solved by the barrier method with Q in the Newton system (the augmented
+  system; the normal equations when Q is diagonal). There is no crossover and no basis: the
+  result is the primal point, the objective and the **dual values** (row duals y and reduced
+  costs d = c + Qx - A'y of the final interior point, so complementarity holds to the barrier's
+  tolerance; when minimizing, y >= 0 at an active lower row bound and <= 0 at an upper one, the
+  opposite when maximizing). Infeasible and unbounded QPs are confirmed by the simplex method on
+  auxiliary LPs.
+- **MIQPs** (integer variables, linear constraints, convex objective) are solved by
+  branch-and-bound on QP relaxations: the root by the barrier, the nodes by a dual active-set
+  method warm-started from the parent node. Node bounds are Lagrangian bounds that stay valid for
+  inexact solves, and they also tighten integer bounds (reduced-cost fixing). The search uses
+  domain propagation, reliability branching, rounding, a QP dive and feasibility jump on a
+  linearized objective; it is single-threaded and deterministic.
+- Cutting planes are not used for quadratic models yet, and quadratic constraints are not
+  supported (MPS `QCMATRIX`, LP brackets in constraints: an error).
+
+The C API sets Q with `popso_set_q` / `popso_add_q_entries` (and reads it with
+`popso_get_q`) and returns the duals of a continuous QP with `popso_get_duals` /
+`popso_get_reduced_costs` (`popso_has_duals`); in Python, products of variables in
+`set_objective` make a quadratic objective, and `Result.duals` / `Result.reduced_costs` (or
+`r.dual(constr)`, `r.reduced_cost(var)`) hold the duals:
+
+```python
+x = m.add_var(lb=-10, ub=10, name="x")
+y = m.add_var(lb=-10, ub=10, vtype=popso.INTEGER, name="y")
+m.set_objective((x - 1) ** 2 + x * y + 2 * y * y - 3 * y)   # a popso.QuadExpr
+r = m.solve()
+```
 
 ### C library
 
@@ -172,6 +225,10 @@ pip install ./python
 
 ## What's inside
 
+- **QP and MIQP:** convexity test by a sparse factorization of the scaled Hessian; the barrier
+  method with the Hessian in the augmented system; branch-and-bound with a warm-started dual
+  active-set QP solver at the nodes, safe Lagrangian bounds, reliability branching and QP-based
+  heuristics.
 - **LP:** bounded dual simplex with hyper-sparse LU factorization, Forrest–Tomlin updates and
   dual steepest-edge pricing, plus a primal simplex for cleanup. An interior-point (barrier)
   method: Mehrotra predictor-corrector with Gondzio correctors, AMD ordering and a supernodal
@@ -199,7 +256,8 @@ pip install ./python
   - reliability branching on pseudocosts with strong branching;
   - node-level domain propagation and conflict analysis;
   - reduced-cost fixing;
-  - symmetry handling (orbital fixing, orbitopes);
+  - symmetry handling (orbital branching, orbitopes, symmetry-breaking reductions from a
+    stabilizer chain);
   - root and in-tree restarts.
 - **Parallelism:** multithreaded tree search, either opportunistic or fully deterministic
   (`--deterministic` gives the same result on every run with the same thread count).
@@ -209,8 +267,13 @@ pip install ./python
 
 ## Current limitations
 
-- **Problem classes:** LP and MILP only. No quadratic objectives or constraints, no general
-  nonlinear constraints.
+- **Problem classes:** LP, MILP, and convex QP / MIQP (quadratic objective, linear
+  constraints). No quadratic constraints, no general nonlinear constraints, no nonconvex
+  objectives.
+- **Quadratic models:** a basic presolve only, no cutting planes, no parallel MIQP search; the
+  node QP solver keeps a dense copy of the Hessian, so MIQPs with more than 3000 columns fall back
+  to the much slower barrier at every node. Dual
+  values only for continuous QPs (interior point, no basis). MIQP performance is far from the commercial solvers.
 - **Model features:** semi-continuous variables, SOS constraints and indicator constraints
   are reformulated with binary variables (big-M rows where bounds allow). There is no
   specialized branching on SOS sets, and presolve is skipped for models with constraints
@@ -218,8 +281,8 @@ pip install ./python
   objectives).
 - **Input and interfaces:**
   - MPS and LP-format input only (no gzipped files).
-  - The C API and the Python bindings have no callbacks. They return no LP dual values or reduced
-    costs, and a running solve cannot be interrupted.
+  - The C API and the Python bindings have no callbacks. They return no dual values or reduced
+    costs for LPs and MILPs (only for continuous QPs), and a running solve cannot be interrupted.
 - **LP algorithms:** the barrier solver is new and not tuned yet; its factorization is slower
   than in mature solvers. It has no homogeneous self-dual model: when it only suspects an
   infeasible or unbounded LP, the simplex confirms it. MIP root LPs use the dual simplex unless

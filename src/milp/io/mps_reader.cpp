@@ -107,7 +107,7 @@ class NameTable {
   size_t size_ = 0;
 };
 
-enum class Section { None, Name, ObjSense, ObjName, Rows, Columns, Rhs, Ranges, Bounds, Sos, Indicators, End };
+enum class Section { None, Name, ObjSense, ObjName, Rows, Columns, Rhs, Ranges, Bounds, Sos, Indicators, Quad, End };
 
 constexpr Index kObjRow = -1;
 constexpr Index kDroppedRow = -2;
@@ -153,6 +153,7 @@ class MpsParser {
   void parse_bounds();
   void parse_sos();
   void parse_indicators();
+  void parse_quadratic();
   void parse_sense(string_view tok);
 
   double number(string_view tok) const {
@@ -221,6 +222,12 @@ class MpsParser {
     size_t line;
   };
   std::vector<IndicatorSpec> indicators_;
+  // Quadratic objective (lower triangle triplets). quad_full_: the current section lists the whole
+  // matrix (QMATRIX, QSECTION), so an off-diagonal entry is half of its pair.
+  std::vector<Index> q_row_, q_col_;
+  std::vector<double> q_val_;
+  bool quad_full_ = false;
+  const char* quad_name_ = "QUADOBJ";
   std::vector<Index> trip_col_, trip_row_;
   std::vector<double> trip_val_;
   bool in_int_block_ = false;
@@ -286,6 +293,9 @@ Model MpsParser::parse() {
   }
   m.A = SparseMatrix::from_triplets(static_cast<Index>(n), static_cast<Index>(nr), trip_col_, trip_row_, trip_val_);
   m.sos = std::move(sos_);
+  m.q_row = std::move(q_row_);
+  m.q_col = std::move(q_col_);
+  m.q_val = std::move(q_val_);
   if (!indicators_.empty()) {
     // Rows named in INDICATORS are indicator constraints, not ordinary rows.
     const SparseMatrix R = m.A.transpose();
@@ -360,6 +370,7 @@ void MpsParser::process_line(const char* begin, const char* end) {
     case Section::Bounds: parse_bounds(); break;
     case Section::Sos: parse_sos(); break;
     case Section::Indicators: parse_indicators(); break;
+    case Section::Quad: parse_quadratic(); break;
     default: error("data line outside of a section");
   }
 }
@@ -405,7 +416,8 @@ bool MpsParser::handle_header(string_view line) {
                                       {"INDICATORS", Section::Indicators}};
   const bool in_data = section_ == Section::ObjSense || section_ == Section::ObjName || section_ == Section::Rows ||
                        section_ == Section::Columns || section_ == Section::Rhs || section_ == Section::Ranges ||
-                       section_ == Section::Bounds || section_ == Section::Sos || section_ == Section::Indicators;
+                       section_ == Section::Bounds || section_ == Section::Sos || section_ == Section::Indicators ||
+                       section_ == Section::Quad;
   for (const auto& d : kData) {
     if (!iequals(kw, d.name)) continue;
     if (ntok_ == 1) {
@@ -416,8 +428,26 @@ bool MpsParser::handle_header(string_view line) {
     if (in_data) return false;  // e.g. an unindented RHS entry with set name "RHS"
     error("unexpected fields after section " + std::string(kw));
   }
-  static const char* const kUnsupported[] = {"QUADOBJ",  "QSECTION", "QMATRIX", "QCMATRIX", "LAZYCONS", "USERCUTS",
-                                             "GENCONS",  "PWLOBJ",   "CSECTION", "BRANCH",   "SETS"};
+  // Quadratic objective: QUADOBJ (one triangle), QMATRIX and CPLEX's QSECTION (whole matrix).
+  if (iequals(kw, "QUADOBJ") || iequals(kw, "QMATRIX") || iequals(kw, "QSECTION")) {
+    const bool qsection = iequals(kw, "QSECTION");
+    if (ntok_ > (qsection ? 2 : 1)) {
+      if (in_data) return false;
+      error("unexpected fields after section " + std::string(kw));
+    }
+    if (qsection && ntok_ == 2) {
+      const Index* r = rows_.find(tok_[1]);
+      if (!r || *r != kObjRow) {
+        error("quadratic constraints are not supported yet (QSECTION for row '" + std::string(tok_[1]) + "')");
+      }
+    }
+    section_ = Section::Quad;
+    quad_full_ = !iequals(kw, "QUADOBJ");
+    quad_name_ = iequals(kw, "QUADOBJ") ? "QUADOBJ" : qsection ? "QSECTION" : "QMATRIX";
+    return true;
+  }
+  if (iequals(kw, "QCMATRIX")) error("quadratic constraints are not supported yet (QCMATRIX section)");
+  static const char* const kUnsupported[] = {"LAZYCONS", "USERCUTS", "GENCONS", "PWLOBJ", "CSECTION", "BRANCH", "SETS"};
   for (const char* u : kUnsupported) {
     if (iequals(kw, u)) error("unsupported MPS section '" + std::string(kw) + "'");
   }
@@ -660,6 +690,18 @@ void MpsParser::parse_indicators() {
   indicators_.push_back({r, j, value, line_no_});
 }
 
+// QUADOBJ / QMATRIX / QSECTION entry " <column> <column> <value>".
+void MpsParser::parse_quadratic() {
+  if (ntok_ != 3) error(std::string(quad_name_) + ": expected '<column> <column> <value>'");
+  const Index a = col_index(tok_[0], quad_name_), b = col_index(tok_[1], quad_name_);
+  double v = number(tok_[2]);
+  if (!std::isfinite(v)) error(std::string(quad_name_) + ": coefficient must be finite");
+  if (quad_full_ && a != b) v *= 0.5;  // (a, b) and (b, a) are both listed
+  q_row_.push_back(std::max(a, b));
+  q_col_.push_back(std::min(a, b));
+  q_val_.push_back(v);
+}
+
 std::string read_file(const std::string& path) {
   if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".gz") == 0)
     throw MpsError(path + ": gzipped MPS files are not supported; decompress first");
@@ -869,6 +911,13 @@ std::string write_mps_string(const Model& model_in) {
       if (hi != kInf) bound_val("UP", j, hi);
       else if (is_int) bound("PL", j);  // explicit for readers using the legacy [0,1] default
     }
+  }
+  if (model.has_quadratic()) {
+    // One triangle (QUADOBJ); entries (row, column) with row >= column.
+    const SparseMatrix Q = model.q_lower();
+    out += "QUADOBJ\n";
+    for (Index j = 0; j < Q.num_major; ++j)
+      for (Index p = Q.begin(j); p < Q.end(j); ++p) append_entry(out, cn[j], cn[Q.index[p]], Q.value[p]);
   }
   if (!model.sos.empty()) {
     out += "SOS\n";

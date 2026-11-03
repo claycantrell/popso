@@ -41,8 +41,13 @@
 //    constraints, bounds, then integer sections); variables that appear only
 //    in Bounds or General/Binary sections are created there.
 //
+//  - Quadratic objective terms in brackets, CPLEX style:
+//    "obj: 3 x + [ 2 x ^ 2 + 3 x * y ] / 2" (squares 'x ^ 2' or 'x * x',
+//    products 'x * y'; the optional '/ d' divides the bracket, usually 2).
+//    The bracket may carry a sign ("- [ ... ]").
+//
 // Not supported (rejected with a "not supported" error, never silently
-// misparsed): quadratic terms ('[' ... ']', '^'), equivalence constraints
+// misparsed): quadratic constraints ('[' outside the objective), equivalence constraints
 // ('<->'), lazy constraints / user cuts, general constraints and multiple
 // objectives.
 //

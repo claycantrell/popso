@@ -435,7 +435,7 @@ TEST(mps_errors) {
                        "objective (N) row"));
   CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nBOUNDS\n XX BND x 1\nENDATA\n", "invalid bound type"));
   CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nBOUNDS\n UP BND x\nENDATA\n", "BOUNDS: expected"));
-  CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nQUADOBJ\n x x 1\nENDATA\n", "unsupported MPS section"));
+  CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nQCMATRIX c\n x x 1\nENDATA\n", "quadratic constraints are not supported"));
   CHECK(error_contains("NAME t\nFOO\nENDATA\n", "unknown MPS section 'FOO'"));
   CHECK(error_contains("  x obj 1\n", "data line outside of a section"));
   CHECK(error_contains("NAME t\nROWS\n N obj\n L c\nCOLUMNS\n x c 1\nRHS\n RHS c 1 d 2\nENDATA\n", "unknown row 'd'"));

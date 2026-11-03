@@ -439,6 +439,45 @@
    },
    {
     "date": "2026-11-02",
+    "time_limit": 120.0,
+    "threads": 1,
+    "jobs": 1,
+    "mem_limit_mb": 1500,
+    "solvers": [
+     "highs",
+     "scip"
+    ],
+    "instances": 16,
+    "versions": {
+     "python": "3.12.7",
+     "platform": "macOS-27.2-arm64-arm-64bit",
+     "machine": "arm64",
+     "highs": "1.15.1",
+     "scip": "10.0",
+     "pyscipopt": "6.3.0"
+    }
+   },
+   {
+    "date": "2026-11-02",
+    "time_limit": 300.0,
+    "threads": 1,
+    "jobs": 1,
+    "mem_limit_mb": 1500,
+    "solvers": [
+     "highs"
+    ],
+    "instances": 8,
+    "versions": {
+     "python": "3.12.7",
+     "platform": "macOS-27.2-arm64-arm-64bit",
+     "machine": "arm64",
+     "highs": "1.15.1",
+     "scip": "10.0",
+     "pyscipopt": "6.3.0"
+    }
+   },
+   {
+    "date": "2026-11-02",
     "time_limit": 600.0,
     "threads": 4,
     "jobs": 2,
@@ -448,6 +487,26 @@
      "scip"
     ],
     "instances": 43,
+    "versions": {
+     "python": "3.12.7",
+     "platform": "macOS-27.2-arm64-arm-64bit",
+     "machine": "arm64",
+     "highs": "1.15.1",
+     "scip": "10.0",
+     "pyscipopt": "6.3.0"
+    }
+   },
+   {
+    "date": "2026-11-03",
+    "time_limit": 120.0,
+    "threads": 1,
+    "jobs": 1,
+    "mem_limit_mb": 2000,
+    "solvers": [
+     "highs",
+     "scip"
+    ],
+    "instances": 2,
     "versions": {
      "python": "3.12.7",
      "platform": "macOS-27.2-arm64-arm-64bit",
@@ -6245,6 +6304,238 @@
     }
    }
   },
+  "lsq_large_1": {
+   "file": "benchmarks/instances/lsq_large_1.mps",
+   "num_vars": 6500,
+   "num_cons": 5075,
+   "num_nonzeros": 42821,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 1467.3839322768847,
+   "bound": 1467.3839322768847,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": 1467.3839322768847,
+     "bound": 1467.3839322768847,
+     "time": 2.0159557500155643,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": 1467.383932276885,
+      "max_viol": 1.4210854715202004e-14,
+      "worst": "row res3372 activity -0.5282446681597848 > -0.528244668159799"
+     },
+     "peak_rss_mb": 77.3
+    },
+    "scip": {
+     "status": "timelimit",
+     "objective": 2962.895294415407,
+     "bound": -391.6912697843668,
+     "time": 120.01006195903756,
+     "raw_status": "timelimit",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": 2962.8952944154094,
+      "max_viol": 2.7755575615628914e-14,
+      "worst": "row res226 activity -0.7394251687945042 < -0.7394251687944764"
+     },
+     "peak_rss_mb": 694.5
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "lsq_medium_1": {
+   "file": "benchmarks/instances/lsq_medium_1.mps",
+   "num_vars": 1900,
+   "num_cons": 1520,
+   "num_nonzeros": 13506,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 372.69924187649036,
+   "bound": 372.69924187649036,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": 372.69924187649036,
+     "bound": 372.69924187649036,
+     "time": 0.13022404204821214,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": 372.6992418764903,
+      "max_viol": 6.356026815979021e-15,
+      "worst": "row res1434 activity 0.2283724337847828 < 0.22837243378478916"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "timelimit",
+     "objective": 743.782578695731,
+     "bound": 372.6992416143687,
+     "time": 120.00192487495951,
+     "raw_status": "timelimit",
+     "nodes": 4,
+     "verify": {
+      "feasible": true,
+      "objective": 743.782578695732,
+      "max_viol": 2.0317081350640365e-14,
+      "worst": "row res1353 activity -0.3900401058603036 < -0.39004010586028326"
+     },
+     "peak_rss_mb": 201.7
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "lsq_small_1": {
+   "file": "benchmarks/instances/lsq_small_1.mps",
+   "num_vars": 200,
+   "num_cons": 152,
+   "num_nonzeros": 1288,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 20.61021493013283,
+   "bound": 20.61021493013283,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": 20.61021493013283,
+     "bound": 20.61021493013283,
+     "time": 0.0017295409925282001,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": 20.61021493013283,
+      "max_viol": 1.8318679906315083e-15,
+      "worst": "row res25 activity 0.2929673831404313 > 0.29296738314042947"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 20.610214801507993,
+     "bound": 20.610214801507993,
+     "time": 0.2561064590117894,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": 20.610214802457115,
+      "max_viol": 8.995806322076305e-10,
+      "worst": "var x8=-1.0000000008995806 < lb -1.0"
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "lsq_tiny_1": {
+   "file": "benchmarks/instances/lsq_tiny_1.mps",
+   "num_vars": 28,
+   "num_cons": 21,
+   "num_nonzeros": 110,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 27.318365389164352,
+   "bound": 27.318365389164352,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": 27.318365389164352,
+     "bound": 27.318365389164352,
+     "time": 0.00041266699554398656,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": 27.318365389164356,
+      "max_viol": 6.938893903907228e-16,
+      "worst": "row res3 activity -0.13362261140309176 > -0.13362261140309245"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 27.318365357940166,
+     "bound": 27.318365357940166,
+     "time": 0.01140937500167638,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": 27.318365358832086,
+      "max_viol": 8.995875155903832e-10,
+      "worst": "var x0=-1.0000000008995875 < lb -1.0"
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
   "mas74": {
    "file": "benchmarks/miplib/mas74.mps",
    "num_vars": 151,
@@ -6687,6 +6978,676 @@
      "solvers": [
       "highs",
       "scip"
+     ]
+    }
+   ]
+  },
+  "miqpport_hard_1": {
+   "file": "benchmarks/instances/miqpport_hard_1.mps",
+   "num_vars": 400,
+   "num_cons": 402,
+   "num_nonzeros": 1200,
+   "num_integers": 200,
+   "num_binaries": 200,
+   "sense": "min",
+   "status": "timelimit",
+   "objective": -0.17647918748915942,
+   "bound": -0.1792755947590619,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "timelimit",
+     "objective": 0.1652267110419891,
+     "bound": null,
+     "time": 120.00530129100662,
+     "raw_status": "python-bnb",
+     "nodes": 22276,
+     "verify": {
+      "feasible": true,
+      "objective": 0.1652267110419891,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 50.1
+    },
+    "scip": {
+     "status": "timelimit",
+     "objective": -0.17647918748915942,
+     "bound": -0.1792755947590619,
+     "time": 120.00099683302687,
+     "raw_status": "timelimit",
+     "nodes": 2099,
+     "verify": {
+      "feasible": true,
+      "objective": -0.17647918670468327,
+      "max_viol": 2.220446049250313e-16,
+      "worst": "row budget activity 0.9999999999999998 < 1.0"
+     },
+     "peak_rss_mb": 561.2
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-03",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 2000,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "miqpport_large_1": {
+   "file": "benchmarks/instances/miqpport_large_1.mps",
+   "num_vars": 200,
+   "num_cons": 202,
+   "num_nonzeros": 600,
+   "num_integers": 100,
+   "num_binaries": 100,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -0.17939828091655613,
+   "bound": -0.17939828091655613,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "timelimit",
+     "objective": -0.1285027763150162,
+     "bound": null,
+     "time": 300.0004921250511,
+     "raw_status": "python-bnb",
+     "nodes": 158113,
+     "verify": {
+      "feasible": true,
+      "objective": -0.1285027763150162,
+      "max_viol": 6.938893903907228e-18,
+      "worst": "row min35 activity -6.938893903907228e-18 < 0.0"
+     },
+     "peak_rss_mb": 40.6
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -0.17939828091655613,
+     "bound": -0.17939828091655613,
+     "time": 13.389194625022355,
+     "raw_status": "optimal",
+     "nodes": 796,
+     "verify": {
+      "feasible": true,
+      "objective": -0.17939828011475467,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 181.6
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
+     ]
+    }
+   ]
+  },
+  "miqpport_medium_1": {
+   "file": "benchmarks/instances/miqpport_medium_1.mps",
+   "num_vars": 120,
+   "num_cons": 122,
+   "num_nonzeros": 360,
+   "num_integers": 60,
+   "num_binaries": 60,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -0.15510174334346333,
+   "bound": -0.15510174334346333,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -0.15510174334346333,
+     "bound": -0.15510174334346333,
+     "time": 3.4915096249897033,
+     "raw_status": "python-bnb",
+     "nodes": 4037,
+     "verify": {
+      "feasible": true,
+      "objective": -0.1551017433434633,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 38.6
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -0.155101743837435,
+     "bound": -0.155101743837435,
+     "time": 1.1915901660104282,
+     "raw_status": "optimal",
+     "nodes": 77,
+     "verify": {
+      "feasible": true,
+      "objective": -0.15510174325616377,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 90.2
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
+     ]
+    }
+   ]
+  },
+  "miqpport_small_1": {
+   "file": "benchmarks/instances/miqpport_small_1.mps",
+   "num_vars": 60,
+   "num_cons": 62,
+   "num_nonzeros": 180,
+   "num_integers": 30,
+   "num_binaries": 30,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -0.12843899673250508,
+   "bound": -0.12843899673250508,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -0.12843899673250508,
+     "bound": -0.12843899673250508,
+     "time": 1.0002258750027977,
+     "raw_status": "python-bnb",
+     "nodes": 2387,
+     "verify": {
+      "feasible": true,
+      "objective": -0.12843899673250508,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 37.7
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -0.1284389973040957,
+     "bound": -0.1284389973040957,
+     "time": 0.6486085000215098,
+     "raw_status": "optimal",
+     "nodes": 158,
+     "verify": {
+      "feasible": true,
+      "objective": -0.12843899669148934,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 65.2
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
+     ]
+    }
+   ]
+  },
+  "miqpport_tiny_1": {
+   "file": "benchmarks/instances/miqpport_tiny_1.mps",
+   "num_vars": 16,
+   "num_cons": 18,
+   "num_nonzeros": 48,
+   "num_integers": 8,
+   "num_binaries": 8,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 0.0040389191843889505,
+   "bound": 0.0040389191843889505,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": 0.0040389191843889505,
+     "bound": 0.0040389191843889505,
+     "time": 0.0049863329622894526,
+     "raw_status": "python-bnb",
+     "nodes": 25,
+     "verify": {
+      "feasible": true,
+      "objective": 0.0040389191843889505,
+      "max_viol": 6.743767957467264e-18,
+      "worst": "row on1 activity 6.743767957467264e-18 > 0.0"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 0.004038918709084079,
+     "bound": 0.004038918709084079,
+     "time": 0.10909862502012402,
+     "raw_status": "optimal",
+     "nodes": 9,
+     "verify": {
+      "feasible": true,
+      "objective": 0.004038919185092887,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
+     ]
+    }
+   ]
+  },
+  "miqprand_hard_1": {
+   "file": "benchmarks/instances/miqprand_hard_1.mps",
+   "num_vars": 70,
+   "num_cons": 35,
+   "num_nonzeros": 805,
+   "num_integers": 37,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "timelimit",
+   "objective": -159.7749795667138,
+   "bound": -206.36254806136148,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "unknown",
+     "objective": -158.15096873537567,
+     "bound": null,
+     "time": 14.323463124979753,
+     "raw_status": "python-bnb",
+     "nodes": 4723,
+     "verify": {
+      "feasible": true,
+      "objective": -158.1509687353761,
+      "max_viol": 3.206144703687603e-14,
+      "worst": "row r19 activity -23.269999999999254 > -23.27"
+     },
+     "peak_rss_mb": 38.5
+    },
+    "scip": {
+     "status": "timelimit",
+     "objective": -159.7749795667138,
+     "bound": -206.36254806136148,
+     "time": 120.00063929101452,
+     "raw_status": "timelimit",
+     "nodes": 3850,
+     "verify": {
+      "feasible": true,
+      "objective": -159.77497956672292,
+      "max_viol": 8.998010114780186e-10,
+      "worst": "row r13 activity 3.560000000887041 > 3.56"
+     },
+     "peak_rss_mb": 674.6
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-03",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 2000,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "miqprand_large_1": {
+   "file": "benchmarks/instances/miqprand_large_1.mps",
+   "num_vars": 60,
+   "num_cons": 30,
+   "num_nonzeros": 600,
+   "num_integers": 30,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "timelimit",
+   "objective": -178.95530926668397,
+   "bound": -199.55698077057423,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "unknown",
+     "objective": -150.50138882715927,
+     "bound": null,
+     "time": 0.45442399999592453,
+     "raw_status": "python-bnb",
+     "nodes": 249,
+     "verify": {
+      "feasible": true,
+      "objective": -150.50138882715737,
+      "max_viol": 3.7431169275237153e-13,
+      "worst": "row r18 activity -0.1899999999996257 > -0.19"
+     },
+     "peak_rss_mb": 37.9
+    },
+    "scip": {
+     "status": "timelimit",
+     "objective": -178.95530926668397,
+     "bound": -199.55698077057423,
+     "time": 120.0001502080122,
+     "raw_status": "timelimit",
+     "nodes": 5122,
+     "verify": {
+      "feasible": true,
+      "objective": -178.95530926593753,
+      "max_viol": 3.3306690738754696e-15,
+      "worst": "row r8 activity -3.599999999999988 > -3.6"
+     },
+     "peak_rss_mb": 685.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
+     ]
+    }
+   ]
+  },
+  "miqprand_medium_1": {
+   "file": "benchmarks/instances/miqprand_medium_1.mps",
+   "num_vars": 40,
+   "num_cons": 20,
+   "num_nonzeros": 260,
+   "num_integers": 20,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -263.58198138073965,
+   "bound": -263.58198138073965,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -263.58198138073965,
+     "bound": -263.58198138073965,
+     "time": 2.8433473330223933,
+     "raw_status": "python-bnb",
+     "nodes": 3071,
+     "verify": {
+      "feasible": true,
+      "objective": -263.5819813807402,
+      "max_viol": 3.274994172935565e-15,
+      "worst": "row r7 activity 3.3900000000000112 > 3.39"
+     },
+     "peak_rss_mb": 38.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -263.5819813811505,
+     "bound": -263.5819813811505,
+     "time": 35.57534845802002,
+     "raw_status": "optimal",
+     "nodes": 5060,
+     "verify": {
+      "feasible": true,
+      "objective": -263.5819813802044,
+      "max_viol": 1.7029969699264938e-15,
+      "worst": "row r7 activity 3.390000000000006 > 3.39"
+     },
+     "peak_rss_mb": 197.5
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
+     ]
+    }
+   ]
+  },
+  "miqprand_small_1": {
+   "file": "benchmarks/instances/miqprand_small_1.mps",
+   "num_vars": 20,
+   "num_cons": 10,
+   "num_nonzeros": 60,
+   "num_integers": 12,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -165.71128169403033,
+   "bound": -165.71128169403033,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -165.71128169403033,
+     "bound": -165.71128169403033,
+     "time": 0.02228650002507493,
+     "raw_status": "python-bnb",
+     "nodes": 79,
+     "verify": {
+      "feasible": true,
+      "objective": -165.71128169403022,
+      "max_viol": 1.0248212535001446e-15,
+      "worst": "row r8 activity 3.900000000000004 > 3.9"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "timelimit",
+     "objective": -165.12251689068168,
+     "bound": -169.07924867181129,
+     "time": 119.9999212079565,
+     "raw_status": "timelimit",
+     "nodes": 81380,
+     "verify": {
+      "feasible": true,
+      "objective": -165.1225168897848,
+      "max_viol": 8.909086801622834e-10,
+      "worst": "row r9 activity -3.5699999991122873 > -3.57"
+     },
+     "peak_rss_mb": 346.4
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
+     ]
+    }
+   ]
+  },
+  "miqprand_tiny_1": {
+   "file": "benchmarks/instances/miqprand_tiny_1.mps",
+   "num_vars": 6,
+   "num_cons": 3,
+   "num_nonzeros": 6,
+   "num_integers": 5,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -26.2206316852285,
+   "bound": -26.2206316852285,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -26.2206316852285,
+     "bound": -26.2206316852285,
+     "time": 0.0032475829939357936,
+     "raw_status": "python-bnb",
+     "nodes": 29,
+     "verify": {
+      "feasible": true,
+      "objective": -26.220631685228508,
+      "max_viol": 8.881784197001252e-16,
+      "worst": "var x3=5.000000000000001 > ub 5.0"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -26.220631685724697,
+     "bound": -26.220631685724697,
+     "time": 0.06622999999672174,
+     "raw_status": "optimal",
+     "nodes": 5,
+     "verify": {
+      "feasible": true,
+      "objective": -26.22063168520343,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 300.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs"
      ]
     }
    ]
@@ -9998,6 +10959,238 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    }
+   ]
+  },
+  "portfolio_large_1": {
+   "file": "benchmarks/instances/portfolio_large_1.mps",
+   "num_vars": 2015,
+   "num_cons": 21,
+   "num_nonzeros": 34015,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -0.18777567679892565,
+   "bound": -0.18777567679892565,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -0.18777567679892565,
+     "bound": -0.18777567679892565,
+     "time": 0.03977350000059232,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": -0.18777567679892565,
+      "max_viol": 1.1102230246251565e-16,
+      "worst": "row budget activity 0.9999999999999999 < 1.0"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -0.18777581712285774,
+     "bound": -0.18777581712285774,
+     "time": 1.248069083027076,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": -0.18777581712285782,
+      "max_viol": 8.609038448004078e-10,
+      "worst": "var x1903=-8.609038448004078e-10 < lb 0.0"
+     },
+     "peak_rss_mb": 203.9
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "portfolio_medium_1": {
+   "file": "benchmarks/instances/portfolio_medium_1.mps",
+   "num_vars": 300,
+   "num_cons": 6,
+   "num_nonzeros": 600,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -0.17785544079680168,
+   "bound": -0.17785544079680168,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -0.17785544079680168,
+     "bound": -0.17785544079680168,
+     "time": 0.0025418750010430813,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": -0.17785544079680168,
+      "max_viol": 1.1102230246251565e-16,
+      "worst": "row budget activity 0.9999999999999999 < 1.0"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -0.17785546173002462,
+     "bound": -0.17785546173002462,
+     "time": 7.945538125000894,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": -0.17785546079483275,
+      "max_viol": 8.498683905181733e-10,
+      "worst": "var x48=-8.498683905181733e-10 < lb 0.0"
+     },
+     "peak_rss_mb": 693.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "portfolio_small_1": {
+   "file": "benchmarks/instances/portfolio_small_1.mps",
+   "num_vars": 60,
+   "num_cons": 6,
+   "num_nonzeros": 120,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -0.12676332360006531,
+   "bound": -0.12676332360006531,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -0.12676332360006531,
+     "bound": -0.12676332360006531,
+     "time": 0.0005749589763581753,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": -0.12676332360006531,
+      "max_viol": 2.9714937237584167e-18,
+      "worst": "var x39=-2.9714937237584167e-18 < lb 0.0"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -0.12676332678632052,
+     "bound": -0.12676332678632052,
+     "time": 0.046170332992915064,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": -0.12676332589555514,
+      "max_viol": 8.273372941793742e-10,
+      "worst": "var x25=-8.273372941793742e-10 < lb 0.0"
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "portfolio_tiny_1": {
+   "file": "benchmarks/instances/portfolio_tiny_1.mps",
+   "num_vars": 10,
+   "num_cons": 5,
+   "num_nonzeros": 20,
+   "num_integers": 0,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": -0.09178703019039841,
+   "bound": -0.09178703019039841,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": -0.09178703019039841,
+     "bound": -0.09178703019039841,
+     "time": 0.0005896250368095934,
+     "raw_status": "Optimal",
+     "verify": {
+      "feasible": true,
+      "objective": -0.09178703019039841,
+      "max_viol": 1.1102230246251565e-16,
+      "worst": "row budget activity 0.9999999999999999 < 1.0"
+     },
+     "peak_rss_mb": 21.2
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": -0.09178703139541693,
+     "bound": -0.09178703139541693,
+     "time": 0.003844292019493878,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": -0.09178703048090786,
+      "max_viol": 8.320077120253346e-10,
+      "worst": "var x4=-8.320077120253346e-10 < lb 0.0"
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-02",
+     "time_limit": 120.0,
+     "threads": 1,
+     "jobs": 1,
+     "mem_limit_mb": 1500,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }

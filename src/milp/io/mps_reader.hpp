@@ -34,6 +34,12 @@
 //  - Only the first RHS/RANGES/BOUNDS set is used; entries for other set
 //    names are ignored with a warning.
 //  - Duplicate (row, column) entries are summed.
+//  - Quadratic objective 1/2 x^T Q x: QUADOBJ lists one triangle of Q
+//    (" <col> <col> <value>"; an off-diagonal entry stands for Q_ij and Q_ji),
+//    QMATRIX and CPLEX's QSECTION (without a row name or with the objective's
+//    name) the whole matrix (each off-diagonal pair twice). Repeated entries
+//    are summed. Quadratic constraints (QCMATRIX, QSECTION of another row) are
+//    rejected with a "not supported yet" error.
 //
 // Errors are thrown as MpsError with "<source>:<line>: <message>". Warnings
 // go to `warnings` if given, otherwise to stderr (capped).
@@ -57,7 +63,8 @@ Model read_mps_string(const std::string& text, std::vector<std::string>* warning
 // contain whitespace are replaced (C<j> / R<i>, or whitespace -> '_').
 // Free rows (both bounds infinite) are written as extra N rows, which a
 // reader drops; they carry no constraint anyway. Semi-continuous columns get
-// SC bounds, SOS sets an SOS section, and indicator constraints are written
+// SC bounds, SOS sets an SOS section, a quadratic objective a QUADOBJ
+// section (lower triangle), and indicator constraints are written
 // as rows (after the ordinary ones) listed in an INDICATORS section.
 void write_mps(const Model& model, const std::string& path);
 std::string write_mps_string(const Model& model);

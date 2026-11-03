@@ -47,6 +47,7 @@ struct ProbeImplication {
 // Problem data derived once per cut loop and shared by the separators.
 struct CutData {
   std::vector<std::vector<VarBound>> vlb, vub;  // per column
+  std::vector<char> row_vb;  // per column: has a variable bound from a two-variable row (x <= u y)
   // Probing on binaries (fix to 0 and to 1, propagate the rows): implied bounds on general
   // integers and conflicting binary literal pairs (literal 2j: x_j = 1, 2j + 1: x_j = 0), the
   // latter as adjacency lists (CSR over literals).

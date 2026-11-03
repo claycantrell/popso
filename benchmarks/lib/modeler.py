@@ -192,6 +192,7 @@ class Model:
         self.constrs: list[Constraint] = []
         self.sos = []         # (name, type, [Var], [weight])
         self.indicators = []  # (Var, value, Constraint)
+        self.quad = {}        # objective terms coef * x_i * x_j: {(i, j) with i >= j: coef}
 
     def add_var(self, lb=0.0, ub=INF, obj=0.0, vtype="C", name=None):
         vtype = str(vtype)
@@ -220,6 +221,11 @@ class Model:
         if len(w) != len(vars_) or len(set(w)) != len(w):
             raise ValueError("one distinct weight per member needed")
         self.sos.append((name if name is not None else f"S{len(self.sos)}", sos_type, list(vars_), w))
+
+    def add_quad(self, v1, v2, coef):
+        """Adds the objective term coef * v1 * v2 (coef * v1^2 if v1 is v2)."""
+        i, j = max(v1.index, v2.index), min(v1.index, v2.index)
+        self.quad[(i, j)] = self.quad.get((i, j), 0.0) + float(coef)
 
     def add_indicator(self, binvar, value, con, name=None):
         """binvar == value (0 or 1) implies the constraint con."""
@@ -262,7 +268,8 @@ class Model:
         sos = [(n, t, [v.name for v in vs], w) for n, t, vs, w in self.sos]
         inds = [(c.name, b.name, val, c.sense, c.rhs, [(v.name, a) for v, a in c.terms.items()])
                 for b, val, c in self.indicators]
-        return lp_text(self.name, self.sense, 0.0, cols, rows, sos, inds)
+        quad = [(self.vars[i].name, self.vars[j].name, c) for (i, j), c in sorted(self.quad.items()) if c != 0.0]
+        return lp_text(self.name, self.sense, 0.0, cols, rows, sos, inds, quad)
 
     def to_mps(self):
         out = [f"NAME {self.name}"]
@@ -312,6 +319,13 @@ class Model:
                 out.append(f" S{t} SOS  {n}  1")
                 for v, a in zip(vs, w):
                     out.append(f"    {v.name:<8}  {_num(a)}")
+        if any(c != 0.0 for c in self.quad.values()):
+            # objective c x_i x_j: Q_ij = c (i != j), Q_ii = 2 c (1/2 x'Qx); one triangle
+            out.append("QUADOBJ")
+            for (i, j), c in sorted(self.quad.items(), key=lambda e: (e[0][1], e[0][0])):
+                if c != 0.0:
+                    q = 2.0 * c if i == j else c
+                    out.append(f"    {self.vars[j].name:<8}  {self.vars[i].name:<8}  {_num(q)}")
         if self.indicators:
             out.append("INDICATORS")
             for b, val, c in self.indicators:
@@ -418,13 +432,15 @@ def _lp_wrap(head, parts, width=100):
     return lines
 
 
-def lp_text(name, sense, obj_const, cols, rows, sos=(), indicators=()):
+def lp_text(name, sense, obj_const, cols, rows, sos=(), indicators=(), quad=()):
     """CPLEX LP text.
 
     cols: [(name, obj, lb, ub, vtype)] with vtype "C", "I", "B", "SC" or "SI";
     rows: [(name, lo, hi, [(col name, coef)])] with lo/hi possibly infinite;
     sos: [(name, type, [col name], [weight])];
-    indicators: [(name, binary col name, value, sense "L"/"G"/"E", rhs, [(col name, coef)])].
+    indicators: [(name, binary col name, value, sense "L"/"G"/"E", rhs, [(col name, coef)])];
+    quad: objective terms [(col name, col name, coef)] meaning coef * x * y (coef * x^2 for one
+    column), written as "+ [ 2coef x ^ 2 + 2coef x * y ] / 2".
     """
     if sense not in ("min", "max"):
         raise ValueError(f"bad sense {sense!r}")
@@ -435,6 +451,13 @@ def lp_text(name, sense, obj_const, cols, rows, sos=(), indicators=()):
     obj = _lp_terms((_lp_name(c[0]), c[1]) for c in cols)
     if obj_const:
         obj.append(("- " if obj_const < 0 else "+ ") + _num(abs(obj_const)))
+    if quad:
+        qt = []
+        for a, b, c in quad:
+            term = f"{_lp_name(a)} ^ 2" if a == b else f"{_lp_name(a)} * {_lp_name(b)}"
+            qt.append(("- " if c < 0 else "+ ") + f"{_num(abs(2.0 * c))} {term}")
+        qt[0] = qt[0][2:] if qt[0].startswith("+ ") else "-" + qt[0][2:]
+        obj.extend(["+ ["] + qt + ["] / 2"])
     out.extend(_lp_wrap(" obj:", obj))
     out.append("Subject To")
     first_col = _lp_name(cols[0][0]) if cols else None

@@ -26,12 +26,14 @@ void print_usage(std::FILE* out) {
                "options:\n"
                "  --sol <file>          write solution file (\"name value\" .sol format)\n"
                "  --start <file>        starting solution (same format; may be partial)\n"
+               "  --duals <file>        write row duals and reduced costs (\"row|col name value\"; continuous QPs)\n"
                "  --format <mps|lp>     input format (default: from the file extension, .lp = LP, else MPS)\n"
                "  --time-limit <sec>    wall-clock time limit (default: none)\n"
                "  --threads <n>         number of threads (0 = all cores, default)\n"
                "  --verbosity <n>       0 silent, 1 summary (default), 2 progress, 3 debug\n"
                "  --gap <rel>           relative MIP gap tolerance (default 1e-4)\n"
                "  --no-presolve         disable presolve\n"
+               "  --symmetry <on|off>   symmetry handling (default on)\n"
                "  --lp-method <m>       LP algorithm for pure LPs and the MIP root LP: auto (default),\n"
                "                        simplex (dual simplex) or barrier (interior point + crossover)\n"
                "  --mem-limit <MB>      approximate search-tree memory cap (default 4096)\n"
@@ -75,7 +77,7 @@ long long parse_int_arg(const char* opt, const char* s) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string model_path, sol_path, start_path, format;
+  std::string model_path, sol_path, start_path, duals_path, format;
   milp::SolverParams params;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
@@ -91,6 +93,8 @@ int main(int argc, char** argv) {
       return 0;
     } else if (!std::strcmp(a, "--sol")) {
       sol_path = value();
+    } else if (!std::strcmp(a, "--duals")) {
+      duals_path = value();
     } else if (!std::strcmp(a, "--start")) {
       start_path = value();
     } else if (!std::strcmp(a, "--format")) {
@@ -110,6 +114,11 @@ int main(int argc, char** argv) {
       if (params.mip_rel_gap < 0) usage_error("gap must be nonnegative");
     } else if (!std::strcmp(a, "--no-presolve")) {
       params.presolve = false;
+    } else if (!std::strcmp(a, "--symmetry")) {
+      const std::string m = value();
+      if (m == "on") params.symmetry = true;
+      else if (m == "off") params.symmetry = false;
+      else usage_error("symmetry must be 'on' or 'off'");
     } else if (!std::strcmp(a, "--lp-method")) {
       const std::string m = value();
       if (m == "auto") params.lp_method = milp::LpMethod::Auto;
@@ -193,6 +202,14 @@ int main(int argc, char** argv) {
     std::printf("Time: %.3fs (total %.3fs)\n", result.stats.time, timer.elapsed());
   }
 
+  if (!duals_path.empty()) {
+    try {
+      milp::write_duals(duals_path, model, result);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "milp: %s\n", e.what());
+      return 1;
+    }
+  }
   if (!sol_path.empty()) {
     try {
       milp::write_solution(sol_path, model, result);

@@ -65,6 +65,8 @@ struct SearchOptions {
   long long mem_limit_bytes = -1;  // tests: memory cap in bytes instead of SolverParams::mem_limit_mb
   // Known optimal point in this problem's columns (debugging; MILP_DEBUG_SOL_ORIG crushed through presolve).
   std::vector<double> debug_point;
+  // Symmetry-breaking rows were already considered for this problem (solver.cpp symmetry_rows).
+  bool sst_done = false;
 };
 
 MipResult branch_and_bound(const MipProblem& p, const SolverParams& params, const Logger& log, const Timer& timer,

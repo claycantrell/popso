@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -13,7 +14,12 @@
 #include "milp/io/solution.hpp"
 #include "milp/lp/simplex.hpp"
 #include "milp/presolve/presolve.hpp"
+#include "milp/qp/miqp.hpp"
+#include "milp/qp/qp.hpp"
+#include "milp/qp/qp_presolve.hpp"
 #include "milp/search/branch_and_bound.hpp"
+#include "milp/search/orbitope.hpp"
+#include "milp/search/sst.hpp"
 #include "milp/search/symmetry.hpp"
 #include "milp/search/mip_problem.hpp"
 #include "milp/solver/reformulate.hpp"
@@ -34,6 +40,7 @@ const char* to_string(Status s) {
     case Status::IterationLimit: return "ITERATION_LIMIT";
     case Status::Interrupted: return "INTERRUPTED";
     case Status::NumericalError: return "NUMERIC";
+    case Status::NonConvex: return "NONCONVEX";
   }
   return "UNKNOWN";
 }
@@ -125,6 +132,60 @@ MipResult search(const MipProblem& q, const SolverParams& params, const Logger& 
   return out;
 }
 
+// Symmetry-breaking rows (search/sst.hpp) for the presolved problem q: detection, then SST rows
+// and fixings for the generators not handled by packing orbitopes in the search. Returns false
+// (and leaves *out alone) if nothing was added. Off with --symmetry off, MILP_NO_SYMMETRY=1 or
+// MILP_SST=0. MILP_SST=1 (default): leaders with conflicts in their orbit only; 2: any orbit.
+// MILP_SST_ROWS=0 keeps only the fixings; MILP_SST_MIN_FIX (default 0.1): minimum share of the
+// columns fixed for the reductions to be used.
+bool symmetry_rows(const MipProblem& q, const SolverParams& params, const Timer& timer, const Logger& log,
+                   const SearchOptions& opts, MipProblem* out) {
+  const int mode = [] {
+    const char* v = std::getenv("MILP_SST");
+    return v ? std::atoi(v) : 1;
+  }();
+  if (mode <= 0 || !params.symmetry || opts.sst_done || !opts.sub_mip_heuristics || !q.implications.empty() ||
+      std::getenv("MILP_NO_SYMMETRY") != nullptr) {
+    return false;
+  }
+  if (std::find(q.is_int.begin(), q.is_int.end(), 1) == q.is_int.end()) return false;
+  const double t0 = timer.elapsed();
+  SymmetryOptions so;
+  // Deterministic mode: the work limit only (a binding time cap would be timing dependent).
+  const double rem = std::max(0.0, params.time_limit - t0);
+  so.time_limit = params.deterministic ? rem : std::max(1.0, 0.03 * rem);
+  const Symmetry sym = detect_symmetry(q, so);
+  if (sym.empty()) return false;
+  std::vector<char> used;
+  if (std::getenv("MILP_NO_ORBITOPE") == nullptr) detect_packing_orbitopes(q, sym, &used);
+  SstOptions sst;
+  sst.mode = mode;
+  sst.seed = params.seed;
+  const bool rows = [] {
+    const char* v = std::getenv("MILP_SST_ROWS");
+    return v ? std::atoi(v) != 0 : true;
+  }();
+  sst.rows = rows;
+  const SstResult r = sst_reductions(q, sym, used, sst);
+  if (r.empty()) return false;
+  // Only when the fixings shrink the problem substantially: a few fixings (and their rows) mostly
+  // take symmetry away from orbital branching and change the root heuristics' luck (measured on
+  // miplib_wide_core: neos-950242 / neos-960392 slower, decomp2 / krka / ns1208400 neutral).
+  const double min_fix = [] {
+    const char* v = std::getenv("MILP_SST_MIN_FIX");
+    return v ? std::atof(v) : 0.1;
+  }();
+  if (static_cast<double>(r.fixed_zero.size()) < min_fix * q.num_cols()) {
+    log.log(2, "Symmetry: %d leaders would fix %zu columns; not used\n", r.leaders, r.fixed_zero.size());
+    return false;
+  }
+  *out = apply_sst(q, r);
+  log.log(1, "Symmetry: %d generators, group order ~1e%.1f; %d leaders: %zu symmetry-breaking rows, %zu columns fixed "
+          "(%.2fs%s)\n", sym.num_generators(), sym.log10_order(), r.leaders, r.rows.size(), r.fixed_zero.size(),
+          timer.elapsed() - t0, r.budget ? ", budget" : "");
+  return true;
+}
+
 // Solves the problem with presolve; returns false if the caller should solve
 // the original problem instead (presolve gave up or postsolve failed).
 bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logger& log, const Timer& timer,
@@ -169,7 +230,21 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
         o.debug_point.clear();
       }
     }
-    mr = search(q, params, log, timer, o);
+    MipProblem qs;
+    if (symmetry_rows(q, params, timer, log, opts, &qs)) {
+      // Solved as a presolved problem of its own (presolve uses the fixings and new rows); its
+      // restarts happen inside, and its columns are q's.
+      o.sst_done = true;
+      if (!o.debug_point.empty() && qs.max_violation(o.debug_point) > 1e-6) {
+        log.log(0, "DEBUG-SOL: the debug point is cut off by the symmetry-breaking rows (violation %.3g)\n",
+                qs.max_violation(o.debug_point));
+        o.debug_point.clear();
+      }
+      if (!solve_presolved(qs, params, log, timer, &mr, o)) mr = search(qs, params, log, timer, o);
+    } else {
+      o.sst_done = true;
+      mr = search(q, params, log, timer, o);
+    }
   }
   if (mr.restart) {
     // Root restart: tightened bounds + root cuts, presolved again; the
@@ -199,6 +274,7 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
       q2.row_ub.insert(q2.row_ub.end(), mr.cut_ub.begin(), mr.cut_ub.end());
     }
     SearchOptions o2 = opts;
+    o2.sst_done = true;  // symmetry-breaking rows only before the first search
     // Root and in-tree restarts are counted separately (MILP_MAX_RESTARTS / MILP_MAX_TREE_RESTARTS).
     o2.restarts_done = opts.restarts_done + (mr.tree_restart ? 0 : 1);
     o2.tree_restarts_done = opts.tree_restarts_done + (mr.tree_restart ? 1 : 0);
@@ -449,6 +525,118 @@ void snap_logical(const Model& model, std::vector<double>& x) {
   if (y != x && model.violation(y).max() <= std::max(1e-9, model.violation(x).max())) x = std::move(y);
 }
 
+// A model with a quadratic objective: the QP presolve (qp/qp_presolve.hpp), the convexity test,
+// then the barrier (continuous QP) or the MIQP branch-and-bound.
+SolveResult solve_quadratic(const Model& model, const SolverParams& params, const std::vector<double>& start,
+                            const Timer& timer, const Logger& log) {
+  SolveResult r;
+  MipProblem p;
+  if (!MipProblem::from_model(model, &p)) {
+    r.status = Status::Infeasible;
+    r.stats.time = timer.elapsed();
+    return r;
+  }
+  const double sense = model.sense == ObjSense::Maximize ? -1.0 : 1.0;
+  log.log(1, "Quadratic objective: %d nonzeros in the lower triangle of Q\n", p.Q.nnz());
+  QpPresolver pre;
+  const MipProblem* sp = &p;  // the problem solved: p or the presolved one
+  if (params.presolve && p.implications.empty()) {
+    if (pre.run(p, log) == QpPresolveStatus::Infeasible) {
+      r.status = Status::Infeasible;
+      r.bound = sense * kInf;
+      r.stats.root_bound = r.bound;
+      r.stats.time = timer.elapsed();
+      return r;
+    }
+    sp = &pre.reduced();
+  }
+  // Convexity of the problem solved (cross terms with fixed columns are linear terms).
+  const ConvexityResult cv = check_convexity(sp->Q);
+  if (!cv.convex) {
+    std::string msg = cv.message;
+    if (model.sense == ObjSense::Maximize) msg += " (maximization needs a concave objective)";
+    log.log(1, "ERROR: %s\n", msg.c_str());
+    r.status = Status::NonConvex;
+    r.stats.time = timer.elapsed();
+    return r;
+  }
+  if (cv.perturbed) log.log(1, "WARNING: %s\n", cv.message.c_str());
+  const std::vector<double>& shift = cv.diag_shift;
+  auto postsolve = [&](const std::vector<double>& x) { return sp == &p ? x : pre.postsolve(x); };
+  const int threads = params.threads > 0 ? params.threads : static_cast<int>(std::thread::hardware_concurrency());
+  if (model.num_integers() == 0) {
+    if (!start.empty()) log.log(1, "QP: the start solution is not used (the barrier has no warm start)\n");
+    QpSolution qs;
+    if (sp->num_cols() == 0) {
+      // Presolve fixed every column (and removed every row).
+      qs.status = QpStatus::Optimal;
+    } else {
+      QpOptions qo;
+      qo.time_limit = params.time_limit - timer.elapsed();
+      qo.threads = std::max(1, threads);
+      qo.log = &log;
+      qs = solve_qp(*sp, sp->col_lb, sp->col_ub, qo, shift);
+    }
+    r.stats.barrier_iterations = qs.iterations;
+    r.stats.lp_iterations = qs.iterations;
+    switch (qs.status) {
+      case QpStatus::Optimal: r.status = Status::Optimal; break;
+      case QpStatus::Infeasible: r.status = Status::Infeasible; break;
+      case QpStatus::Unbounded: r.status = Status::Unbounded; break;
+      case QpStatus::InfeasibleOrUnbounded: r.status = Status::InfeasibleOrUnbounded; break;
+      case QpStatus::TimeLimit: r.status = Status::TimeLimit; break;
+      case QpStatus::NumericalError: r.status = Status::NumericalError; break;
+    }
+    if (qs.status == QpStatus::Optimal) {
+      r.has_solution = true;
+      r.x = postsolve(qs.x);
+      r.objective = model.objective_value(r.x);
+      r.bound = r.objective;
+      if (qs.approximate) log.log(1, "QP: solved only to about 1e-6 (numerical difficulties)\n");
+      // Duals in the model's sense (p minimizes sense * f).
+      if (sp == &p) {
+        r.row_dual = qs.y;
+        r.reduced_cost = qp_reduced_costs(p, r.x, r.row_dual);
+      } else {
+        pre.postsolve_duals(r.x, qs.y, r.row_dual, r.reduced_cost);
+      }
+      r.has_duals = true;
+      for (double& v : r.row_dual) v *= sense;
+      for (double& v : r.reduced_cost) v *= sense;
+    } else if (qs.status == QpStatus::Infeasible) {
+      r.bound = sense * kInf;
+    }
+    r.stats.root_bound = r.bound;
+    r.stats.time = timer.elapsed();
+    return r;
+  }
+  MiqpOptions mo;
+  mo.threads = std::max(1, threads);
+  mo.diag_shift = shift;
+  if (!start.empty()) mo.start = sp == &p ? start : pre.crush(start);
+  MiqpResult mr;
+  if (sp->num_cols() == 0) {
+    mr.status = Status::Optimal;
+    mr.has_solution = true;
+    mr.bound = mr.root_bound = sp->offset;
+  } else {
+    mr = miqp_solve(*sp, params, log, timer, mo);
+  }
+  r.status = mr.status;
+  r.has_solution = mr.has_solution;
+  if (mr.has_solution) {
+    r.x = postsolve(mr.x);
+    r.objective = model.objective_value(r.x);
+  }
+  r.bound = sense * mr.bound;
+  r.stats.nodes = mr.nodes;
+  r.stats.barrier_iterations = mr.barrier_iterations;
+  r.stats.lp_iterations = mr.barrier_iterations + mr.lp_iterations;
+  r.stats.root_bound = sense * mr.root_bound;
+  r.stats.time = timer.elapsed();
+  return r;
+}
+
 }  // namespace
 
 SolveResult solve(const Model& model, const SolverParams& params) { return solve(model, params, {}); }
@@ -456,6 +644,23 @@ SolveResult solve(const Model& model, const SolverParams& params) { return solve
 SolveResult solve(const Model& model, const SolverParams& params, const std::vector<double>& start) {
   Timer timer;
   Logger log(params.verbosity);
+  if (model.has_quadratic()) {
+    if (!model.has_logical()) return solve_quadratic(model, params, start, timer, log);
+    const LogicalReformulation R = reformulate_logical(model, params.logic_big_m);
+    if (!R.implications.empty()) {
+      throw std::runtime_error("logical constraints without finite big-M bounds are not supported yet with a "
+                               "quadratic objective");
+    }
+    log.log(1, "Logical constraints: %d semi-continuous, %zu SOS, %zu indicator -> %d auxiliary columns, %d rows\n",
+            model.num_semi(), model.sos.size(), model.indicators.size(), R.aux_cols, R.aux_rows);
+    SolveResult r = solve_quadratic(R.model, params, start.empty() ? start : R.extend(start), timer, log);
+    if (r.has_solution) {
+      r.x.resize(static_cast<size_t>(model.num_cols()));
+      snap_logical(model, r.x);
+      r.objective = model.objective_value(r.x);
+    }
+    return r;
+  }
   if (!model.has_logical()) return solve_plain(model, {}, params, start, timer, log);
   // Semi-continuous columns, SOS sets, indicator constraints: solved as a plain MILP with auxiliary
   // binaries (reformulate.hpp). MILP_LOGIC_BIGM overrides params.logic_big_m (diagnostics).

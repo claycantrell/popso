@@ -16,7 +16,28 @@ Index Model::num_integers() const {
 double Model::objective_value(const std::vector<double>& x) const {
   double v = obj_offset;
   for (Index j = 0; j < num_cols(); ++j) v += obj[j] * x[j];
+  for (size_t k = 0; k < q_val.size(); ++k) {
+    const Index i = q_row[k], j = q_col[k];
+    v += (i == j ? 0.5 : 1.0) * q_val[k] * x[i] * x[j];
+  }
   return v;
+}
+
+bool Model::has_quadratic() const {
+  for (double v : q_val)
+    if (v != 0.0) return true;
+  return false;
+}
+
+void Model::add_q(Index i, Index j, double v) {
+  if (i < j) std::swap(i, j);
+  q_row.push_back(i);
+  q_col.push_back(j);
+  q_val.push_back(v);
+}
+
+SparseMatrix Model::q_lower() const {
+  return SparseMatrix::from_triplets(num_cols(), num_cols(), q_col, q_row, q_val);
 }
 
 Index Model::num_semi() const {
@@ -92,6 +113,14 @@ void Model::validate() const {
   }
   for (double v : A.value)
     if (!std::isfinite(v)) throw std::runtime_error("model: non-finite matrix coefficient");
+  if (q_row.size() != q_val.size() || q_col.size() != q_val.size())
+    throw std::runtime_error("model: quadratic objective arrays have inconsistent sizes");
+  for (size_t k = 0; k < q_val.size(); ++k) {
+    if (q_row[k] < 0 || q_col[k] < 0 || static_cast<size_t>(q_row[k]) >= n || static_cast<size_t>(q_col[k]) >= n)
+      throw std::runtime_error("model: column index out of range in the quadratic objective");
+    if (q_row[k] < q_col[k]) throw std::runtime_error("model: quadratic objective entries must be in the lower triangle");
+    if (!std::isfinite(q_val[k])) throw std::runtime_error("model: non-finite quadratic objective coefficient");
+  }
   auto check_col = [&](Index j, const std::string& what) {
     if (j < 0 || static_cast<size_t>(j) >= n) throw std::runtime_error("model: column index out of range in " + what);
   };

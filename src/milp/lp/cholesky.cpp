@@ -344,6 +344,7 @@ bool SparseCholesky::factorize(const std::vector<double>& value) {
     }
   }
   dropped_ = 0;
+  wrong_sign_ = 0;
   std::vector<Index> relmap(static_cast<size_t>(n_), 0), link_head(static_cast<size_t>(ns), -1),
       link_next(static_cast<size_t>(ns), -1), kpos(static_cast<size_t>(ns), 0);
   std::vector<double> work;
@@ -426,6 +427,7 @@ void SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::
       if (!(d > pivot_tol * std::abs(diag_[fJ + j])) || !(d > 1e-300)) {
         // Dropped pivot: a huge diagonal makes this component of the solution ~0.
         ++dropped_;
+        if (d < 0.0) ++wrong_sign_;
         cj[j] = 1e64;
         for (Index r = j + 1; r < nrJ; ++r) cj[r] *= 1e-64;
         continue;

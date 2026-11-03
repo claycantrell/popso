@@ -34,13 +34,46 @@ std::string format_solution(const Model& model, const SolveResult& result) {
   return out;
 }
 
-void write_solution(const std::string& path, const Model& model, const SolveResult& result) {
-  const std::string text = format_solution(model, result);
+std::string format_duals(const Model& model, const SolveResult& result) {
+  std::string out = "# Duals for model " + model.name + "\n";
+  out += std::string("# Status = ") + to_string(result.status) + "\n";
+  if (!result.has_duals) {
+    out += "# No dual values (available for continuous QPs solved to optimality)\n";
+    return out;
+  }
+  char buf[64];
+  auto line = [&](const char* kind, const std::string& name, double v) {
+    out += kind;
+    out += name;
+    out += ' ';
+    if (v == 0.0) v = 0.0;  // no "-0"
+    out.append(buf, static_cast<size_t>(io_detail::format_double(buf, v)));
+    out += '\n';
+  };
+  for (size_t i = 0; i < result.row_dual.size() && i < model.row_names.size(); ++i) line("row ", model.row_names[i], result.row_dual[i]);
+  for (size_t j = 0; j < result.reduced_cost.size() && j < model.col_names.size(); ++j)
+    line("col ", model.col_names[j], result.reduced_cost[j]);
+  return out;
+}
+
+namespace {
+
+void write_text(const std::string& path, const std::string& text) {
   std::FILE* f = std::fopen(path.c_str(), "wb");
   if (!f) throw std::runtime_error(path + ": cannot open file for writing");
   const bool wrote = std::fwrite(text.data(), 1, text.size(), f) == text.size();
   const bool closed = std::fclose(f) == 0;
   if (!wrote || !closed) throw std::runtime_error(path + ": write error");
+}
+
+}  // namespace
+
+void write_duals(const std::string& path, const Model& model, const SolveResult& result) {
+  write_text(path, format_duals(model, result));
+}
+
+void write_solution(const std::string& path, const Model& model, const SolveResult& result) {
+  write_text(path, format_solution(model, result));
 }
 
 std::vector<double> read_solution_string(const std::string& text, const Model& model) {

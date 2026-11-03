@@ -330,8 +330,100 @@ static void test_logical(void) {
   popso_free(m);
 }
 
+/* Quadratic objective: set / add / get, solve, nonconvex status, MPS round trip. */
+static void test_quadratic(void) {
+  popso_model* m = popso_create();
+  int x, y, n;
+  double obj;
+  CHECK_OK(popso_add_var(m, -10.0, 10.0, -2.0, POPSO_CONTINUOUS, "x", &x));
+  CHECK_OK(popso_add_var(m, -10.0, 10.0, -4.0, POPSO_CONTINUOUS, "y", &y));
+  {
+    /* x^2 + y^2 + x y: Q_xx = 2, Q_yy = 2, Q_xy = 1 (upper triangle given: stored lower). */
+    const int rows[3] = {0, 1, 0}, cols[3] = {0, 1, 1};
+    const double vals[3] = {2.0, 1.0, 1.0};
+    CHECK_OK(popso_set_q(m, 3, rows, cols, vals));
+    CHECK_OK(popso_add_q_entries(m, 1, &y, &y, &vals[1])); /* Q_yy = 1 + 1 */
+  }
+  CHECK(popso_num_q_nonzeros(m) == 3);
+  {
+    int r[3], c[3];
+    double v[3];
+    CHECK(popso_get_q(m, 2, r, c, v) == POPSO_ERROR_INVALID_ARGUMENT);
+    CHECK_OK(popso_get_q(m, 3, r, c, v));
+    CHECK(r[0] == 0 && c[0] == 0 && v[0] == 2.0);
+    CHECK(r[1] == 1 && c[1] == 0 && v[1] == 1.0);
+    CHECK(r[2] == 1 && c[2] == 1 && v[2] == 2.0);
+  }
+  /* min x^2 + y^2 + x y - 2 x - 4 y: x = 0, y = 2, objective -4. */
+  CHECK_OK(popso_solve(m));
+  CHECK(popso_get_status(m) == POPSO_STATUS_OPTIMAL);
+  CHECK_OK(popso_get_objective(m, &obj));
+  CHECK_NEAR(obj, -4.0);
+  {
+    /* Duals: none for rows yet, reduced costs 0 at the interior optimum; then x + y <= 1:
+     * x = -0.5, y = 1.5, row dual -1.5 (upper bound active, minimization), objective -3.25. */
+    double d[2], yr[1];
+    int row;
+    const int rc[2] = {0, 1};
+    const double rv[2] = {1.0, 1.0};
+    CHECK(popso_has_duals(m) == 1);
+    CHECK_OK(popso_get_reduced_costs(m, d, 2));
+    CHECK(fabs(d[0]) < 1e-6 && fabs(d[1]) < 1e-6);
+    CHECK(popso_get_reduced_costs(m, d, 1) == POPSO_ERROR_INVALID_ARGUMENT);
+    CHECK_OK(popso_add_row(m, 2, rc, rv, -POPSO_INFINITY, 1.0, "cap", &row));
+    CHECK(popso_has_duals(m) == 0);
+    CHECK(popso_get_duals(m, yr, 1) == POPSO_ERROR_NOT_SOLVED);
+    CHECK_OK(popso_solve(m));
+    CHECK_OK(popso_get_objective(m, &obj));
+    CHECK_NEAR(obj, -3.25);
+    CHECK_OK(popso_get_duals(m, yr, 1));
+    CHECK_NEAR(yr[0], -1.5);
+    CHECK_OK(popso_get_reduced_costs(m, d, 2));
+    CHECK(fabs(d[0]) < 1e-6 && fabs(d[1]) < 1e-6);
+    CHECK_OK(popso_set_row_bounds(m, row, -POPSO_INFINITY, POPSO_INFINITY));
+    CHECK_OK(popso_solve(m));
+  }
+  {
+    const char* mps = POPSO_BINARY_DIR "/c_api_test_q.mps";
+    popso_model* r = popso_create();
+    CHECK_OK(popso_write_mps(m, mps));
+    CHECK_OK(popso_read_mps(r, mps));
+    CHECK(popso_num_q_nonzeros(r) == 3);
+    CHECK_OK(popso_solve(r));
+    CHECK_OK(popso_get_objective(r, &obj));
+    CHECK_NEAR(obj, -4.0);
+    popso_free(r);
+    remove(mps);
+  }
+  {
+    /* An integer x: x in {0, 1}: x = 0, y = 2 still optimal; then a nonconvex objective. */
+    CHECK_OK(popso_set_var_type(m, x, POPSO_INTEGER));
+    CHECK_OK(popso_solve(m));
+    CHECK(popso_get_status(m) == POPSO_STATUS_OPTIMAL);
+    CHECK(popso_has_duals(m) == 0); /* MIQP: no duals */
+    {
+      double yr[1];
+      CHECK(popso_get_duals(m, yr, 1) == POPSO_ERROR_NO_SOLUTION);
+    }
+    const int r = 1, c = 1;
+    const double v = -5.0;
+    CHECK_OK(popso_add_q_entries(m, 1, &r, &c, &v));
+    CHECK_OK(popso_solve(m));
+    CHECK(popso_get_status(m) == POPSO_STATUS_NONCONVEX);
+    CHECK(strcmp(popso_status_string(POPSO_STATUS_NONCONVEX), "NONCONVEX") == 0);
+    const int bad = 7;
+    CHECK(popso_add_q_entries(m, 1, &bad, &c, &v) == POPSO_ERROR_INVALID_ARGUMENT);
+  }
+  CHECK_OK(popso_set_q(m, 0, NULL, NULL, NULL));
+  CHECK(popso_num_q_nonzeros(m) == 0);
+  n = popso_num_q_nonzeros(NULL);
+  CHECK(n == -1);
+  popso_free(m);
+}
+
 int main(void) {
   test_basics();
+  test_quadratic();
   test_logical();
   test_build_and_solve();
   test_errors_and_params();

@@ -154,9 +154,12 @@ class NormalEquations {
     return true;
   }
 
-  bool factor(const std::vector<double>& theta, double delta) {
+  // refine_delta: the dual regularization of the matrix the conjugate gradients solve with (the
+  // factorization uses delta).
+  bool factor(const std::vector<double>& theta, double delta, double refine_delta) {
     theta_ = &theta;
     delta_ = delta;
+    rdelta_ = refine_delta;
     const SparseMatrix& A = *A_;
     const SparseMatrix& At = *At_;
     // Rows covered (almost) only by dense columns make M_s nearly singular and the Woodbury
@@ -281,7 +284,7 @@ class NormalEquations {
       if (s == 0.0) continue;
       for (Index k = A.begin(j); k < A.end(j); ++k) out[A.index[k]] += A.value[k] * s;
     }
-    for (Index i = 0; i < m_; ++i) out[i] += delta_ * v[i];
+    for (Index i = 0; i < m_; ++i) out[i] += rdelta_ * v[i];
   }
 
   // Preconditioned conjugate gradients from y = P^-1 r. Returns the final relative residual.
@@ -349,7 +352,7 @@ class NormalEquations {
   std::vector<double> value_, work_;
   SparseCholesky chol_;
   const std::vector<double>* theta_ = nullptr;
-  double delta_ = 0.0;
+  double delta_ = 0.0, rdelta_ = 0.0;
   std::vector<double> cg_r_, cg_z_, cg_p_, cg_q_;
   std::vector<double> W_, S_, dense_diag_;
   static constexpr double kDenseDiag = 1e-8;
@@ -364,17 +367,23 @@ class NormalEquations {
 // the regularized matrix.
 class AugmentedSystem {
  public:
-  bool analyze(const SparseMatrix& A, int threads, const std::atomic<bool>* stop, const Logger* log) {
+  // Q: the strictly lower part of the objective Hessian (CSC, n x n; null: none). Its diagonal
+  // is part of the diagonal h given to factor().
+  bool analyze(const SparseMatrix& A, const SparseMatrix* Q, int threads, const std::atomic<bool>* stop,
+               const Logger* log) {
     A_ = &A;
+    Q_ = Q && Q->nnz() > 0 ? Q : nullptr;
     chol_.stop = stop;
     n_ = A.num_major;
     m_ = A.num_minor;
     const Index N = n_ + m_;
     start_.assign(1, 0);
     index_.clear();
-    index_.reserve(static_cast<size_t>(A.nnz()) + static_cast<size_t>(N));
+    index_.reserve(static_cast<size_t>(A.nnz()) + static_cast<size_t>(N) + static_cast<size_t>(Q_ ? Q_->nnz() : 0));
     for (Index j = 0; j < n_; ++j) {
       index_.push_back(j);
+      if (Q_)
+        for (Index k = Q_->begin(j); k < Q_->end(j); ++k) index_.push_back(Q_->index[k]);
       for (Index k = A.begin(j); k < A.end(j); ++k) index_.push_back(n_ + A.index[k]);
       start_.push_back(static_cast<Index>(index_.size()));
     }
@@ -383,8 +392,11 @@ class AugmentedSystem {
       start_.push_back(static_cast<Index>(index_.size()));
     }
     value_.assign(index_.size(), 0.0);
-    for (Index j = 0; j < n_; ++j)
-      for (Index k = A.begin(j); k < A.end(j); ++k) value_[start_[j] + 1 + (k - A.begin(j))] = A.value[k];
+    for (Index j = 0; j < n_; ++j) {
+      const Index nq = Q_ ? Q_->end(j) - Q_->begin(j) : 0;
+      for (Index t = 0; t < nq; ++t) value_[start_[j] + 1 + t] = -Q_->value[Q_->begin(j) + t];
+      for (Index k = A.begin(j); k < A.end(j); ++k) value_[start_[j] + 1 + nq + (k - A.begin(j))] = A.value[k];
+    }
     std::vector<int8_t> signs(static_cast<size_t>(N), 1);
     for (Index j = 0; j < n_; ++j) signs[j] = -1;
     chol_.threads = threads;
@@ -399,9 +411,11 @@ class AugmentedSystem {
   long long factor_nnz() const { return chol_.factor_nnz(); }
   Index dropped() const { return chol_.num_dropped(); }
 
-  bool factor(const std::vector<double>& h, double delta) {
+  // refine_delta: the dual regularization of the matrix the solves are refined against.
+  bool factor(const std::vector<double>& h, double delta, double refine_delta) {
     h_ = &h;
     delta_ = delta;
+    rdelta_ = refine_delta;
     for (Index j = 0; j < n_; ++j) value_[start_[j]] = -h[j];
     for (Index i = 0; i < m_; ++i) value_[start_[n_ + i]] = delta;
     return chol_.factorize(value_);
@@ -436,7 +450,7 @@ class AugmentedSystem {
     const SparseMatrix& A = *A_;
     const std::vector<double>& h = *h_;
     out.assign(static_cast<size_t>(n_ + m_), 0.0);
-    for (Index i = 0; i < m_; ++i) out[n_ + i] = delta_ * x[n_ + i];
+    for (Index i = 0; i < m_; ++i) out[n_ + i] = rdelta_ * x[n_ + i];
     for (Index j = 0; j < n_; ++j) {
       double s = -h[j] * x[j];
       const double xj = x[j];
@@ -444,36 +458,50 @@ class AugmentedSystem {
         s += A.value[k] * x[n_ + A.index[k]];
         out[n_ + A.index[k]] += A.value[k] * xj;
       }
-      out[j] = s;
+      out[j] += s;
+    }
+    if (Q_) {
+      for (Index j = 0; j < n_; ++j) {
+        for (Index k = Q_->begin(j); k < Q_->end(j); ++k) {
+          const Index i = Q_->index[k];
+          out[i] -= Q_->value[k] * x[j];
+          out[j] -= Q_->value[k] * x[i];
+        }
+      }
     }
   }
 
   const SparseMatrix* A_ = nullptr;
+  const SparseMatrix* Q_ = nullptr;
   Index n_ = 0, m_ = 0;
   std::vector<Index> start_, index_;
   std::vector<double> value_;
   SparseCholesky chol_;
   const std::vector<double>* h_ = nullptr;
-  double delta_ = 0.0;
+  double delta_ = 0.0, rdelta_ = 0.0;
   std::vector<double> b_, x_, r_;
 };
 
 // The regularized Newton system of the IPM (see barrier.hpp): normal equations or the augmented
-// system, whichever factors with less work (the augmented system is what a QP will need).
+// system, whichever factors with less work. A QP's Hessian joins the (1,1) block: its diagonal
+// is added to h, its off-diagonal part (if any) forces the augmented system.
 class KktSolver {
  public:
-  // kkt: 0 choose, 1 normal equations, 2 augmented system.
-  bool analyze(const SparseMatrix& A, const SparseMatrix& At, int kkt, int threads, const std::atomic<bool>* stop,
-               const Logger* log) {
+  // kkt: 0 choose, 1 normal equations, 2 augmented system. qdiag: the Hessian's diagonal (empty:
+  // none); qoff: its strictly lower part (null or empty: diagonal Hessian).
+  bool analyze(const SparseMatrix& A, const SparseMatrix& At, const std::vector<double>& qdiag, const SparseMatrix* qoff,
+               int kkt, int threads, const std::atomic<bool>* stop, const Logger* log) {
     A_ = &A;
     At_ = &At;
+    qdiag_ = qdiag;
     static const int env = [] {
       const char* v = std::getenv("MILP_BARRIER_KKT");  // testing: 1 normal equations, 2 augmented system
       return v ? std::atoi(v) : 0;
     }();
-    const int force = env != 0 ? env : kkt;
+    int force = env != 0 ? env : kkt;
+    if (qoff && qoff->nnz() > 0) force = 2;  // normal equations need a diagonal Hessian
     Timer t;
-    const bool aug_ok = force != 1 && aug_.analyze(A, threads, stop, log);
+    const bool aug_ok = force != 1 && aug_.analyze(A, qoff, threads, stop, log);
     if (stop && stop->load()) return false;
     const double t_aug = t.elapsed();
     if (force == 2) {
@@ -497,11 +525,21 @@ class KktSolver {
   }
   bool augmented() const { return augmented_; }
   // h: the diagonal H + rho I (> 0); delta: dual regularization.
-  bool factor(const std::vector<double>& h, double delta) {
-    if (augmented_) return aug_.factor(h, delta);
+  // refine_delta: the dual regularization of the system the solves are refined against (delta is
+  // the factorization's; 0 makes the regularization a preconditioner only, the directions then
+  // satisfy A dx = r2 without the delta dy term).
+  bool factor(const std::vector<double>& h_in, double delta, double refine_delta) {
+    const std::vector<double>* hp = &h_in;
+    if (!qdiag_.empty()) {
+      hq_ = h_in;
+      for (size_t j = 0; j < hq_.size(); ++j) hq_[j] += qdiag_[j];
+      hp = &hq_;
+    }
+    const std::vector<double>& h = *hp;
+    if (augmented_) return aug_.factor(h, delta, refine_delta);
     theta_.resize(h.size());
     for (size_t j = 0; j < h.size(); ++j) theta_[j] = 1.0 / h[j];
-    return ne_.factor(theta_, delta);
+    return ne_.factor(theta_, delta, refine_delta);
   }
   // [-H A^T; A delta] [dx; dy] = [r1; r2].
   double solve(const std::vector<double>& r1, const std::vector<double>& r2, std::vector<double>& dx,
@@ -534,15 +572,16 @@ class KktSolver {
   bool augmented_ = false;
   NormalEquations ne_;
   AugmentedSystem aug_;
-  std::vector<double> theta_, rhs_;
+  std::vector<double> theta_, rhs_, qdiag_, hq_;
 };
 
 class Ipm {
  public:
   Ipm(const SparseMatrix& A, const std::vector<double>& cost, const std::vector<double>& col_lb,
       const std::vector<double>& col_ub, const std::vector<double>& row_lb, const std::vector<double>& row_ub,
-      const IpmOptions& opt)
-      : oA_(A), oc_(cost), ocl_(col_lb), ocu_(col_ub), orl_(row_lb), oru_(row_ub), opt_(opt) {}
+      const IpmOptions& opt, const SparseMatrix* Q)
+      : oA_(A), oc_(cost), ocl_(col_lb), ocu_(col_ub), orl_(row_lb), oru_(row_ub), opt_(opt),
+        oQ_(Q && Q->nnz() > 0 ? Q : nullptr) {}
 
   IpmResult run();
 
@@ -559,11 +598,18 @@ class Ipm {
   void step_lengths(const std::vector<double>& dxl, const std::vector<double>& dxu, const std::vector<double>& dzl,
                     const std::vector<double>& dzu, double* ap, double* ad) const;
   void finish(IpmResult& res);
+  // out = Q x in the standard form (zero without a Hessian); x^T Q x.
+  void qmul(const std::vector<double>& x, std::vector<double>& out) const;
 
   const SparseMatrix& oA_;
   const std::vector<double>&oc_, &ocl_, &ocu_, &orl_, &oru_;
   IpmOptions opt_;
+  const SparseMatrix* oQ_;  // lower triangle of the original Hessian (null: LP)
   Timer timer_;
+  // Standard-form Hessian (scaled): diagonal and strictly lower part; empty for an LP.
+  std::vector<double> qdiag_;
+  SparseMatrix qoff_;
+  bool quadratic_ = false;
 
   // Standard form (scaled): min c^T x, A x = b, l <= x <= u.
   Index m_ = 0, n_ = 0;
@@ -574,6 +620,7 @@ class Ipm {
   // Maps: original column -> standard column (-1: fixed), original row -> standard row (-1: dropped).
   std::vector<Index> col_map_, row_map_;
   std::vector<double> fixed_val_;
+  double fixed_obj_ = 0.0;  // objective part of the fixed columns
   bool infeasible_ = false;
   Index nbounds_ = 0;
 
@@ -581,11 +628,14 @@ class Ipm {
   std::vector<double> x_, xl_, xu_, zl_, zu_, y_;
   // Residuals: rp = b - A x, rl = l - x + xl, ru = u - x - xu, rd = c - A^T y - zl + zu.
   std::vector<double> rp_, rl_, ru_, rd_;
+  std::vector<double> qx_;  // Q x of the current iterate (residuals())
   double mu_ = 0.0;
   double last_gap_ = kInf;
   KktSolver kkt_;
   std::vector<double> h_;
   double reg_p_ = 1e-10, reg_free_ = 1e-8, reg_d_ = 1e-10;
+  bool exact_ = false;      // QP: refine the solves against the unregularized system (run())
+  int reg_dominated_ = 0;   // consecutive iterations with the regularization error dominating
 };
 
 bool Ipm::build() {
@@ -598,6 +648,7 @@ bool Ipm::build() {
   for (Index j = 0; j < on; ++j) {
     if (ocl_[j] == ocu_[j] && is_finite(ocl_[j])) {
       fixed_val_[j] = ocl_[j];
+      fixed_obj_ += oc_[j] * ocl_[j];
       for (Index k = oA_.begin(j); k < oA_.end(j); ++k) fixed_act[oA_.index[k]] += oA_.value[k] * ocl_[j];
     } else {
       col_map_[j] = ncols++;
@@ -616,7 +667,9 @@ bool Ipm::build() {
       continue;
     }
     row_map_[i] = m_++;
-    b_.push_back(lo == hi ? lo - fixed_act[i] : -fixed_act[i]);
+    // Equality: A x = lo - (fixed part); otherwise A x - s = 0 with the slack's bounds shifted by
+    // the fixed part.
+    b_.push_back(lo == hi ? lo - fixed_act[i] : 0.0);
     if (lo != hi) slack_rows.push_back(i);
   }
   n_ = ncols + static_cast<Index>(slack_rows.size());
@@ -652,6 +705,31 @@ bool Ipm::build() {
     V.push_back(-1.0);
   }
   A_ = SparseMatrix::from_triplets(n_, m_, J, I, V);
+  if (oQ_) {
+    // Fixed columns: their Hessian entries move into the costs of the others (c_i += Q_ij x_j).
+    quadratic_ = true;
+    qdiag_.assign(static_cast<size_t>(n_), 0.0);
+    std::vector<Index> QJ, QI;
+    std::vector<double> QV;
+    for (Index j = 0; j < on; ++j) {
+      for (Index k = oQ_->begin(j); k < oQ_->end(j); ++k) {
+        const Index i = oQ_->index[k];
+        const double v = oQ_->value[k];
+        const Index ci = col_map_[i], cj = col_map_[j];
+        if (ci >= 0 && cj >= 0) {
+          if (ci == cj) qdiag_[ci] += v;
+          else QJ.push_back(std::min(ci, cj)), QI.push_back(std::max(ci, cj)), QV.push_back(v);
+        } else if (ci < 0 && cj < 0) {
+          fixed_obj_ += (i == j ? 0.5 : 1.0) * v * fixed_val_[i] * fixed_val_[j];
+        } else if (ci >= 0) {
+          c_[ci] += v * fixed_val_[j];
+        } else if (cj >= 0) {
+          c_[cj] += v * fixed_val_[i];
+        }
+      }
+    }
+    qoff_ = SparseMatrix::from_triplets(n_, n_, QJ, QI, QV);
+  }
   for (Index j = 0; j < n_; ++j) {
     if (l_[j] > u_[j]) infeasible_ = true;
   }
@@ -694,6 +772,25 @@ void Ipm::scale() {
     u_[j] /= cscale_[j];
   }
   for (Index i = 0; i < m_; ++i) b_[i] *= rscale_[i];
+  if (quadratic_) {
+    for (Index j = 0; j < n_; ++j) {
+      qdiag_[j] *= cscale_[j] * cscale_[j];
+      for (Index k = qoff_.begin(j); k < qoff_.end(j); ++k) qoff_.value[k] *= cscale_[j] * cscale_[qoff_.index[k]];
+    }
+  }
+}
+
+void Ipm::qmul(const std::vector<double>& x, std::vector<double>& out) const {
+  out.assign(static_cast<size_t>(n_), 0.0);
+  if (!quadratic_) return;
+  for (Index j = 0; j < n_; ++j) {
+    out[j] += qdiag_[j] * x[j];
+    for (Index k = qoff_.begin(j); k < qoff_.end(j); ++k) {
+      const Index i = qoff_.index[k];
+      out[i] += qoff_.value[k] * x[j];
+      out[j] += qoff_.value[k] * x[i];
+    }
+  }
 }
 
 void Ipm::residuals() {
@@ -706,9 +803,10 @@ void Ipm::residuals() {
   rl_.assign(static_cast<size_t>(n_), 0.0);
   ru_.assign(static_cast<size_t>(n_), 0.0);
   rd_.assign(static_cast<size_t>(n_), 0.0);
+  qmul(x_, qx_);
   double comp = 0.0;
   for (Index j = 0; j < n_; ++j) {
-    double s = c_[j];
+    double s = c_[j] + qx_[j];
     for (Index k = A_.begin(j); k < A_.end(j); ++k) s -= A_.value[k] * y_[A_.index[k]];
     if (has_l_[j]) {
       rl_[j] = l_[j] - x_[j] + xl_[j];
@@ -767,6 +865,8 @@ void Ipm::step_lengths(const std::vector<double>& dxl, const std::vector<double>
       if (dzu[j] < 0.0) b = std::min(b, -zu_[j] / dzu[j]);
     }
   }
+  // A QP's dual residual c + Q x - A^T y - z_l + z_u couples x and the duals: one common step.
+  if (quadratic_) a = b = std::min(a, b);
   *ap = a;
   *ad = b;
 }
@@ -780,16 +880,17 @@ void Ipm::starting_point() {
   y_.assign(static_cast<size_t>(m_), 0.0);
   // x = A^T (A A^T)^-1 b (least norm), y = (A A^T)^-1 A c, z = c - A^T y.
   std::vector<double> h(static_cast<size_t>(n_), 1.0);
-  kkt_.factor(h, reg_d_);
+  kkt_.factor(h, reg_d_, reg_d_);
   std::vector<double> zero_n(static_cast<size_t>(n_), 0.0), dy, dx;
   kkt_.solve(zero_n, b_, dx, dy);  // dx = A^T (A A^T)^-1 b
   x_ = dx;
   // [-I A^T; A 0] [dx; y] = [c; 0]: dx = A^T y - c, A dx = 0, so y = (A A^T)^-1 A c.
   std::vector<double> zero_m(static_cast<size_t>(m_), 0.0);
   kkt_.solve(c_, zero_m, dx, y_);
-  std::vector<double> z(static_cast<size_t>(n_));
+  std::vector<double> z(static_cast<size_t>(n_)), qx;
+  qmul(x_, qx);
   for (Index j = 0; j < n_; ++j) {
-    double s = c_[j];
+    double s = c_[j] + qx[j];
     for (Index k = A_.begin(j); k < A_.end(j); ++k) s -= A_.value[k] * y_[A_.index[k]];
     z[j] = s;
   }
@@ -853,7 +954,7 @@ IpmResult Ipm::run() {
     nbounds_ += has_l_[j] + has_u_[j];
   }
   const double t_an = timer_.elapsed();
-  if (!kkt_.analyze(A_, At_, opt_.kkt, opt_.threads, opt_.stop, opt_.log)) {
+  if (!kkt_.analyze(A_, At_, qdiag_, quadratic_ ? &qoff_ : nullptr, opt_.kkt, opt_.threads, opt_.stop, opt_.log)) {
     res.status = opt_.stop && opt_.stop->load() ? IpmStatus::TimeLimit : IpmStatus::NumericalError;
     finish(res);
     return res;
@@ -892,7 +993,7 @@ IpmResult Ipm::run() {
   std::vector<double> cl(static_cast<size_t>(n_)), cu(static_cast<size_t>(n_));
   IpmStatus status = IpmStatus::IterationLimit;
   int small_steps = 0;
-  double best_merit = kInf;
+  double best_merit = kInf, best_infeas = kInf;
   int no_progress = 0;
   int iter = 0;
   double pinf0 = 0.0, dinf0 = 0.0, mu0 = 0.0;
@@ -905,14 +1006,16 @@ IpmResult Ipm::run() {
   } best;
   for (;; ++iter) {
     residuals();
-    double pobj = dot(c_, x_), dobj = dot(b_, y_);
+    const double xqx = quadratic_ ? dot(x_, qx_) : 0.0;
+    double pobj = dot(c_, x_) + 0.5 * xqx, dobj = dot(b_, y_) - 0.5 * xqx;
     for (Index j = 0; j < n_; ++j) {
       if (has_l_[j]) dobj += l_[j] * zl_[j];
       if (has_u_[j]) dobj -= u_[j] * zu_[j];
     }
     const double pinf = std::max({inf_norm(rp_), inf_norm(rl_), inf_norm(ru_)}) / (1.0 + bnorm);
     const double dinf = inf_norm(rd_) / (1.0 + cnorm);
-    const double gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj));
+    const double gap =
+        std::abs(pobj - dobj) / (1.0 + std::abs(opt_.gap_with_offset ? pobj + fixed_obj_ + opt_.log_offset : pobj));
     last_gap_ = gap;
     if (opt_.log && opt_.log->verbosity() >= 2) {
       opt_.log->log(2, "%5d %15.8e %15.8e %8.2e %8.2e %8.2e %6.2fs\n", iter, pobj, dobj, pinf, dinf, mu_, timer_.elapsed());
@@ -952,8 +1055,12 @@ IpmResult Ipm::run() {
       best.merit = merit;
       best.x = x_, best.xl = xl_, best.xu = xu_, best.zl = zl_, best.zu = zu_, best.y = y_;
     }
-    if (merit < 0.9 * best_merit) {
-      best_merit = merit;
+    // A QP's duality gap can stall for a while (both objectives drift) while the infeasibilities
+    // still fall steadily: that counts as progress too.
+    const double infeas = std::max(pinf, dinf);
+    if (merit < 0.9 * best_merit || (quadratic_ && infeas < 0.9 * best_infeas)) {
+      best_merit = std::min(best_merit, merit);
+      best_infeas = std::min(best_infeas, infeas);
       no_progress = 0;
     } else if (++no_progress >= 30) {
       status = IpmStatus::NumericalError;
@@ -969,7 +1076,7 @@ IpmResult Ipm::run() {
       h_[j] = (has_l_[j] || has_u_[j]) ? h + reg_p_ : reg_free_;
     }
     const double t_f = timer_.elapsed();
-    if (!kkt_.factor(h_, reg_d_)) {
+    if (!kkt_.factor(h_, reg_d_, exact_ ? 0.0 : reg_d_)) {
       status = opt_.stop && opt_.stop->load() ? IpmStatus::TimeLimit : IpmStatus::NumericalError;
       break;
     }
@@ -1034,6 +1141,21 @@ IpmResult Ipm::run() {
       ap = ap2, ad = ad2;
     }
 
+    // QP: once the dual regularization's error in the primal equations (delta dy: the solves
+    // use the regularized matrix) has dominated a primal residual above the tolerance for five
+    // iterations, the solves are refined against the unregularized matrix from then on. With
+    // large optimal duals (YAO: |y| ~ 1e5 against costs ~ 1e-3) the primal residual otherwise
+    // stalls near delta |dy| while complementarity collapses (iteration limit). Not from the
+    // start: the refinement then costs extra solves (MIQP nodes of miqpport: +30% time).
+    if (quadratic_ && !exact_) {
+      const double rp = inf_norm(rp_);
+      if (reg_d_ * inf_norm(dy) > 0.5 * rp && rp > opt_.tol * (1.0 + bnorm)) ++reg_dominated_;
+      else reg_dominated_ = 0;
+      if (reg_dominated_ >= 5) {
+        exact_ = true;
+        if (opt_.log) opt_.log->log(2, "Barrier: refining against the unregularized system from now on\n");
+      }
+    }
     const double eta = 0.9995;
     ap = std::min(1.0, eta * ap);
     ad = std::min(1.0, eta * ad);
@@ -1095,8 +1217,19 @@ void Ipm::finish(IpmResult& res) {
   // Measures in the original problem.
   std::vector<double> act(static_cast<size_t>(om), 0.0);
   double pviol = 0.0, dviol = 0.0, obj = 0.0;
+  std::vector<double> oqx(static_cast<size_t>(on), 0.0);  // Q x in the original columns
+  if (oQ_) {
+    for (Index j = 0; j < on; ++j) {
+      for (Index k = oQ_->begin(j); k < oQ_->end(j); ++k) {
+        const Index i = oQ_->index[k];
+        oqx[i] += oQ_->value[k] * res.x[j];
+        if (i != j) oqx[j] += oQ_->value[k] * res.x[i];
+      }
+    }
+    for (Index j = 0; j < on; ++j) obj += 0.5 * oqx[j] * res.x[j];
+  }
   for (Index j = 0; j < on; ++j) {
-    double s = oc_[j];
+    double s = oc_[j] + oqx[j];
     for (Index k = oA_.begin(j); k < oA_.end(j); ++k) {
       act[oA_.index[k]] += oA_.value[k] * res.x[j];
       s -= oA_.value[k] * res.y[oA_.index[k]];
@@ -1124,8 +1257,8 @@ void Ipm::finish(IpmResult& res) {
 
 IpmResult ipm_solve(const SparseMatrix& A, const std::vector<double>& cost, const std::vector<double>& col_lb,
                     const std::vector<double>& col_ub, const std::vector<double>& row_lb,
-                    const std::vector<double>& row_ub, const IpmOptions& opt) {
-  Ipm ipm(A, cost, col_lb, col_ub, row_lb, row_ub, opt);
+                    const std::vector<double>& row_ub, const IpmOptions& opt, const SparseMatrix* Q) {
+  Ipm ipm(A, cost, col_lb, col_ub, row_lb, row_ub, opt, Q);
   return ipm.run();
 }
 

@@ -12,7 +12,10 @@ objective, other N rows are dropped), COLUMNS with integer MARKER blocks, RHS
 (UP/LO/FX/FR/MI/PL/BV/LI/UI, SC/SI semi-continuous / semi-integer), SOS
 (" S1 SOS name prio" or " S1 name" headers, "col weight" members),
 INDICATORS (" IF row col value": the row only has to hold when the column
-equals the value), ENDATA.  Comment lines start with '*'.
+equals the value), quadratic objectives (QUADOBJ: one triangle, QMATRIX and
+QSECTION [objective name]: the whole matrix; objective c'x + 1/2 x'Qx),
+ENDATA.  Comment lines start with '*'.  Quadratic constraints (QCMATRIX,
+QSECTION of another row) are rejected.
 
 Semantics (common MPS conventions, as in HiGHS/SCIP):
   * Default bounds [0, +inf].  EXCEPTION (verified to match HiGHS 1.15 and
@@ -71,6 +74,8 @@ class Model:
     sos: list = field(default_factory=list)  # (name, type, [col], [weight])
     # (name, binary col, value, lo, hi, [col], [val])
     indicators: list = field(default_factory=list)
+    # quadratic objective 1/2 x'Qx: {(i, j): Q_ij} with i >= j (lower triangle)
+    quad: dict = field(default_factory=dict)
 
     @property
     def num_vars(self):
@@ -181,7 +186,11 @@ def read_mps(path) -> Model:
                     section = "OBJNAME"
                     if len(toks) > 1:
                         m.obj_name = toks[1]
-                elif head in ("QUADOBJ", "QMATRIX", "QSECTION", "QCMATRIX", "GENERAL", "PWLOBJ"):
+                elif head in ("QUADOBJ", "QMATRIX", "QSECTION"):
+                    if head == "QSECTION" and len(toks) > 1 and toks[1] != m.obj_name:
+                        raise MPSError(f"line {lineno}: quadratic constraints are not supported (QSECTION {toks[1]})")
+                    section = head
+                elif head in ("QCMATRIX", "GENERAL", "PWLOBJ"):
                     raise MPSError(f"unsupported section {head}")
                 else:
                     raise MPSError(f"line {lineno}: unknown section {head!r}")
@@ -270,6 +279,17 @@ def read_mps(path) -> Model:
                     raise MPSError(f"line {lineno}: unknown column {cname}")
                 m.sos[-1][2].append(m.col_index[cname])
                 m.sos[-1][3].append(w)
+            elif section in ("QUADOBJ", "QMATRIX", "QSECTION"):
+                if len(toks) != 3:
+                    raise MPSError(f"line {lineno}: bad {section} line")
+                a, b = m.col_index.get(toks[0]), m.col_index.get(toks[1])
+                if a is None or b is None:
+                    raise MPSError(f"line {lineno}: unknown column in {section}")
+                v = _float(toks[2])
+                if section != "QUADOBJ" and a != b:
+                    v *= 0.5  # both (a, b) and (b, a) are listed
+                key = (max(a, b), min(a, b))
+                m.quad[key] = m.quad.get(key, 0.0) + v
             elif section == "INDICATORS":
                 if toks[0].upper() != "IF" or len(toks) not in (3, 4):
                     raise MPSError(f"line {lineno}: bad INDICATORS line")
@@ -423,7 +443,9 @@ def _set_sense(m, tok):
 
 
 def objective(m: Model, x) -> float:
-    return m.obj_const + math.fsum(c * x[j] for j, c in enumerate(m.obj) if c)
+    lin = math.fsum(c * x[j] for j, c in enumerate(m.obj) if c)
+    quad = math.fsum((0.5 if i == j else 1.0) * v * x[i] * x[j] for (i, j), v in m.quad.items())
+    return m.obj_const + lin + quad
 
 
 @dataclass
