@@ -26,6 +26,7 @@
 #include "milp/heuristics/localsearch.hpp"
 #include "milp/heuristics/rounding.hpp"
 #include "milp/heuristics/submip.hpp"
+#include "milp/lp/crossover.hpp"
 #include "milp/lp/simplex.hpp"
 #include "milp/search/conflict.hpp"
 #include "milp/search/orbitope.hpp"
@@ -861,6 +862,8 @@ class Search {
       const SparseMatrix rows = p.A.transpose();
       for (Index j : cont_costs) obj_integral_ = obj_integral_ && implied_integer(p, rows, j);
     }
+    // Implications (logical constraints kept out of the LP) fix bounds outside the propagation trail.
+    if (!p.implications.empty()) conflicts_ = false;
   }
   // Continuous column j is integral in every feasible point if an equality row has integer
   // columns only besides j, with coefficients and side integral multiples of a_j (fiball's
@@ -1088,6 +1091,14 @@ class Search {
   // subtree stays in the search (bound: the node's). Returns the number of children (0: pruned or,
   // if nothing can be branched on, dropped with its bound recorded as lost).
   int unsolved_branch(Worker& w, Node& node, Node* children);
+  // Implications: an unfixed z whose implication the point x violates (-1 if none), and the
+  // branching on it (children z = 0 / z = 1 with the given bound).
+  Index violated_implication(const Worker& w, const double* x) const;
+  // An implication with z unfixed and its column not fixed at 0 (-1 if none).
+  Index open_implication(const Worker& w) const;
+  // Node with an unbounded LP and all implications decided: unbounded if feasible (sub-MIP with zero objective).
+  int unbounded_leaf(Worker& w, Node& node);
+  int implication_branch(Worker& w, Node& node, Node* children, Index z, double bound);
   bool debug_root_ = true;  // false inside sub-MIPs (debug dumps only from the top-level search)
   std::vector<double> debug_sol_;  // MILP_DEBUG_SOL: known optimal point, one value per line
   void worker_loop(int tid);
@@ -1140,6 +1151,13 @@ class Search {
   Symmetry sym_;
   std::atomic<long long> sym_fixed_{0}, sym_branches_{0}, sym_stabs_{0};
   void detect_symmetry_root();
+  // Root LP by barrier + crossover (SolverParams::lp_method): leaves an optimal basis in lp.
+  bool use_barrier_root() const;
+  void barrier_root(DualSimplex& lp);
+  // Auto for large pure LPs: dual simplex and barrier run at the same time, the first to finish
+  // wins (opportunistic mode only: the winner depends on timing).
+  bool use_concurrent_root() const;
+  void concurrent_root(DualSimplex& lp);
   // Adds the LP iterations since the last report to opts_.progress (sub-MIP jobs, see SubMipJob).
   std::atomic<long long> progress_reported_{0};
   std::atomic<long long> prop_work_total_{0}, lp_work_total_{0};  // statistics (opportunistic workers)
@@ -1383,6 +1401,7 @@ class Search {
   std::mutex stop_mu_;
   std::atomic<bool> root_unbounded_{false}, numerical_{false};
   std::atomic<long long> lp_failed_{0}, lp_recovered_{0}, lp_unsolved_{0}, fixed_recovered_{0};
+  std::atomic<long long> impl_branches_{0};  // branchings on violated implications
   // verified_point's fixed-integer re-solves: tried, succeeded, total LP iterations (statistics)
   mutable std::atomic<long long> polish_tried_{0}, polish_ok_{0}, polish_iters_{0};
   double lost_bound_ = kInf;  // min bound of subtrees dropped for numerical reasons
@@ -1402,6 +1421,7 @@ LpStatus Search::solve_fixed_ints(const std::vector<double>& x_int, const std::v
   for (Index j = 0; j < p_.num_cols(); ++j) {
     if (p_.is_int[j]) lb[j] = ub[j] = std::round(x_int[j]);
   }
+  if (!p_.implications.empty() && !p_.apply_implications(lb, ub)) return LpStatus::Infeasible;
   DualSimplex lp;
   lp.load(p_.A, p_.cost, lb, ub, p_.row_lb, p_.row_ub);
   LpOptions o;
@@ -1466,6 +1486,18 @@ bool Search::verified_point(const std::vector<double>& x_arg, std::vector<double
       x = x_in;
     } else {
       return false;
+    }
+  } else if (!p_.implications.empty()) {
+    // Implications held only within the tolerance (a column a hair from 0): re-solve the continuous
+    // part with them enforced exactly, so that the tolerance does not buy objective.
+    bool loose = false;
+    for (const Implication& im : p_.implications) {
+      loose = loose || (std::abs(x[im.z] - im.zval) < 0.5 && x[im.col] != 0.0);
+    }
+    std::vector<double> fixed;
+    if (loose && solve_fixed_ints(x, p_.col_lb, p_.col_ub, 1e-9, kInf, fixed) == LpStatus::Optimal &&
+        p_.max_violation(fixed) <= kFeasTol) {
+      x = std::move(fixed);
     }
   }
   static const bool no_oneopt = std::getenv("MILP_NO_ONEOPT") || std::getenv("MILP_NO_LOCALSEARCH");
@@ -2993,6 +3025,13 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     return 0;
   }
   if (dbg_in2) dbg_out("orbitope pass");
+  if (!p_.implications.empty() && !p_.apply_implications(w.lb, w.ub, &w.changed)) {
+    for (Index j : w.changed) lp.set_col_bounds(j, w.lb[j], std::max(w.lb[j], w.ub[j]));
+    ++nodes_;
+    ++w.nodes;
+    count_outcome(1, node.depth);
+    return 0;
+  }
   for (Index j : w.changed) lp.set_col_bounds(j, w.lb[j], w.ub[j]);
   apply_global_cuts(w);
   const bool pool_on = use_pool_ && node.id != 0 && w.m_base >= 0;
@@ -3083,6 +3122,14 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     stop_ = true;
     lost_bound_ = std::min(lost_bound_, node.bound);  // the unsolved node still limits the bound
     return 0;
+  }
+  if (st == LpStatus::Unbounded && !p_.implications.empty()) {
+    // The LP ignores the implications (their columns are free there), so an unbounded LP says nothing
+    // about the problem: branch on an open implication; with all of them decided, the subproblem is a
+    // plain MILP, unbounded if it has a feasible point.
+    const Index z = open_implication(w);
+    if (z >= 0) return implication_branch(w, node, children, z, node.bound);
+    return unbounded_leaf(w, node);
   }
   if (st == LpStatus::Unbounded && node.id == 0) {
     root_unbounded_ = true;
@@ -3301,6 +3348,11 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     if (!p_.is_int[j]) continue;
     const double f = x[j] - std::floor(x[j]);
     if (f > itol && f < 1.0 - itol) w.fracs.emplace_back(j, f);
+  }
+  if (w.fracs.empty() && !p_.implications.empty()) {
+    // Integral, but a logical implication may still be violated: branch on its binary.
+    const Index z = violated_implication(w, x);
+    if (z >= 0) return implication_branch(w, node, children, z, std::max(obj, node.bound));
   }
   if (w.fracs.empty()) {
     w.sol.assign(x, x + p_.num_cols());
@@ -3559,6 +3611,10 @@ int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
       double chk_obj;
       // Integral: the subtree's optimum is this point if it is feasible.
       if (try_incumbent(w, sol, "LP") || verified_point(sol, chk, &chk_obj)) return 0;
+      if (!p_.implications.empty()) {
+        const Index z = violated_implication(w, x.data());
+        if (z >= 0) return implication_branch(w, node, children, z, bound);
+      }
     }
   }
   if (j < 0) {
@@ -3616,6 +3672,73 @@ int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
   up.path = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
   children[0] = std::move(down);
   children[1] = std::move(up);
+  return 2;
+}
+
+Index Search::violated_implication(const Worker& w, const double* x) const {
+  for (const Implication& im : p_.implications) {
+    if (w.lb[im.z] < w.ub[im.z] && std::abs(x[im.z] - im.zval) < 0.5 && std::abs(x[im.col]) > 1e-9) return im.z;
+  }
+  return -1;
+}
+
+Index Search::open_implication(const Worker& w) const {
+  for (const Implication& im : p_.implications) {
+    if (w.lb[im.z] < w.ub[im.z] && (w.lb[im.col] < 0.0 || w.ub[im.col] > 0.0)) return im.z;
+  }
+  return -1;
+}
+
+int Search::unbounded_leaf(Worker& w, Node& node) {
+  MipProblem q = p_;
+  std::fill(q.cost.begin(), q.cost.end(), 0.0);
+  SubMipLimits lim;
+  SubMipStats stats;
+  lim.stats = &stats;
+  lim.node_limit = 100000;
+  lim.time_limit = std::max(0.0, params_.time_limit - timer_.elapsed());
+  lim.min_fixed_fraction = 0.0;
+  lim.stop = opts_.stop_flag;
+  if (params_.deterministic) lim.iteration_limit = 10000000;
+  std::vector<double> sol;
+  if (solve_sub_mip(q, w.lb, w.ub, kInf, lim, sol) && p_.max_violation(sol) <= kFeasTol) {
+    log_.log(2, "  node %lld: unbounded LP with a feasible point: the problem is unbounded\n", node.id);
+    try_incumbent(w, sol, "unbounded");
+    root_unbounded_ = true;
+    stop_ = true;
+    return 0;
+  }
+  if (stats.exhausted) return 0;  // infeasible subproblem
+  // Undecided (limits): the subtree is lost.
+  std::lock_guard<std::mutex> lk(stop_mu_);
+  lost_bound_ = -kInf;
+  numerical_ = true;
+  log_.log(1, "  node %lld: unbounded LP, feasibility not decided; subtree dropped\n", node.id);
+  return 0;
+}
+
+int Search::implication_branch(Worker& w, Node& node, Node* children, Index z, double bound) {
+  ++impl_branches_;
+  Node down, up;
+  for (Node* c : {&down, &up}) {
+    c->bound = bound;
+    c->estimate = bound;
+    c->parent_obj = bound;
+    c->depth = node.depth + 1;
+    c->parent = node.id;
+    c->id = next_node_id(w);
+    c->branch_var = -1;  // no pseudocost update
+    c->sym = nullptr;
+  }
+  w.seg.clear();
+  PathSeg::encode({z, w.lb[z], std::floor(w.lb[z])}, p_.col_lb[z], p_.col_ub[z], w.seg);
+  down.path = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
+  w.seg.clear();
+  PathSeg::encode({z, std::floor(w.lb[z]) + 1.0, w.ub[z]}, p_.col_lb[z], p_.col_ub[z], w.seg);
+  up.path = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
+  children[0] = std::move(down);
+  children[1] = std::move(up);
+  count_outcome(8, node.depth);
   return 2;
 }
 
@@ -4678,8 +4801,83 @@ void Search::fj_finish() {
   fj_found_.clear();  // deterministic mode: found after the last sync point (timing dependent)
 }
 
+bool Search::use_barrier_root() const {
+  // Main search only (not sub-MIPs), first root only (a restarted root has cuts and a known basis).
+  if (!opts_.sub_mip_heuristics || opts_.restarts_done > 0 || opts_.tree_restarts_done > 0) return false;
+  if (p_.num_rows() == 0 || p_.num_cols() == 0) return false;
+  switch (params_.lp_method) {
+    case LpMethod::Simplex: return false;
+    case LpMethod::Barrier: return true;
+    case LpMethod::Auto: break;
+  }
+  return false;
+}
+
+bool Search::use_concurrent_root() const {
+  if (params_.lp_method != LpMethod::Auto || params_.deterministic || threads_ < 2) return false;
+  if (!opts_.sub_mip_heuristics || opts_.restarts_done > 0 || opts_.tree_restarts_done > 0) return false;
+  if (std::find(p_.is_int.begin(), p_.is_int.end(), 1) != p_.is_int.end()) return false;  // MIP roots: simplex
+  // Small LPs take milliseconds with the simplex.
+  static const long long min_nnz = static_cast<long long>(knob("MILP_CONCURRENT_NNZ", 10000));
+  return p_.num_rows() > 0 && static_cast<long long>(p_.A.nnz()) >= min_nnz;
+}
+
+void Search::concurrent_root(DualSimplex& lp) {
+  const double t0 = timer_.elapsed();
+  DualSimplex blp = lp;
+  std::atomic<bool> stop{false};
+  BarrierStats bs;
+  LpStatus bst = LpStatus::NumericalError;
+  double t_barrier = 0.0;
+  Logger quiet(0);
+  std::thread tb([&] {
+    BarrierOptions bo;
+    bo.log = &quiet;
+    bo.stop = &stop;
+    bo.time_limit = params_.time_limit - timer_.elapsed();
+    bo.ipm.threads = std::max(1, threads_ - 1);
+    bst = barrier_solve(blp, p_.A, p_.cost, p_.col_lb, p_.col_ub, p_.row_lb, p_.row_ub, bo, &bs);
+    t_barrier = timer_.elapsed() - t0;
+    if (bst == LpStatus::Optimal && bs.used) stop.store(true);
+  });
+  LpOptions so;
+  so.tol = params_.tol;
+  so.time_limit = params_.time_limit - timer_.elapsed();
+  so.stop = &stop;
+  const LpStatus sst = lp.solve(so);
+  const double t_simplex = timer_.elapsed() - t0;
+  const bool simplex_done = sst == LpStatus::Optimal || sst == LpStatus::Infeasible || sst == LpStatus::Unbounded;
+  if (simplex_done) stop.store(true);
+  tb.join();
+  if (!simplex_done && bst == LpStatus::Optimal && bs.used) {
+    lp = blp;
+    log_.log(1, "Concurrent LP: barrier finished first (%.2fs: %d iterations, crossover and %lld simplex iterations)\n",
+             t_barrier, bs.ipm.iterations, bs.cleanup_iterations);
+  } else if (simplex_done) {
+    log_.log(1, "Concurrent LP: dual simplex finished first (%.2fs)\n", t_simplex);
+  }
+}
+
+void Search::barrier_root(DualSimplex& lp) {
+  BarrierOptions bo;
+  bo.log = &log_;
+  bo.time_limit = params_.time_limit - timer_.elapsed();
+  bo.ipm.threads = threads_;
+  bo.ipm.log_offset = p_.offset;
+  bo.ipm.log_sense = p_.display_sense;
+  BarrierStats bs;
+  const LpStatus st = barrier_solve(lp, p_.A, p_.cost, p_.col_lb, p_.col_ub, p_.row_lb, p_.row_ub, bo, &bs);
+  if (!bs.used) {
+    log_.log(1, "Barrier: %s (%s); solving the root LP with the dual simplex\n", to_string(bs.ipm.status),
+             to_string(st));
+  } else if (st != LpStatus::Optimal) {
+    log_.log(1, "Barrier: crossover cleanup ended %s; the dual simplex continues from its basis\n", to_string(st));
+  }
+}
+
 void Search::detect_symmetry_root() {
   if (std::getenv("MILP_NO_SYMMETRY") != nullptr || !opts_.sub_mip_heuristics) return;
+  if (!p_.implications.empty()) return;  // the implications are not part of the symmetry detection
   if (std::find(p_.is_int.begin(), p_.is_int.end(), 1) == p_.is_int.end()) return;
   SymmetryOptions so;
   // Deterministic mode: the work limit only (a binding time cap would be timing dependent).
@@ -4848,6 +5046,8 @@ MipResult Search::run() {
     }
     Node children[2];
     pool_->set_worker_bound(0, -kInf);
+    if (use_barrier_root()) barrier_root(w.lp);
+    else if (use_concurrent_root()) concurrent_root(w.lp);
     if (p_.is_int.end() != std::find(p_.is_int.begin(), p_.is_int.end(), 1)) {
       std::vector<Cut> dropped;
       static const bool no_lurk = std::getenv("MILP_NO_LURKRC") != nullptr;
@@ -5053,6 +5253,9 @@ MipResult Search::run() {
     if (lp_failed_.load() > 0 || lp_unsolved_.load() > 0) {
       log_.log(1, "Node LP failures: %lld, recovered %lld, branched without LP %lld, all-integers-fixed re-solves %lld\n",
                lp_failed_.load(), lp_recovered_.load(), lp_unsolved_.load(), fixed_recovered_.load());
+    }
+    if (impl_branches_.load() > 0) {
+      log_.log(1, "Logical implications: %lld branchings\n", impl_branches_.load());
     }
     if (polish_tried_.load() > 0) {
       log_.log(2, "Fixed-integer re-solves of near-feasible points: %lld, %lld feasible, %lld LP iterations\n",

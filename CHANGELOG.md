@@ -2,6 +2,70 @@
 
 ## Unreleased
 
+## v0.3.0 — 2026-11
+
+New capabilities: an interior-point (barrier) LP solver and the logical modelling features real
+models use — semi-continuous variables, SOS1/SOS2 and indicator constraints.
+
+**Benchmarks**
+- 63-instance MIPLIB 2017 subset (120 s, 4 threads): 60 solved, shifted geometric mean 11.4 s
+  (unchanged from v0.2.1: this release adds features, not MILP speed).
+- Generated models, now 130 including three families with logical constraints (1 thread):
+  129 solved; SCIP solves 122 of 130, HiGHS 117 of the 122 it can read.
+- LP relaxations of the MIPLIB instances: the new default `--lp-method auto` is about 27% faster
+  than the dual simplex alone. BENCHMARKS.md has a new plot of popso's progress across versions.
+
+**Barrier (interior-point) LP solver**
+- New LP algorithm, written from scratch like the rest: Mehrotra's predictor-corrector
+  primal-dual method with Gondzio's centrality correctors, on the presolved and scaled problem
+  (geometric scaling; free variables, ranges and two-sided bounds handled directly).
+- Linear algebra: an approximate minimum degree ordering (AMD) and a supernodal sparse Cholesky
+  factorization, multithreaded for large dense blocks. Each solve picks the cheaper of the normal
+  equations and the regularized augmented system (factored as a quasi-definite LDL^T, which suits
+  LPs with far more rows than columns and is the form a future QP solver needs). Dense columns in
+  the normal equations go through a Sherman–Morrison–Woodbury update; every solve is refined
+  iteratively.
+- Crossover to an optimal basis: dual and primal push phases, then a short simplex cleanup, so
+  the answer is an exact vertex as with the simplex.
+- `--lp-method auto|simplex|barrier` (C API parameter `lp_method`: 0, 1, 2; the Python bindings
+  also take the names). The method is used for a pure LP and for the root LP of a MIP. `auto`
+  (the default) runs the dual simplex and the barrier at the same time on large pure LPs and
+  takes the first to finish (not in `--deterministic` mode, where it stays with the simplex);
+  MIP root LPs stay with the simplex unless `barrier` is chosen.
+- On LP relaxations of 69 MIPLIB instances (4 threads), `auto` takes 27% less time than the
+  dual simplex alone in shifted geometric mean and 44% less in total; the barrier alone is about
+  as fast as HiGHS' interior-point solver (shifted geometric mean 0.40 s vs 0.43 s, with
+  crossover). Examples: chromaticindex512-7 20 s -> 1.6 s, dano3_3 6.2 s -> 2.7 s, qap10
+  3.4 s -> 1.1 s, rmatr200-p5 5.9 s -> 2.9 s, brazil3 2.4 s -> 0.8 s.
+
+**Model features**
+- Semi-continuous and semi-integer variables (x = 0 or lb <= x <= ub), SOS1 and SOS2
+  constraints, and indicator constraints (if a binary variable takes a given value, a linear
+  constraint must hold).
+- They are read from MPS files (`SC`/`SI` bounds, `SOS` section, `INDICATORS` section) and LP
+  files (`Semi-Continuous` section, `SOS` section with `S1::`/`S2::` entries, and indicator
+  constraints written `name: b = 1 -> x + y <= 5`). The MPS writer writes them, so models
+  round-trip.
+- C API: `POPSO_SEMICONTINUOUS` and `POPSO_SEMIINTEGER` variable types, `popso_add_sos`,
+  `popso_add_indicator`, `popso_num_sos`, `popso_num_indicators`, and `popso_read_lp` for LP
+  files. Python: `SEMICONTINUOUS`/`SEMIINTEGER` variable types, `Model.add_sos`,
+  `Model.add_indicator(b, 1, x + y <= 5)` and `popso.read_lp`.
+- How they are solved: the solver adds a binary variable for each semi-continuous variable, SOS
+  member or SOS2 segment and links it with big-M rows; an indicator constraint becomes a big-M
+  row. The big-M values come from the variable bounds, tightened by bound propagation over the
+  model rows. Presolve, cuts, heuristics and branching then work as for any MILP, and the
+  final solution is checked against the original constraints. When no finite bound exists (or
+  it would exceed 1e6), the constraint is not relaxed by a big-M: the solver branches on its
+  binary variable and enforces the constraint in that subtree. Presolve is skipped for such
+  models.
+- Testing: unit tests compare small models with optima found by enumeration, using both the
+  big-M form and branching only, and `benchmarks/tools/logical_fuzz.py` compares random small
+  models with SCIP. Three new generated benchmark families, `semilot` (minimum
+  lot sizes), `pwlnet` (transportation with piecewise-linear concave costs, plant opening and
+  single sourcing) and `indsched` (single-machine scheduling with indicator disjunctions and no
+  big-M), have reference answers from SCIP (and from HiGHS for `semilot`). The benchmark
+  checker verifies the new constraints.
+
 ## v0.2.1 — 2026-11
 
 A patch release: faster root cuts on pure integer models and a robustness fix for deterministic

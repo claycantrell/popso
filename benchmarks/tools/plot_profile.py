@@ -49,9 +49,9 @@ def solve_times(result_path, solvers, refs):
     return times, len(recs)
 
 
-def svg(times, n, title, subtitle, tl):
-    W, H = 720, 400
-    left, right, top, bottom = 56, 118, 58, 46
+def svg(times, n, title, subtitle, tl, right=118):
+    W, H = 602 + right, 400
+    left, top, bottom = 56, 58, 46
     pw, ph = W - left - right, H - top - bottom
     tmin = 0.01
     lx0, lx1 = math.log10(tmin), math.log10(tl)
