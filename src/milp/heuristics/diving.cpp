@@ -24,14 +24,17 @@ struct Choice {
 };
 
 // Picks the variable to round and the direction according to the rule.
-Choice choose(const MipProblem& p, const double* x, DiveRule rule, const SimpleRounding& rounding,
-              const std::vector<double>* inc) {
+Choice choose(const MipProblem& p, const DualSimplex& lp, const double* x, DiveRule rule,
+              const SimpleRounding& rounding, const std::vector<double>* inc) {
   Choice best;
   double best_score = kInf;
   for (Index j = 0; j < p.num_cols(); ++j) {
     if (!p.is_int[j]) continue;
     const double f = x[j] - std::floor(x[j]);
     if (f <= 1e-6 || f >= 1.0 - 1e-6) continue;
+    // Just outside an integer bound (x = ub + 1e-6, within the LP's tolerance): rounding cannot
+    // change the domain, and choosing it again and again made the dive loop forever.
+    if (std::floor(x[j]) >= lp.col_upper(j) || std::ceil(x[j]) <= lp.col_lower(j)) continue;
     bool up = false;
     double score = kInf;
     switch (rule) {
@@ -110,7 +113,7 @@ bool dive(const MipProblem& p, DualSimplex& lp, DiveRule rule, const SimpleRound
       found = true;
       break;
     }
-    const Choice c = choose(p, x, rule, rounding, incumbent);
+    const Choice c = choose(p, lp, x, rule, rounding, incumbent);
     if (c.j < 0) {
       sol.assign(x, x + n);
       found = true;

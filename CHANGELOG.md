@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.2 — 2026-11
+
+**Fixes**
+- Diving heuristics could loop forever (and grow memory until the limit) on an integer column
+  whose LP value lies just outside an integer bound (x = ub + 1e-6, within the LP's tolerance):
+  rounding it does not change its domain. Such columns are no longer chosen. MIPLIB
+  graphdraw-domain: from the 2 GB memory limit to optimal in 293 s (4 threads, 357 MB).
+
 ## v0.4.1 — 2026-11
 
 **Fixes**
