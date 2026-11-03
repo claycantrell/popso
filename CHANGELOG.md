@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.3.1 — 2026-11
+
+Benchmark update; the solver is the same as in v0.3.0.
+
+- BENCHMARKS.md: new section on 43 hard MIPLIB 2017 instances (those of the 106-instance
+  development set that no solver finishes within 120 s), run with a 10-minute limit. popso solves
+  9, HiGHS 12, SCIP 6; set file `benchmarks/sets/miplib_hard.txt`.
+- HiGHS and SCIP reference results for these instances at 600 s.
+- `plot_profile.py`: `--tmin` and `--ymax` to zoom the time and count axes.
+
 ## v0.3.0 — 2026-11
 
 New capabilities: an interior-point (barrier) LP solver and the logical modelling features real

@@ -115,6 +115,77 @@ popso is fastest on 35 of the 63 instances.
 
 </details>
 
+## Hard MIPLIB instances (10-minute limit)
+
+The 63 instances above were selected from a wider 106-instance set (MIPLIB 2017 benchmark set,
+"easy", at most about 200k nonzeros). The remaining 43 are the ones that none of popso, HiGHS or
+SCIP solved within 120 s. They are listed in
+[`benchmarks/sets/miplib_hard.txt`](benchmarks/sets/miplib_hard.txt) and were run with a
+600 s limit, otherwise with the same settings as above. All have known optimal values, so every
+answer is checked.
+
+![MIPLIB hard instances: instances solved vs. time](docs/miplib_hard.svg)
+
+| solver | solved | shifted geomean (s) |
+|---|---|---|
+| popso | 9/43 | 468.9 |
+| HiGHS | 12/43 | 487.5 |
+| SCIP | 6/43 | 564.7 |
+
+Most of these instances stay unsolved by all three solvers at 10 minutes; the plot shows only the
+range where anything is solved. popso hit its 2 GB memory limit on graphdraw-domain, HiGHS on
+supportcase18. popso has not been tuned on this set.
+
+<details><summary>Per instance (seconds; TL = time limit; bold = fastest)</summary>
+
+| instance | popso | HiGHS | SCIP |
+|---|---|---|---|
+| 50v-10 | TL | TL | TL |
+| app1-2 | TL | TL | TL |
+| blp-ic98 | TL | **571.3** | TL |
+| bppc4-08 | TL | TL | TL |
+| chromaticindex512-7 | TL | TL | TL |
+| cost266-UUE | TL | TL | TL |
+| csched007 | **326.2** | 566.6 | TL |
+| csched008 | TL | **152.9** | 585.9 |
+| fhnw-binpack4-48 | TL | TL | TL |
+| gen-ip054 | 541.3 | **395.7** | TL |
+| germanrr | TL | TL | TL |
+| glass4 | **355.8** | TL | TL |
+| gmu-35-40 | TL | TL | TL |
+| gmu-35-50 | TL | TL | TL |
+| graphdraw-domain | TL | 490.7 | **409.7** |
+| ic97_potential | TL | TL | TL |
+| icir97_tension | TL | TL | TL |
+| leo1 | TL | TL | TL |
+| lotsize | TL | TL | TL |
+| mas74 | **101.1** | TL | TL |
+| mcsched | **118.3** | 248.3 | 149.9 |
+| milo-v12-6-r2-40-1 | TL | TL | TL |
+| neos-1171737 | TL | TL | TL |
+| neos-1456979 | TL | **325.2** | 425.5 |
+| neos-3216931-puriri | TL | **191.3** | TL |
+| neos-4338804-snowy | TL | TL | TL |
+| neos-4387871-tavua | TL | TL | TL |
+| neos-4954672-berkel | TL | TL | TL |
+| neos-5107597-kakapo | TL | TL | TL |
+| neos-933966 | **50.0** | TL | 577.9 |
+| nexp-150-20-8-5 | TL | **127.4** | TL |
+| ran14x18-disj-8 | **67.4** | 344.1 | TL |
+| reblock115 | TL | TL | TL |
+| rmatr200-p5 | TL | TL | TL |
+| rococoB10-011000 | TL | TL | TL |
+| sct2 | TL | **270.6** | TL |
+| supportcase18 | TL | TL | TL |
+| supportcase26 | TL | TL | TL |
+| supportcase40 | **176.6** | TL | TL |
+| tr12-30 | TL | **162.7** | 386.4 |
+| trento1 | TL | TL | TL |
+| uct-subprob | TL | TL | TL |
+| wachplan | **542.4** | TL | TL |
+
+</details>
+
 ## Generated instances
 
 130 models from random families of increasing size
@@ -311,6 +382,7 @@ comparisons that include commercial solvers see Hans Mittelmann's
 python3 -m venv .venv && .venv/bin/pip install -r benchmarks/requirements.txt
 .venv/bin/python benchmarks/miplib/download.py --wide          # MIPLIB files (not in the repo)
 .venv/bin/python benchmarks/run.py --solver build/popso --set miplib_wide_core -t 120 --threads 4 --mem-limit 2048
+.venv/bin/python benchmarks/run.py --solver build/popso --set miplib_hard -t 600 --threads 4 --mem-limit 2048
 .venv/bin/python benchmarks/run.py --solver build/popso -t 120 --threads 1 --mem-limit 2048
 # tables and plots from a result file
 .venv/bin/python benchmarks/tools/readme_table.py benchmarks/results/<run>.json --solvers popso,highs,scip

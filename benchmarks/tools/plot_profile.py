@@ -49,18 +49,18 @@ def solve_times(result_path, solvers, refs):
     return times, len(recs)
 
 
-def svg(times, n, title, subtitle, tl, right=118):
+def svg(times, n, title, subtitle, tl, right=118, tmin=0.01, ymax=None):
     W, H = 602 + right, 400
     left, top, bottom = 56, 58, 46
     pw, ph = W - left - right, H - top - bottom
-    tmin = 0.01
+    ymax = ymax or n
     lx0, lx1 = math.log10(tmin), math.log10(tl)
 
     def X(t):
         return left + (math.log10(max(t, tmin)) - lx0) / (lx1 - lx0) * pw
 
     def Y(k):
-        return top + ph - k / n * ph
+        return top + ph - k / ymax * ph
 
     o = []
     o.append(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
@@ -76,12 +76,12 @@ def svg(times, n, title, subtitle, tl, right=118):
     o.append(f'<text class="t2" x="{left}" y="42" font-size="12">{subtitle}</text>')
 
     # grid + axes (recessive)
-    step = 10 if n > 40 else 5
-    for k in range(0, n + 1, step):
+    step = 10 if ymax > 40 else 5
+    for k in range(0, ymax + 1, step):
         y = Y(k)
         o.append(f'<line class="grid" x1="{left}" x2="{left + pw}" y1="{y:.1f}" y2="{y:.1f}" stroke-width="1"/>')
         o.append(f'<text class="t2" x="{left - 8}" y="{y + 4:.1f}" font-size="11" text-anchor="end">{k}</text>')
-    for t, lab in ((0.01, "0.01"), (0.1, "0.1"), (1, "1"), (10, "10"), (tl, f"{tl:g}")):
+    for t, lab in [(d, f"{d:g}") for d in (0.01, 0.1, 1, 10, 100) if tmin <= d < tl * 0.6] + [(tl, f"{tl:g}")]:
         x = X(t)
         o.append(f'<line class="grid" x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{top + ph}" stroke-width="1"/>')
         o.append(f'<text class="t2" x="{x:.1f}" y="{top + ph + 18}" font-size="11" text-anchor="middle">{lab}</text>')
@@ -126,6 +126,8 @@ def main(argv=None):
     ap.add_argument("--title", required=True)
     ap.add_argument("--subtitle", default="")
     ap.add_argument("--time-limit", type=float, default=120.0)
+    ap.add_argument("--tmin", type=float, default=0.01, help="left end of the time axis")
+    ap.add_argument("--ymax", type=int, default=None, help="top of the y axis (default: number of instances)")
     ap.add_argument("--solvers", default="popso,highs,scip")
     ap.add_argument("--reference", default=str(BENCH / "reference" / "solutions.json"))
     ap.add_argument("--miplib-solu", default=str(BENCH / "reference" / "miplib_solu.json"))
@@ -135,7 +137,8 @@ def main(argv=None):
     refs = load_references(args.reference, args.miplib_solu)
     times, n = solve_times(args.result, solvers, refs)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text(svg(times, n, args.title, args.subtitle, args.time_limit))
+    Path(args.out).write_text(svg(times, n, args.title, args.subtitle, args.time_limit,
+                                       tmin=args.tmin, ymax=args.ymax))
     print(f"wrote {args.out}")
     return 0
 

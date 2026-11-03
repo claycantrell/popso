@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" role="img" aria-label="MIPLIB 2017 hard instances — 43 instances: instances solved versus time">
+<style>svg{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.grid{stroke:#e4e3df}.axis{stroke:#a3a29c}.s-ours{stroke:#2a78d6}.f-ours{fill:#2a78d6}.s-highs{stroke:#eb6834}.f-highs{fill:#eb6834}.s-scip{stroke:#1baf7a}.f-scip{fill:#1baf7a}@media (prefers-color-scheme: dark){.bg{fill:#1a1a19}.t1{fill:#f0efec}.t2{fill:#c3c2b7}.grid{stroke:#333331}.axis{stroke:#6b6a64}.s-ours{stroke:#3987e5}.f-ours{fill:#3987e5}.s-highs{stroke:#d95926}.f-highs{fill:#d95926}.s-scip{stroke:#199e70}.f-scip{fill:#199e70}}</style>
+<rect class="bg" width="720" height="400" rx="8"/>
+<text class="t1" x="56" y="24" font-size="15" font-weight="600">MIPLIB 2017 hard instances — 43 instances</text>
+<text class="t2" x="56" y="42" font-size="12">4 threads (SCIP: 1 thread), 600 s limit. Higher and further left is better.</text>
+<line class="grid" x1="56" x2="602" y1="354.0" y2="354.0" stroke-width="1"/>
+<text class="t2" x="48" y="358.0" font-size="11" text-anchor="end">0</text>
+<line class="grid" x1="56" x2="602" y1="255.3" y2="255.3" stroke-width="1"/>
+<text class="t2" x="48" y="259.3" font-size="11" text-anchor="end">5</text>
+<line class="grid" x1="56" x2="602" y1="156.7" y2="156.7" stroke-width="1"/>
+<text class="t2" x="48" y="160.7" font-size="11" text-anchor="end">10</text>
+<line class="grid" x1="56" x2="602" y1="58.0" y2="58.0" stroke-width="1"/>
+<text class="t2" x="48" y="62.0" font-size="11" text-anchor="end">15</text>
+<line class="grid" x1="56.0" x2="56.0" y1="58" y2="354" stroke-width="1"/>
+<text class="t2" x="56.0" y="372" font-size="11" text-anchor="middle">10</text>
+<line class="grid" x1="363.1" x2="363.1" y1="58" y2="354" stroke-width="1"/>
+<text class="t2" x="363.1" y="372" font-size="11" text-anchor="middle">100</text>
+<line class="grid" x1="602.0" x2="602.0" y1="58" y2="354" stroke-width="1"/>
+<text class="t2" x="602.0" y="372" font-size="11" text-anchor="middle">600</text>
+<line class="axis" x1="56" x2="602" y1="354" y2="354" stroke-width="1"/>
+<text class="t2" x="329.0" y="392" font-size="12" text-anchor="middle">time limit per instance (seconds, log scale)</text>
+<text class="t2" transform="translate(16 206.0) rotate(-90)" font-size="12" text-anchor="middle">instances solved</text>
+<path class="s-ours" d="M56.0 354.0 L270.5 354.0 L270.5 334.3 L310.5 334.3 L310.5 314.5 L364.5 314.5 L364.5 294.8 L385.5 294.8 L385.5 275.1 L438.9 275.1 L438.9 255.3 L520.7 255.3 L520.7 235.6 L532.3 235.6 L532.3 215.9 L588.3 215.9 L588.3 196.1 L588.5 196.1 L588.5 176.4 L602.0 176.4" fill="none" stroke-width="2" stroke-linejoin="round"><title>popso: 9/43 solved</title></path>
+<path class="s-highs" d="M56.0 354.0 L395.4 354.0 L395.4 334.3 L419.7 334.3 L419.7 314.5 L428.0 314.5 L428.0 294.8 L449.5 294.8 L449.5 275.1 L484.3 275.1 L484.3 255.3 L495.8 255.3 L495.8 235.6 L520.3 235.6 L520.3 215.9 L527.9 215.9 L527.9 196.1 L546.5 196.1 L546.5 176.4 L575.2 176.4 L575.2 156.7 L594.4 156.7 L594.4 136.9 L595.5 136.9 L595.5 117.2 L602.0 117.2" fill="none" stroke-width="2" stroke-linejoin="round"><title>HiGHS: 12/43 solved</title></path>
+<path class="s-scip" d="M56.0 354.0 L417.1 354.0 L417.1 334.3 L543.3 334.3 L543.3 314.5 L551.1 314.5 L551.1 294.8 L556.2 294.8 L556.2 275.1 L597.0 275.1 L597.0 255.3 L598.8 255.3 L598.8 235.6 L602.0 235.6" fill="none" stroke-width="2" stroke-linejoin="round"><title>SCIP: 6/43 solved</title></path>
+<circle class="f-highs" cx="614.0" cy="117.2" r="4"/>
+<text class="t1" x="623.0" y="121.2" font-size="12">HiGHS <tspan class="t2">12/43</tspan></text>
+<circle class="f-ours" cx="614.0" cy="176.4" r="4"/>
+<text class="t1" x="623.0" y="180.4" font-size="12">popso <tspan class="t2">9/43</tspan></text>
+<circle class="f-scip" cx="614.0" cy="235.6" r="4"/>
+<text class="t1" x="623.0" y="239.6" font-size="12">SCIP <tspan class="t2">6/43</tspan></text>
+</svg>

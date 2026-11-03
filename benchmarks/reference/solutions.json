@@ -436,6 +436,26 @@
      "scip": "10.0",
      "pyscipopt": "6.3.0"
     }
+   },
+   {
+    "date": "2026-11-02",
+    "time_limit": 600.0,
+    "threads": 4,
+    "jobs": 2,
+    "mem_limit_mb": 2800,
+    "solvers": [
+     "highs",
+     "scip"
+    ],
+    "instances": 43,
+    "versions": {
+     "python": "3.12.7",
+     "platform": "macOS-27.2-arm64-arm-64bit",
+     "machine": "arm64",
+     "highs": "1.15.1",
+     "scip": "10.0",
+     "pyscipopt": "6.3.0"
+    }
    }
   ]
  },
@@ -517,8 +537,8 @@
    "num_binaries": 1464,
    "sense": "min",
    "status": "timelimit",
-   "objective": 3412.6899901032457,
-   "bound": 3260.5574008712624,
+   "objective": 3318.549990355971,
+   "bound": 3280.426294093708,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 3311.1799841"
@@ -526,33 +546,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 3423.8299847691414,
-     "bound": 3260.5574008712624,
-     "time": 120.00433083396638,
+     "objective": 3318.549990355971,
+     "bound": 3280.426294093708,
+     "time": 600.0065426669898,
      "raw_status": "Time limit reached",
-     "nodes": 9569,
+     "nodes": 51497,
      "verify": {
       "feasible": true,
-      "objective": 3423.8299847691414,
-      "max_viol": 2.9135582835237983e-12,
-      "worst": "row c48 activity -1.970691154083217e-12 < 0.0"
+      "objective": 3318.549990355971,
+      "max_viol": 2.689712676007858e-12,
+      "worst": "var x213=-2.689712676007858e-12 < lb 0.0"
      },
-     "peak_rss_mb": 251.3
+     "peak_rss_mb": 456.0
     },
     "scip": {
      "status": "timelimit",
-     "objective": 3412.6899901032457,
-     "bound": 3237.820352690635,
-     "time": 120.000014499994,
+     "objective": 3327.5699896812434,
+     "bound": 3248.150574086155,
+     "time": 600.0020667079953,
      "raw_status": "timelimit",
-     "nodes": 7807,
+     "nodes": 66147,
      "verify": {
       "feasible": true,
-      "objective": 3412.6899901032457,
-      "max_viol": 3.126388037344441e-13,
-      "worst": "var x298=-3.126388037344441e-13 < lb 0.0"
+      "objective": 3327.569989681244,
+      "max_viol": 0.0,
+      "worst": ""
      },
-     "peak_rss_mb": 179.8
+     "peak_rss_mb": 508.3
     }
    },
    "ref_runs": [
@@ -573,6 +593,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -792,7 +823,7 @@
    "sense": "min",
    "status": "timelimit",
    "objective": -23.0,
-   "bound": -153.23733707643092,
+   "bound": -42.0,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal -41.0"
@@ -801,26 +832,26 @@
     "highs": {
      "status": "timelimit",
      "objective": null,
-     "bound": -164.0,
-     "time": 120.00573554204311,
+     "bound": -42.0,
+     "time": 600.0049285419518,
      "raw_status": "Time limit reached",
-     "nodes": 31,
-     "peak_rss_mb": 664.2
+     "nodes": 11695,
+     "peak_rss_mb": 698.2
     },
     "scip": {
      "status": "timelimit",
      "objective": -23.0,
-     "bound": -153.23733707643092,
-     "time": 120.02305912500015,
+     "bound": -45.59185562352574,
+     "time": 600.0059451250127,
      "raw_status": "timelimit",
-     "nodes": 1,
+     "nodes": 1983,
      "verify": {
       "feasible": true,
       "objective": -23.0,
       "max_viol": 2.42861286636753e-17,
       "worst": "row c22038 activity -2.42861286636753e-17 < 0.0"
      },
-     "peak_rss_mb": 761.0
+     "peak_rss_mb": 765.6
     }
    },
    "ref_runs": [
@@ -841,6 +872,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -1212,37 +1254,41 @@
    "num_integers": 13550,
    "num_binaries": 13550,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 4890.816339200001,
-   "bound": 4432.476091838547,
+   "status": "optimal",
+   "objective": 4491.447583998944,
+   "bound": 4491.447583998944,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 4491.44758395"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": null,
-     "bound": 4427.090445868553,
-     "time": 123.1112441670266,
-     "raw_status": "Time limit reached",
-     "nodes": 0,
-     "peak_rss_mb": 178.5
+     "status": "optimal",
+     "objective": 4491.447583998944,
+     "bound": 4491.447583998944,
+     "time": 571.2848837079946,
+     "raw_status": "Optimal",
+     "nodes": 12898,
+     "verify": {
+      "feasible": true,
+      "objective": 4491.447583998944,
+      "max_viol": 3.52345135761521e-10,
+      "worst": "var x(Rtd.Ut.1.1.0)=-3.52345135761521e-10 < lb 0.0"
+     },
+     "peak_rss_mb": 934.3
     },
     "scip": {
      "status": "timelimit",
-     "objective": 4890.816339200001,
-     "bound": 4432.476091838547,
-     "time": 120.00505208299728,
+     "objective": 4722.568088,
+     "bound": 4438.500666031322,
+     "time": 600.0047397909802,
      "raw_status": "timelimit",
-     "nodes": 16,
+     "nodes": 14593,
      "verify": {
       "feasible": true,
-      "objective": 4890.816339200001,
-      "max_viol": 7.113796288038543e-13,
-      "worst": "row defblpobj activity 7.113796288038543e-13 > 0.0"
+      "objective": 4722.568088,
+      "max_viol": 3.97574759780639e-14,
+      "worst": "row defblpobj activity 3.97574759780639e-14 > 0.0"
      },
-     "peak_rss_mb": 539.8
+     "peak_rss_mb": 1160.6
     }
    },
    "ref_runs": [
@@ -1263,6 +1309,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -1288,31 +1345,31 @@
      "status": "timelimit",
      "objective": 53.0,
      "bound": 52.0,
-     "time": 120.00249962497037,
+     "time": 600.00249045901,
      "raw_status": "Time limit reached",
-     "nodes": 29149,
+     "nodes": 113724,
      "verify": {
       "feasible": true,
       "objective": 53.0,
       "max_viol": 7.105427357601002e-14,
       "worst": "row c47 activity 7.105427357601002e-14 > 0.0"
      },
-     "peak_rss_mb": 318.5
+     "peak_rss_mb": 385.2
     },
     "scip": {
      "status": "timelimit",
      "objective": 53.0,
      "bound": 52.0,
-     "time": 120.00023404200329,
+     "time": 599.9989609160111,
      "raw_status": "timelimit",
-     "nodes": 9604,
+     "nodes": 36472,
      "verify": {
       "feasible": true,
       "objective": 53.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 221.7
+     "peak_rss_mb": 242.1
     }
    },
    "ref_runs": [
@@ -1333,6 +1390,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -1636,7 +1704,7 @@
    "sense": "min",
    "status": "timelimit",
    "objective": 4.0,
-   "bound": 3.0,
+   "bound": 3.000000000000001,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 4.0"
@@ -1645,8 +1713,8 @@
     "highs": {
      "status": "timelimit",
      "objective": 4.0,
-     "bound": 3.0,
-     "time": 125.81880254199496,
+     "bound": 3.000000000000001,
+     "time": 600.0872397499625,
      "raw_status": "Time limit reached",
      "nodes": 0,
      "verify": {
@@ -1655,16 +1723,22 @@
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 313.0
+     "peak_rss_mb": 359.0
     },
     "scip": {
      "status": "timelimit",
-     "objective": null,
+     "objective": 4.0,
      "bound": 3.0,
-     "time": 125.57681262504775,
+     "time": 606.699651709001,
      "raw_status": "timelimit",
      "nodes": 1,
-     "peak_rss_mb": 820.2
+     "verify": {
+      "feasible": true,
+      "objective": 4.0,
+      "max_viol": 4.440892098500626e-16,
+      "worst": "var x2097_2099_0=-4.440892098500626e-16 < lb 0.0"
+     },
+     "peak_rss_mb": 982.2
     }
    },
    "ref_runs": [
@@ -1685,6 +1759,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -1767,8 +1852,8 @@
    "num_binaries": 171,
    "sense": "min",
    "status": "timelimit",
-   "objective": 25456055.86,
-   "bound": 23492784.39569418,
+   "objective": 25148940.559999965,
+   "bound": 24247396.304838367,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 25148940.55999998"
@@ -1776,33 +1861,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 27162138.24,
-     "bound": 23068291.329633992,
-     "time": 120.01427625003271,
+     "objective": 25151916.54,
+     "bound": 24018188.52603915,
+     "time": 600.0175561250071,
      "raw_status": "Time limit reached",
-     "nodes": 3952,
+     "nodes": 51304,
      "verify": {
       "feasible": true,
-      "objective": 27162138.24,
-      "max_viol": 5.701760876504709e-12,
-      "worst": "row CAP(NOS__L13__U__4) activity 5.701760876504709e-12 > 0.0"
+      "objective": 25151916.54,
+      "max_viol": 2.7398527890909463e-11,
+      "worst": "row CAP(NOS__L51__U__4) activity 2.7398527890909463e-11 > 0.0"
      },
-     "peak_rss_mb": 348.0
+     "peak_rss_mb": 609.0
     },
     "scip": {
      "status": "timelimit",
-     "objective": 25456055.86,
-     "bound": 23492784.39569418,
-     "time": 120.00009566597873,
+     "objective": 25148940.559999965,
+     "bound": 24247396.304838367,
+     "time": 599.9993327090051,
      "raw_status": "timelimit",
-     "nodes": 13104,
+     "nodes": 67708,
      "verify": {
       "feasible": true,
-      "objective": 25456055.86,
-      "max_viol": 9.320544336332866e-11,
-      "worst": "var EF(NOS__CSBarcelona_IntDS__FL42)=-9.320544336332866e-11 < lb 0.0"
+      "objective": 25148940.56,
+      "max_viol": 0.0,
+      "worst": ""
      },
-     "peak_rss_mb": 241.1
+     "peak_rss_mb": 483.2
     }
    },
    "ref_runs": [
@@ -1823,6 +1908,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -1836,43 +1932,41 @@
    "num_integers": 1457,
    "num_binaries": 1457,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 359.0,
-   "bound": 318.0,
+   "status": "optimal",
+   "objective": 350.99999999805397,
+   "bound": 350.99999999805397,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 350.9999999999955"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 407.99999999999875,
-     "bound": 318.0,
-     "time": 120.002023249981,
-     "raw_status": "Time limit reached",
-     "nodes": 18125,
+     "status": "optimal",
+     "objective": 350.99999999805397,
+     "bound": 350.99999999805397,
+     "time": 566.5721431669663,
+     "raw_status": "Optimal",
+     "nodes": 84863,
      "verify": {
       "feasible": true,
-      "objective": 407.99999999999875,
-      "max_viol": 1.6987892574131059e-12,
-      "worst": "row c02_12 activity -1.6987892574131059e-12 < 0.0"
+      "objective": 350.99999999805397,
+      "max_viol": 1.904949309405879e-09,
+      "worst": "var delay#44=-1.904949309405879e-09 < lb 0.0"
      },
-     "peak_rss_mb": 388.0
+     "peak_rss_mb": 469.6
     },
     "scip": {
      "status": "timelimit",
-     "objective": 359.0,
-     "bound": 317.10376491389115,
-     "time": 120.00006475002738,
+     "objective": 351.0000000000032,
+     "bound": 332.7038655963697,
+     "time": 599.9992155420478,
      "raw_status": "timelimit",
-     "nodes": 3058,
+     "nodes": 43286,
      "verify": {
       "feasible": true,
-      "objective": 359.00000000000006,
-      "max_viol": 2.3741278303560333e-14,
-      "worst": "row c02_38 activity -2.3741278303560333e-14 < 0.0"
+      "objective": 351.0000000000031,
+      "max_viol": 4.791722574282176e-13,
+      "worst": "var x#40#32=1.0000000000004792 > ub 1.0"
      },
-     "peak_rss_mb": 218.8
+     "peak_rss_mb": 296.1
     }
    },
    "ref_runs": [
@@ -1895,6 +1989,17 @@
      "solvers": [
       "scip"
      ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
     }
    ]
   },
@@ -1906,37 +2011,41 @@
    "num_integers": 1284,
    "num_binaries": 1284,
    "sense": "min",
-   "status": "timelimit",
+   "status": "optimal",
    "objective": 173.0,
-   "bound": 172.0,
+   "bound": 173.0,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 173.0"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
+     "status": "optimal",
      "objective": 173.0,
-     "bound": 172.0,
-     "time": 120.00149349996354,
-     "raw_status": "Time limit reached",
-     "nodes": 16212,
+     "bound": 173.0,
+     "time": 152.9074851250043,
+     "raw_status": "Optimal",
+     "nodes": 16272,
      "verify": {
       "feasible": true,
       "objective": 173.0,
       "max_viol": 2.3021584638627246e-12,
       "worst": "row c02_24 activity 2.3021584638627246e-12 > 0.0"
      },
-     "peak_rss_mb": 214.9
+     "peak_rss_mb": 213.9
     },
     "scip": {
-     "status": "timelimit",
-     "objective": null,
-     "bound": 171.0,
-     "time": 119.99983158399118,
-     "raw_status": "timelimit",
-     "nodes": 5740,
-     "peak_rss_mb": 160.8
+     "status": "optimal",
+     "objective": 173.0,
+     "bound": 173.0,
+     "time": 585.9333678330295,
+     "raw_status": "optimal",
+     "nodes": 25944,
+     "verify": {
+      "feasible": true,
+      "objective": 173.0,
+      "max_viol": 1.2172081524526695e-14,
+      "worst": "row c02_49 activity 1.2172081524526695e-14 > 0.0"
+     },
+     "peak_rss_mb": 223.2
     }
    },
    "ref_runs": [
@@ -1957,6 +2066,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -2713,19 +2833,19 @@
      "status": "timelimit",
      "objective": null,
      "bound": 0.0,
-     "time": 120.00361412501661,
+     "time": 600.0183977909619,
      "raw_status": "Time limit reached",
-     "nodes": 8513,
-     "peak_rss_mb": 339.7
+     "nodes": 40277,
+     "peak_rss_mb": 553.5
     },
     "scip": {
      "status": "timelimit",
      "objective": null,
      "bound": 0.0,
-     "time": 120.00020399998175,
+     "time": 599.9989725829801,
      "raw_status": "timelimit",
-     "nodes": 72246,
-     "peak_rss_mb": 213.4
+     "nodes": 509669,
+     "peak_rss_mb": 234.7
     }
    },
    "ref_runs": [
@@ -2746,6 +2866,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -3041,43 +3172,41 @@
    "num_integers": 30,
    "num_binaries": 0,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 6849.146852632,
-   "bound": 6795.418193432793,
+   "status": "optimal",
+   "objective": 6840.9656417920005,
+   "bound": 6840.9656417920005,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 6840.96564179"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 6853.389070396,
-     "bound": 6789.275262558915,
-     "time": 120.01481570804026,
-     "raw_status": "Time limit reached",
-     "nodes": 1211075,
+     "status": "optimal",
+     "objective": 6840.9656417920005,
+     "bound": 6840.9656417920005,
+     "time": 395.7270964580239,
+     "raw_status": "Optimal",
+     "nodes": 2997121,
      "verify": {
       "feasible": true,
-      "objective": 6853.389070396,
+      "objective": 6840.9656417920005,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 251.6
+     "peak_rss_mb": 298.7
     },
     "scip": {
      "status": "timelimit",
-     "objective": 6849.146852632,
-     "bound": 6795.418193432793,
-     "time": 120.00176433403976,
+     "objective": 6840.9656417920005,
+     "bound": 6816.24336687591,
+     "time": 600.0003942500334,
      "raw_status": "timelimit",
-     "nodes": 1277952,
+     "nodes": 5809002,
      "verify": {
       "feasible": true,
-      "objective": 6849.146852632,
+      "objective": 6840.9656417920005,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 888.0
+     "peak_rss_mb": 1697.0
     }
    },
    "ref_runs": [
@@ -3098,6 +3227,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -3112,8 +3252,8 @@
    "num_binaries": 5323,
    "sense": "min",
    "status": "timelimit",
-   "objective": null,
-   "bound": 46785823.51976548,
+   "objective": 47781422.469599664,
+   "bound": 46813725.83523584,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 47095869.649"
@@ -3121,19 +3261,27 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": null,
-     "bound": null,
-     "time": 240.2701665419736,
-     "error": "hard timeout (killed)"
+     "objective": 47781422.469599664,
+     "bound": 46554115.99996754,
+     "time": 600.0209687500028,
+     "raw_status": "Time limit reached",
+     "nodes": 622,
+     "verify": {
+      "feasible": true,
+      "objective": 47781422.469599664,
+      "max_viol": 1.2458176129823979e-09,
+      "worst": "row R0000001 activity 1.2458176129823979e-09 > 0.0"
+     },
+     "peak_rss_mb": 586.4
     },
     "scip": {
      "status": "timelimit",
      "objective": null,
-     "bound": 46785823.51976548,
-     "time": 120.00043249997543,
+     "bound": 46813725.83523584,
+     "time": 600.0005877920194,
      "raw_status": "timelimit",
-     "nodes": 21,
-     "peak_rss_mb": 406.9
+     "nodes": 402,
+     "peak_rss_mb": 473.5
     }
    },
    "ref_runs": [
@@ -3154,6 +3302,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -3168,8 +3327,8 @@
    "num_binaries": 302,
    "sense": "min",
    "status": "timelimit",
-   "objective": 1600013299.9982,
-   "bound": 912111961.670741,
+   "objective": 1400013099.999793,
+   "bound": 1000005514.5949851,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 1200012599.972384"
@@ -3177,33 +3336,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 1700013800.0000005,
-     "bound": 912111961.670741,
-     "time": 120.00591716601048,
+     "objective": 1500012099.9999554,
+     "bound": 1000005319.4728212,
+     "time": 600.0555546660325,
      "raw_status": "Time limit reached",
-     "nodes": 169110,
+     "nodes": 890063,
      "verify": {
       "feasible": true,
-      "objective": 1700013800.0000005,
-      "max_viol": 9.701276818911235e-16,
-      "worst": "var z2&9.0=-9.701276818911235e-16 < lb 0.0"
+      "objective": 1500012099.9999554,
+      "max_viol": 4.725599730456317e-14,
+      "worst": "row id527 activity -8100000.000000383 < -8100000.0"
      },
-     "peak_rss_mb": 222.5
+     "peak_rss_mb": 791.3
     },
     "scip": {
      "status": "timelimit",
-     "objective": 1600013299.9982,
-     "bound": 828575632.4227237,
-     "time": 119.99998662504368,
+     "objective": 1400013099.999793,
+     "bound": 1000005514.5949851,
+     "time": 599.9997598750051,
      "raw_status": "timelimit",
-     "nodes": 79093,
+     "nodes": 885892,
      "verify": {
       "feasible": true,
-      "objective": 1600013299.9982,
-      "max_viol": 4.6549358501962406e-07,
-      "worst": ""
+      "objective": 1400013099.999793,
+      "max_viol": 6.896678667045464e-07,
+      "worst": "var z6&7.0=1.0000000000000009 > ub 1.0"
      },
-     "peak_rss_mb": 258.9
+     "peak_rss_mb": 655.7
     }
    },
    "ref_runs": [
@@ -3224,6 +3383,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -3238,7 +3408,7 @@
    "num_binaries": 1200,
    "sense": "min",
    "status": "timelimit",
-   "objective": -2406387.570500087,
+   "objective": -2406691.0262000225,
    "bound": -2406891.085887865,
    "agree": true,
    "notes": [
@@ -3247,33 +3417,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": -2406387.570500087,
+     "objective": -2406691.0262000225,
      "bound": -2406891.085887865,
-     "time": 120.00651570799528,
+     "time": 600.0173874169705,
      "raw_status": "Time limit reached",
-     "nodes": 86458,
+     "nodes": 467417,
      "verify": {
       "feasible": true,
-      "objective": -2406387.570500087,
-      "max_viol": 6.842952871011221e-10,
-      "worst": "row Sawti_H3 activity 6.842952871011221e-10 > 0.0"
+      "objective": -2406691.0262000225,
+      "max_viol": 1.9340973267389927e-10,
+      "worst": "row Sawti_H5 activity -1.9340973267389927e-10 < 0.0"
      },
-     "peak_rss_mb": 270.2
+     "peak_rss_mb": 402.6
     },
     "scip": {
      "status": "timelimit",
-     "objective": -2405591.8852999993,
-     "bound": -2406900.3573786337,
-     "time": 120.00028995797038,
+     "objective": -2406152.4787,
+     "bound": -2406891.5056093726,
+     "time": 600.0005847499706,
      "raw_status": "timelimit",
-     "nodes": 160245,
+     "nodes": 1117507,
      "verify": {
       "feasible": true,
-      "objective": -2405591.8853,
-      "max_viol": 1.7053025658242404e-13,
-      "worst": "row Sawti_H3 activity 1.7053025658242404e-13 > 0.0"
+      "objective": -2406152.4787,
+      "max_viol": 7.30409128011529e-14,
+      "worst": "row Sawti_H4 activity -7.30409128011529e-14 < 0.0"
      },
-     "peak_rss_mb": 553.7
+     "peak_rss_mb": 1790.7
     }
    },
    "ref_runs": [
@@ -3294,6 +3464,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -3308,8 +3489,8 @@
    "num_binaries": 1914,
    "sense": "min",
    "status": "timelimit",
-   "objective": -2607429.7285000007,
-   "bound": -2608070.298828137,
+   "objective": -2607600.718700036,
+   "bound": -2608070.2760386234,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal -2607958.33"
@@ -3317,33 +3498,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": -2607429.7285000007,
-     "bound": -2608070.3042654195,
-     "time": 120.00239541596966,
+     "objective": -2607600.718700036,
+     "bound": -2608070.2760386234,
+     "time": 600.0238387079444,
      "raw_status": "Time limit reached",
-     "nodes": 29274,
+     "nodes": 258650,
      "verify": {
       "feasible": true,
-      "objective": -2607429.7285000007,
-      "max_viol": 4.231340722249399e-12,
-      "worst": "row Sawti_H5 activity 4.231340722249399e-12 > 0.0"
+      "objective": -2607600.718700036,
+      "max_viol": 2.510634843918597e-10,
+      "worst": "var x50_3=-2.510634843918597e-10 < lb 0.0"
      },
-     "peak_rss_mb": 311.0
+     "peak_rss_mb": 504.4
     },
     "scip": {
      "status": "timelimit",
-     "objective": -2605426.1399,
-     "bound": -2608070.298828137,
-     "time": 120.00671691604657,
+     "objective": -2607446.7479,
+     "bound": -2608070.2947548544,
+     "time": 600.0002085829619,
      "raw_status": "timelimit",
-     "nodes": 95780,
+     "nodes": 751418,
      "verify": {
       "feasible": true,
-      "objective": -2605426.1399,
-      "max_viol": 1.7053025658242404e-13,
-      "worst": "row Sawti_H3 activity 1.7053025658242404e-13 > 0.0"
+      "objective": -2607446.7479,
+      "max_viol": 2.374109575598027e-13,
+      "worst": "row Sawti_H4 activity 2.374109575598027e-13 > 0.0"
      },
-     "peak_rss_mb": 656.7
+     "peak_rss_mb": 1922.4
     }
    },
    "ref_runs": [
@@ -3366,6 +3547,17 @@
      "solvers": [
       "scip"
      ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
     }
    ]
   },
@@ -3377,43 +3569,41 @@
    "num_integers": 200,
    "num_binaries": 180,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 19686.0,
-   "bound": 15943.536823425025,
+   "status": "optimal",
+   "objective": 19685.99999999951,
+   "bound": 19685.99999999951,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 19685.99997550038"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 20119.99999999986,
-     "bound": 14903.677274115043,
-     "time": 120.00131462502759,
-     "raw_status": "Time limit reached",
-     "nodes": 93004,
+     "status": "optimal",
+     "objective": 19685.99999999951,
+     "bound": 19685.99999999951,
+     "time": 490.7428438329953,
+     "raw_status": "Optimal",
+     "nodes": 353347,
      "verify": {
       "feasible": true,
-      "objective": 20119.99999999986,
-      "max_viol": 1.9255708139098715e-12,
-      "worst": "row compDistAxis1[c,Clinic,Therapist] activity -1.4238068458745754e-12 < 0.0"
+      "objective": 19685.99999999951,
+      "max_viol": 5.7198690228688065e-12,
+      "worst": "row compDistAxis1[c,Clinic,Therapist] activity -5.7198690228688065e-12 < 0.0"
      },
-     "peak_rss_mb": 145.2
+     "peak_rss_mb": 152.3
     },
     "scip": {
-     "status": "timelimit",
+     "status": "optimal",
      "objective": 19686.0,
-     "bound": 15943.536823425025,
-     "time": 119.99995662498986,
-     "raw_status": "timelimit",
-     "nodes": 328048,
+     "bound": 19686.0,
+     "time": 409.73874162504217,
+     "raw_status": "optimal",
+     "nodes": 1340751,
      "verify": {
       "feasible": true,
       "objective": 19686.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 203.2
+     "peak_rss_mb": 297.4
     }
    },
    "ref_runs": [
@@ -3434,6 +3624,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -3516,8 +3717,8 @@
    "num_binaries": 450,
    "sense": "min",
    "status": "timelimit",
-   "objective": 3946.999999999987,
-   "bound": 3917.6249915105864,
+   "objective": 3942.0,
+   "bound": 3925.89473684207,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 3941.99993090225"
@@ -3525,33 +3726,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 3946.999999999987,
-     "bound": 3917.6249915105864,
-     "time": 120.00151324999752,
+     "objective": 3942.000000000828,
+     "bound": 3925.89473684207,
+     "time": 600.0269182919874,
      "raw_status": "Time limit reached",
-     "nodes": 29356,
+     "nodes": 138997,
      "verify": {
       "feasible": true,
-      "objective": 3946.999999999987,
-      "max_viol": 1.7963408538435033e-13,
-      "worst": "row c226 activity 64.0000000000115 > 64.0"
+      "objective": 3942.000000000828,
+      "max_viol": 4.151723409506758e-11,
+      "worst": "var p3226=-4.151723409506758e-11 < lb 0.0"
      },
-     "peak_rss_mb": 179.1
+     "peak_rss_mb": 319.1
     },
     "scip": {
      "status": "timelimit",
-     "objective": 3978.0,
-     "bound": 3907.2085896959065,
-     "time": 120.003572540998,
+     "objective": 3942.0,
+     "bound": 3922.9769614627826,
+     "time": 599.9984154590056,
      "raw_status": "timelimit",
-     "nodes": 62685,
+     "nodes": 312580,
      "verify": {
       "feasible": true,
-      "objective": 3978.0,
+      "objective": 3942.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 197.1
+     "peak_rss_mb": 302.2
     }
    },
    "ref_runs": [
@@ -3574,6 +3775,17 @@
      "solvers": [
       "scip"
      ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
     }
    ]
   },
@@ -3586,8 +3798,8 @@
    "num_binaries": 262,
    "sense": "min",
    "status": "timelimit",
-   "objective": 6388.0,
-   "bound": 6362.921851409029,
+   "objective": 6375.0,
+   "bound": 6371.6206250936975,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 6375.0"
@@ -3595,33 +3807,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 6388.0,
-     "bound": 6362.921851409029,
-     "time": 120.00154733401723,
+     "objective": 6375.0,
+     "bound": 6371.6206250936975,
+     "time": 600.0203075839672,
      "raw_status": "Time limit reached",
-     "nodes": 11555,
+     "nodes": 68356,
      "verify": {
       "feasible": true,
-      "objective": 6388.0,
-      "max_viol": 4.263256414560601e-14,
-      "worst": "row cycle29 activity 4.263256414560601e-14 > 0.0"
+      "objective": 6375.0,
+      "max_viol": 1.521745692419548e-13,
+      "worst": "var x6179=2.9999999999995435 < lb 3.0"
      },
-     "peak_rss_mb": 288.8
+     "peak_rss_mb": 454.5
     },
     "scip": {
      "status": "timelimit",
-     "objective": 6462.0,
-     "bound": 6358.177922335652,
-     "time": 120.00086741702398,
+     "objective": 6377.000000000001,
+     "bound": 6360.383515390782,
+     "time": 599.9991007500212,
      "raw_status": "timelimit",
-     "nodes": 57191,
+     "nodes": 308935,
      "verify": {
       "feasible": true,
-      "objective": 6462.0,
-      "max_viol": 1.4210854715202004e-14,
-      "worst": "row cycle997 activity 1.4210854715202004e-14 > 0.0"
+      "objective": 6377.000000000001,
+      "max_viol": 1.2434497875801753e-12,
+      "worst": "var x4361=2.9999999999962697 < lb 3.0"
      },
-     "peak_rss_mb": 285.8
+     "peak_rss_mb": 460.7
     }
    },
    "ref_runs": [
@@ -3642,6 +3854,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -4296,8 +4519,8 @@
    "num_binaries": 6730,
    "sense": "min",
    "status": "timelimit",
-   "objective": 410724904.7999999,
-   "bound": 398118150.29404837,
+   "objective": 404860927.3599999,
+   "bound": 400545478.5124487,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 404227536.16"
@@ -4305,33 +4528,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 422012737.59999895,
-     "bound": 396461563.37916195,
-     "time": 120.00709274999099,
+     "objective": 409177984.47999996,
+     "bound": 400058797.80801356,
+     "time": 600.050478332967,
      "raw_status": "Time limit reached",
-     "nodes": 3340,
+     "nodes": 39514,
      "verify": {
       "feasible": true,
-      "objective": 422012737.59999895,
-      "max_viol": 6.952672282073007e-09,
-      "worst": "row R0000001 activity 6.952672282073007e-09 > 0.0"
+      "objective": 409177984.47999996,
+      "max_viol": 2.611065212931862e-08,
+      "worst": "row R0000001 activity -2.611065212931862e-08 < 0.0"
      },
-     "peak_rss_mb": 459.0
+     "peak_rss_mb": 913.1
     },
     "scip": {
      "status": "timelimit",
-     "objective": 410724904.7999999,
-     "bound": 398118150.29404837,
-     "time": 120.00162141700275,
+     "objective": 404860927.3599999,
+     "bound": 400545478.5124487,
+     "time": 600.0034689590102,
      "raw_status": "timelimit",
-     "nodes": 985,
+     "nodes": 28121,
      "verify": {
       "feasible": true,
-      "objective": 410724904.7999999,
-      "max_viol": 1.0241665350463336e-07,
-      "worst": "row R0000001 activity -1.0241665350463336e-07 < 0.0"
+      "objective": 404860927.3599999,
+      "max_viol": 1.0799772390157614e-07,
+      "worst": "row R0000001 activity -1.0799772390157614e-07 < 0.0"
      },
-     "peak_rss_mb": 327.3
+     "peak_rss_mb": 408.2
     }
    },
    "ref_runs": [
@@ -4354,6 +4577,17 @@
      "solvers": [
       "scip"
      ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
     }
    ]
   },
@@ -4366,8 +4600,8 @@
    "num_binaries": 1195,
    "sense": "min",
    "status": "timelimit",
-   "objective": 1487640.999999999,
-   "bound": 1461628.0718801867,
+   "objective": 1480447.0000000005,
+   "bound": 1469140.927795038,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 1480195.0"
@@ -4375,33 +4609,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 1487640.999999999,
-     "bound": 1458038.0956273898,
-     "time": 120.02652808302082,
+     "objective": 1480447.0000000005,
+     "bound": 1469140.927795038,
+     "time": 600.0206534590106,
      "raw_status": "Time limit reached",
-     "nodes": 1711,
+     "nodes": 20113,
      "verify": {
       "feasible": true,
-      "objective": 1487640.999999999,
-      "max_viol": 1.9879784195079177e-09,
-      "worst": "row R1248 activity 1.9879784195079177e-09 > 0.0"
+      "objective": 1480447.0000000005,
+      "max_viol": 5.018803956028003e-09,
+      "worst": "row R1648 activity 5.018803956028003e-09 > 0.0"
      },
-     "peak_rss_mb": 223.5
+     "peak_rss_mb": 318.0
     },
     "scip": {
      "status": "timelimit",
-     "objective": 5062268.0,
-     "bound": 1461628.0718801867,
-     "time": 120.00024725002004,
+     "objective": 1529169.0000000075,
+     "bound": 1463252.7325619624,
+     "time": 599.9991032090038,
      "raw_status": "timelimit",
-     "nodes": 1,
+     "nodes": 180,
      "verify": {
       "feasible": true,
-      "objective": 5062268.0,
-      "max_viol": 0.0,
-      "worst": ""
+      "objective": 1529169.0000000075,
+      "max_viol": 2.265837276784119e-09,
+      "worst": "row R1738 activity 2.265837276784119e-09 > 0.0"
      },
-     "peak_rss_mb": 158.9
+     "peak_rss_mb": 180.8
     }
    },
    "ref_runs": [
@@ -4422,6 +4656,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -6009,42 +6254,43 @@
    "num_binaries": 150,
    "sense": "min",
    "status": "timelimit",
-   "objective": 11893.87257479999,
-   "bound": 11242.928811937281,
-   "agree": true,
+   "objective": 11801.098458493756,
+   "bound": 11585.597231073809,
+   "agree": false,
    "notes": [
+    "scip: incumbent 11801.098458493756 better than MIPLIB optimum 11801.18572",
     "no solver proved the result; MIPLIB solu: optimal 11801.18572"
    ],
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 12015.08994359831,
-     "bound": 11010.274355980366,
-     "time": 120.00870750000468,
+     "objective": 11801.1857287076,
+     "bound": 11370.672965011323,
+     "time": 600.018888874969,
      "raw_status": "Time limit reached",
-     "nodes": 546097,
+     "nodes": 3063179,
      "verify": {
       "feasible": true,
-      "objective": 12015.08994359831,
-      "max_viol": 2.0317081350640365e-13,
-      "worst": "var x55=1.0000000000002032 > ub 1.0"
+      "objective": 11801.1857287076,
+      "max_viol": 3.266298342907703e-11,
+      "worst": "var x83=1.000000000032663 > ub 1.0"
      },
-     "peak_rss_mb": 191.3
+     "peak_rss_mb": 351.6
     },
     "scip": {
      "status": "timelimit",
-     "objective": 11893.87257479999,
-     "bound": 11242.928811937281,
-     "time": 120.00106233399129,
+     "objective": 11801.098458493756,
+     "bound": 11585.597231073809,
+     "time": 599.9998768339865,
      "raw_status": "timelimit",
-     "nodes": 659833,
+     "nodes": 4326942,
      "verify": {
       "feasible": true,
-      "objective": 11893.87257479999,
-      "max_viol": 0.0,
-      "worst": ""
+      "objective": 11801.098458493756,
+      "max_viol": 8.13453527466141e-07,
+      "worst": "row c6 activity 107283.86110949375 < 107283.94838"
      },
-     "peak_rss_mb": 508.0
+     "peak_rss_mb": 912.2
     }
    },
    "ref_runs": [
@@ -6065,6 +6311,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -6214,43 +6471,41 @@
    "num_integers": 1745,
    "num_binaries": 1745,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 211913.0,
-   "bound": 203416.89726027398,
+   "status": "optimal",
+   "objective": 211912.99999999948,
+   "bound": 211912.99999999948,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 211913.0"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 211931.99999999994,
-     "bound": 196164.0,
-     "time": 120.03706950001651,
-     "raw_status": "Time limit reached",
-     "nodes": 8028,
+     "status": "optimal",
+     "objective": 211912.99999999948,
+     "bound": 211912.99999999948,
+     "time": 248.25308220798615,
+     "raw_status": "Optimal",
+     "nodes": 18530,
      "verify": {
       "feasible": true,
-      "objective": 211931.99999999994,
-      "max_viol": 1.0835776720341528e-13,
-      "worst": "row R0002107 activity -1.0835776720341528e-13 < 0.0"
+      "objective": 211912.99999999948,
+      "max_viol": 1.465866645449712e-12,
+      "worst": "row R0002107 activity -1.465866645449712e-12 < 0.0"
      },
-     "peak_rss_mb": 518.8
+     "peak_rss_mb": 740.5
     },
     "scip": {
-     "status": "timelimit",
+     "status": "optimal",
      "objective": 211913.0,
-     "bound": 203416.89726027398,
-     "time": 120.00019824999617,
-     "raw_status": "timelimit",
-     "nodes": 7998,
+     "bound": 211913.0,
+     "time": 149.9222610409488,
+     "raw_status": "optimal",
+     "nodes": 10864,
      "verify": {
       "feasible": true,
       "objective": 211913.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 300.8
+     "peak_rss_mb": 319.6
     }
    },
    "ref_runs": [
@@ -6271,6 +6526,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -6353,8 +6619,8 @@
    "num_binaries": 840,
    "sense": "min",
    "status": "timelimit",
-   "objective": 326961.1428279898,
-   "bound": 318387.150752497,
+   "objective": 326481.1428279898,
+   "bound": 323160.00526104437,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 326481.14282799"
@@ -6362,33 +6628,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 326961.1428279898,
-     "bound": 318387.150752497,
-     "time": 120.00497870799154,
+     "objective": 326481.1428279898,
+     "bound": 323160.00526104437,
+     "time": 600.0133596670348,
      "raw_status": "Time limit reached",
-     "nodes": 6500,
+     "nodes": 31819,
      "verify": {
       "feasible": true,
-      "objective": 326961.1428279898,
-      "max_viol": 1.0638538661122965e-12,
-      "worst": "row R3758 activity 0.027600000001063857 > 0.027600000000000003"
+      "objective": 326481.1428279898,
+      "max_viol": 1.4016565685892601e-14,
+      "worst": "row Displacement-Elongation_161 activity -1.4016565685892601e-14 < 0.0"
      },
-     "peak_rss_mb": 165.8
+     "peak_rss_mb": 361.4
     },
     "scip": {
      "status": "timelimit",
-     "objective": 332532.31165253295,
-     "bound": 265370.1186326111,
-     "time": 120.00051687500672,
+     "objective": 331118.9307013675,
+     "bound": 292355.5173922179,
+     "time": 600.0027805829886,
      "raw_status": "timelimit",
-     "nodes": 725,
+     "nodes": 8175,
      "verify": {
       "feasible": true,
-      "objective": 332532.31165253295,
-      "max_viol": 6.343536806951988e-14,
-      "worst": "row Displacement-Elongation_201 activity 6.343536806951988e-14 > 0.0"
+      "objective": 331118.93070136674,
+      "max_viol": 7.982968452946437e-12,
+      "worst": "row Topology84 activity -7.982968452946437e-12 < 0.0"
      },
-     "peak_rss_mb": 227.4
+     "peak_rss_mb": 500.5
     }
    },
    "ref_runs": [
@@ -6409,6 +6675,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -7051,8 +7328,8 @@
    "num_binaries": 1170,
    "sense": "min",
    "status": "timelimit",
-   "objective": -192.0,
-   "bound": -194.9999999996925,
+   "objective": -193.00000000000003,
+   "bound": -194.99999999891978,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal -195.0"
@@ -7060,33 +7337,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": -192.0,
-     "bound": -194.9999999996925,
-     "time": 120.00226145796478,
+     "objective": -193.00000000000003,
+     "bound": -194.99999999891978,
+     "time": 600.0061723329709,
      "raw_status": "Time limit reached",
-     "nodes": 2220,
+     "nodes": 10332,
      "verify": {
       "feasible": true,
-      "objective": -192.0,
-      "max_viol": 2.6645352591003757e-15,
-      "worst": "row R1719 activity 1.0000000000000024 > 1.0"
+      "objective": -193.00000000000003,
+      "max_viol": 1.9521421516325673e-14,
+      "worst": "row R1293 activity 5.0000000000000036 > 5.0"
      },
-     "peak_rss_mb": 332.4
+     "peak_rss_mb": 447.9
     },
     "scip": {
      "status": "timelimit",
-     "objective": -186.5,
+     "objective": -192.0,
      "bound": -194.99999999999991,
-     "time": 120.00078758399468,
+     "time": 600.000211583043,
      "raw_status": "timelimit",
-     "nodes": 56,
+     "nodes": 528,
      "verify": {
       "feasible": true,
-      "objective": -186.5,
-      "max_viol": 2.842170943040401e-16,
-      "worst": "row R3667 activity 1600.0000000000005 > 1600.0"
+      "objective": -192.0,
+      "max_viol": 0.0,
+      "worst": ""
      },
-     "peak_rss_mb": 221.2
+     "peak_rss_mb": 266.0
     }
    },
    "ref_runs": [
@@ -7107,6 +7384,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -7188,43 +7476,41 @@
    "num_integers": 4425,
    "num_binaries": 4245,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 189.0,
-   "bound": 171.00000000075258,
+   "status": "optimal",
+   "objective": 176.0000000000001,
+   "bound": 176.0000000000001,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 176.0"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 189.0,
-     "bound": 171.00000000075258,
-     "time": 120.00544183404418,
-     "raw_status": "Time limit reached",
-     "nodes": 5012,
+     "status": "optimal",
+     "objective": 176.0000000000001,
+     "bound": 176.0000000000001,
+     "time": 325.15202995797154,
+     "raw_status": "Optimal",
+     "nodes": 21665,
      "verify": {
       "feasible": true,
-      "objective": 189.0,
-      "max_viol": 4.640279090678206e-16,
-      "worst": "row R4530 activity 490.0000000000002 > 490.0"
+      "objective": 176.0000000000001,
+      "max_viol": 1.4175327578413999e-12,
+      "worst": "row R0023 activity 1.0000000000000262 > 1.0"
      },
-     "peak_rss_mb": 530.9
+     "peak_rss_mb": 1105.1
     },
     "scip": {
-     "status": "timelimit",
-     "objective": 189.0,
-     "bound": 169.2,
-     "time": 120.00049075001152,
-     "raw_status": "timelimit",
-     "nodes": 1043,
+     "status": "optimal",
+     "objective": 176.0,
+     "bound": 176.0,
+     "time": 425.4998185830191,
+     "raw_status": "optimal",
+     "nodes": 10806,
      "verify": {
       "feasible": true,
-      "objective": 189.0,
-      "max_viol": 1.38642485026361e-16,
-      "worst": "var C0158=409.99999999999994 < lb 410.0"
+      "objective": 176.0,
+      "max_viol": 0.0,
+      "worst": ""
      },
-     "peak_rss_mb": 393.7
+     "peak_rss_mb": 586.1
     }
    },
    "ref_runs": [
@@ -7245,6 +7531,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -7524,37 +7821,41 @@
    "num_integers": 3268,
    "num_binaries": 3268,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 91355.00000000012,
-   "bound": 61086.37674488687,
+   "status": "optimal",
+   "objective": 71320.00000000499,
+   "bound": 71320.00000000499,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 71320.0"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 91355.00000000012,
-     "bound": 61086.37674488687,
-     "time": 120.0063503330457,
-     "raw_status": "Time limit reached",
-     "nodes": 475,
+     "status": "optimal",
+     "objective": 71320.00000000499,
+     "bound": 71320.00000000499,
+     "time": 191.27133320801659,
+     "raw_status": "Optimal",
+     "nodes": 893,
      "verify": {
       "feasible": true,
-      "objective": 91355.00000000012,
-      "max_viol": 9.325873406851315e-15,
-      "worst": "row R5720 activity 9.325873406851315e-15 > 0.0"
+      "objective": 71320.00000000499,
+      "max_viol": 2.733322852682077e-12,
+      "worst": "row R1202 activity 2.733322852682077e-12 > 0.0"
      },
-     "peak_rss_mb": 501.3
+     "peak_rss_mb": 650.2
     },
     "scip": {
      "status": "timelimit",
-     "objective": null,
-     "bound": 58996.33810527217,
-     "time": 120.00043849996291,
+     "objective": 160440.0,
+     "bound": 59075.97392483831,
+     "time": 600.0011687499937,
      "raw_status": "timelimit",
-     "nodes": 29,
-     "peak_rss_mb": 218.1
+     "nodes": 535,
+     "verify": {
+      "feasible": true,
+      "objective": 160440.0,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 308.5
     }
    },
    "ref_runs": [
@@ -7575,6 +7876,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -7725,7 +8037,7 @@
    "num_binaries": 1260,
    "sense": "min",
    "status": "timelimit",
-   "objective": 1479.0,
+   "objective": 1477.9999979999998,
    "bound": 1447.0000000000007,
    "agree": true,
    "notes": [
@@ -7734,33 +8046,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 1479.0,
+     "objective": 1477.9999979999998,
      "bound": 1447.0,
-     "time": 120.00405204098206,
+     "time": 600.0147828329937,
      "raw_status": "Time limit reached",
-     "nodes": 66381,
+     "nodes": 328626,
      "verify": {
       "feasible": true,
-      "objective": 1479.0,
-      "max_viol": 4.440892098500626e-16,
-      "worst": "row R0319 activity 0.9999999999999996 < 1.0"
+      "objective": 1477.9999979999998,
+      "max_viol": 2.2224452190458064e-11,
+      "worst": "row R0856 activity 9999.000000222222 > 9999.0"
      },
-     "peak_rss_mb": 152.8
+     "peak_rss_mb": 364.1
     },
     "scip": {
      "status": "timelimit",
-     "objective": 1490.0000000000005,
+     "objective": 1477.9999999999998,
      "bound": 1447.0000000000007,
-     "time": 120.00014345900854,
+     "time": 599.9974865409895,
      "raw_status": "timelimit",
-     "nodes": 77100,
+     "nodes": 465051,
      "verify": {
       "feasible": true,
-      "objective": 1490.0000000000005,
-      "max_viol": 3.552713678800501e-15,
-      "worst": "var C0020=0.9999999999999964 < lb 1.0"
+      "objective": 1477.9999999999998,
+      "max_viol": 4.3520742565306136e-14,
+      "worst": "var C1302=-4.3520742565306136e-14 < lb 0.0"
      },
-     "peak_rss_mb": 251.4
+     "peak_rss_mb": 482.6
     }
    },
    "ref_runs": [
@@ -7783,6 +8095,17 @@
      "solvers": [
       "scip"
      ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
     }
    ]
   },
@@ -7795,8 +8118,8 @@
    "num_binaries": 2000,
    "sense": "min",
    "status": "timelimit",
-   "objective": 33.970519999999475,
-   "bound": 25.70244,
+   "objective": 33.55630999999996,
+   "bound": 27.68453,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 33.384729927"
@@ -7804,33 +8127,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 33.970519999999475,
-     "bound": 25.70244,
-     "time": 120.00657266605413,
+     "objective": 33.55630999999996,
+     "bound": 27.68453,
+     "time": 600.0053962499951,
      "raw_status": "Time limit reached",
-     "nodes": 1414,
+     "nodes": 5246,
      "verify": {
       "feasible": true,
-      "objective": 33.970519999999475,
-      "max_viol": 5.472789322328033e-12,
-      "worst": "var C2763=-5.472789322328033e-12 < lb 0.0"
+      "objective": 33.55630999999996,
+      "max_viol": 3.113768268949854e-13,
+      "worst": "var C1419=-3.113768268949854e-13 < lb 0.0"
      },
-     "peak_rss_mb": 447.4
+     "peak_rss_mb": 447.0
     },
     "scip": {
      "status": "timelimit",
      "objective": 34.38473,
-     "bound": 23.42998393739804,
-     "time": 120.00045941595454,
+     "bound": 25.236627465802993,
+     "time": 599.9993327499833,
      "raw_status": "timelimit",
-     "nodes": 546,
+     "nodes": 3025,
      "verify": {
       "feasible": true,
       "objective": 34.38473,
       "max_viol": 7.771561172376096e-16,
       "worst": "var C2003=0.9999999999999992 < lb 1.0"
      },
-     "peak_rss_mb": 340.0
+     "peak_rss_mb": 499.7
     }
    },
    "ref_runs": [
@@ -7851,6 +8174,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -7935,8 +8269,8 @@
    "num_binaries": 630,
    "sense": "min",
    "status": "timelimit",
-   "objective": 2650717.9999999925,
-   "bound": 2380611.5417289333,
+   "objective": 2627144.0,
+   "bound": 2509776.8405428287,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 2612710.0"
@@ -7944,33 +8278,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 2650717.9999999925,
-     "bound": 2380611.5417289333,
-     "time": 120.00130649999483,
+     "objective": 2627144.0,
+     "bound": 2509776.8405428287,
+     "time": 600.0096893329755,
      "raw_status": "Time limit reached",
-     "nodes": 20173,
+     "nodes": 130079,
      "verify": {
       "feasible": true,
-      "objective": 2650717.9999999925,
-      "max_viol": 7.283393784305096e-10,
-      "worst": "row R1520 activity 7.283393784305096e-10 > 0.0"
+      "objective": 2627144.0,
+      "max_viol": 1.5268266863519556e-10,
+      "worst": "row R1746 activity 1.5268266863519556e-10 > 0.0"
      },
-     "peak_rss_mb": 136.3
+     "peak_rss_mb": 297.6
     },
     "scip": {
      "status": "timelimit",
-     "objective": 2716013.0,
-     "bound": 2275242.6045584637,
-     "time": 120.00027999997837,
+     "objective": 2651348.0,
+     "bound": 2369076.5964049655,
+     "time": 599.9991673750337,
      "raw_status": "timelimit",
-     "nodes": 2509,
+     "nodes": 56108,
      "verify": {
       "feasible": true,
-      "objective": 2716013.0,
-      "max_viol": 1.8189894035458565e-12,
-      "worst": "row R1311 activity 1.8189894035458565e-12 > 0.0"
+      "objective": 2651348.0,
+      "max_viol": 2.2648549702353193e-11,
+      "worst": "row R1550 activity 2.2648549702353193e-11 > 0.0"
      },
-     "peak_rss_mb": 142.6
+     "peak_rss_mb": 333.5
     }
    },
    "ref_runs": [
@@ -7993,6 +8327,17 @@
      "solvers": [
       "scip"
      ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
     }
    ]
   },
@@ -8005,8 +8350,8 @@
    "num_binaries": 2976,
    "sense": "min",
    "status": "timelimit",
-   "objective": 4635.0,
-   "bound": 1071.0,
+   "objective": 3654.0,
+   "bound": 1436.6518533240014,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 3644.99999999952"
@@ -8014,33 +8359,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 81755.99999999958,
+     "objective": 20006.999999999793,
      "bound": 792.7844738682861,
-     "time": 120.01771116699092,
+     "time": 600.0163678330136,
      "raw_status": "Time limit reached",
-     "nodes": 9191,
+     "nodes": 71841,
      "verify": {
       "feasible": true,
-      "objective": 81755.99999999958,
-      "max_viol": 3.296918293926865e-12,
-      "worst": "row R3833 activity 0.9999999999967031 < 1.0"
+      "objective": 20006.999999999793,
+      "max_viol": 3.183231456205249e-12,
+      "worst": "row R4242 activity 0.9999999999968168 < 1.0"
      },
-     "peak_rss_mb": 345.2
+     "peak_rss_mb": 456.5
     },
     "scip": {
      "status": "timelimit",
-     "objective": 4635.0,
-     "bound": 1071.0,
-     "time": 120.00500033400021,
+     "objective": 3654.0,
+     "bound": 1436.6518533240014,
+     "time": 600.0006584580406,
      "raw_status": "timelimit",
-     "nodes": 42080,
+     "nodes": 248671,
      "verify": {
       "feasible": true,
-      "objective": 4635.000000000003,
-      "max_viol": 5.151948867521128e-10,
-      "worst": "row R5048 activity 0.9999999999995471 < 1.0"
+      "objective": 3654.0000000000045,
+      "max_viol": 8.874678769643651e-12,
+      "worst": "var C0020=-8.874678769643651e-12 < lb 0.0"
      },
-     "peak_rss_mb": 341.0
+     "peak_rss_mb": 546.1
     }
    },
    "ref_runs": [
@@ -8061,6 +8406,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -8210,43 +8566,41 @@
    "num_integers": 27982,
    "num_binaries": 27982,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 322.99999999999994,
-   "bound": 318.00000000000006,
+   "status": "optimal",
+   "objective": 318.0,
+   "bound": 318.0,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 318.0"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 322.99999999999994,
-     "bound": 318.00000000000006,
-     "time": 120.00852712499909,
+     "objective": 319.99999999999994,
+     "bound": 318.0000000000004,
+     "time": 600.0079837079975,
      "raw_status": "Time limit reached",
-     "nodes": 220,
+     "nodes": 1928,
      "verify": {
       "feasible": true,
-      "objective": 322.99999999999994,
-      "max_viol": 6.727951529228449e-14,
-      "worst": "var C19935=1.0000000000000673 > ub 1.0"
+      "objective": 319.99999999999994,
+      "max_viol": 2.7533531010703882e-14,
+      "worst": "var C10936=-1.5987211554602254e-14 < lb 0.0"
      },
-     "peak_rss_mb": 344.0
+     "peak_rss_mb": 515.1
     },
     "scip": {
-     "status": "timelimit",
-     "objective": 5373.0,
+     "status": "optimal",
+     "objective": 318.0,
      "bound": 318.0,
-     "time": 120.0250493339845,
-     "raw_status": "timelimit",
-     "nodes": 5,
+     "time": 577.9129843339906,
+     "raw_status": "optimal",
+     "nodes": 69,
      "verify": {
       "feasible": true,
-      "objective": 5373.0,
+      "objective": 318.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 436.9
+     "peak_rss_mb": 551.2
     }
    },
    "ref_runs": [
@@ -8267,6 +8621,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -8822,43 +9187,41 @@
    "num_integers": 17880,
    "num_binaries": 17880,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 233.00000000000176,
+   "status": "optimal",
+   "objective": 231.0,
    "bound": 231.0,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 231.0"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 233.00000000000176,
+     "status": "optimal",
+     "objective": 231.0,
      "bound": 231.0,
-     "time": 120.01948041695869,
-     "raw_status": "Time limit reached",
-     "nodes": 724,
+     "time": 127.40126712498022,
+     "raw_status": "Optimal",
+     "nodes": 1008,
      "verify": {
       "feasible": true,
-      "objective": 233.00000000000176,
-      "max_viol": 1.3110211334471436e-12,
-      "worst": "row AVUB1251 activity 1.3110211334471436e-12 > 0.0"
+      "objective": 231.0,
+      "max_viol": 8.451017663446692e-13,
+      "worst": "var y.835=-8.451017663446692e-13 < lb 0.0"
      },
-     "peak_rss_mb": 666.9
+     "peak_rss_mb": 656.9
     },
     "scip": {
      "status": "timelimit",
-     "objective": 771.0,
-     "bound": 214.21625606656215,
-     "time": 120.00898149999557,
+     "objective": 236.0,
+     "bound": 230.38656578523148,
+     "time": 600.0019547080155,
      "raw_status": "timelimit",
      "nodes": 1,
      "verify": {
       "feasible": true,
-      "objective": 771.0,
+      "objective": 236.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 484.9
+     "peak_rss_mb": 726.1
     }
    },
    "ref_runs": [
@@ -8879,6 +9242,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -9889,43 +10263,41 @@
    "num_integers": 252,
    "num_binaries": 252,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 3714.0000000247787,
-   "bound": 3585.715248360774,
+   "status": "optimal",
+   "objective": 3711.9999994996574,
+   "bound": 3711.9999994996574,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 3712.0"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 3714.0000000247787,
-     "bound": 3585.715248360774,
-     "time": 120.00361087499186,
-     "raw_status": "Time limit reached",
-     "nodes": 22473,
+     "status": "optimal",
+     "objective": 3711.9999994996574,
+     "bound": 3711.9999994996574,
+     "time": 344.1145676249871,
+     "raw_status": "Optimal",
+     "nodes": 50350,
      "verify": {
       "feasible": true,
-      "objective": 3714.0000000247787,
-      "max_viol": 2.11418909077907e-07,
-      "worst": "var Y173=-2.11418909077907e-07 < lb 0.0"
+      "objective": 3711.9999994996574,
+      "max_viol": 5.783871692699449e-07,
+      "worst": "row G193 activity -5.783871692699449e-07 < 0.0"
      },
-     "peak_rss_mb": 177.8
+     "peak_rss_mb": 254.2
     },
     "scip": {
      "status": "timelimit",
-     "objective": 3744.000000061482,
-     "bound": 3562.0851112835526,
-     "time": 120.00019916699966,
+     "objective": 3712.0000000477694,
+     "bound": 3690.5059689330083,
+     "time": 600.1821169590112,
      "raw_status": "timelimit",
-     "nodes": 8461,
+     "nodes": 206601,
      "verify": {
       "feasible": true,
-      "objective": 3744.0000000614823,
-      "max_viol": 1.472714217243265e-08,
-      "worst": "var Y88=-1.472714217243265e-08 < lb 0.0"
+      "objective": 3712.0000000477694,
+      "max_viol": 5.52991021862681e-08,
+      "worst": "var Y169=-5.52991021862681e-08 < lb 0.0"
      },
-     "peak_rss_mb": 307.2
+     "peak_rss_mb": 833.4
     }
    },
    "ref_runs": [
@@ -9946,6 +10318,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -10319,8 +10702,8 @@
    "num_binaries": 1150,
    "sense": "min",
    "status": "timelimit",
-   "objective": -36575421.851581,
-   "bound": -37071925.577815644,
+   "objective": -36800603.23316172,
+   "bound": -36874715.313947484,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal -36800603.2332"
@@ -10328,33 +10711,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": -36575421.851581,
-     "bound": -37074096.92314154,
-     "time": 120.00207624997711,
+     "objective": -36800603.23316172,
+     "bound": -36874715.313947484,
+     "time": 600.0123436669819,
      "raw_status": "Time limit reached",
-     "nodes": 13854,
+     "nodes": 148904,
      "verify": {
       "feasible": true,
-      "objective": -36575421.851581,
-      "max_viol": 1.1102230246251565e-15,
-      "worst": "var X_13_0=1.000000000000001 > ub 1.0"
+      "objective": -36800603.23316172,
+      "max_viol": 2.5387893452156036e-11,
+      "worst": "row ORD_37_4 activity 2.5387893452156036e-11 > 0.0"
      },
-     "peak_rss_mb": 387.0
+     "peak_rss_mb": 614.2
     },
     "scip": {
      "status": "timelimit",
-     "objective": -36293236.220324054,
-     "bound": -37071925.577815644,
-     "time": 120.00074379198486,
+     "objective": -36783028.0266672,
+     "bound": -36934515.87531947,
+     "time": 599.9998296670383,
      "raw_status": "timelimit",
-     "nodes": 6618,
+     "nodes": 109409,
      "verify": {
       "feasible": true,
-      "objective": -36293236.22032405,
-      "max_viol": 2.7755575615628914e-17,
+      "objective": -36783028.0266672,
+      "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 476.6
+     "peak_rss_mb": 726.8
     }
    },
    "ref_runs": [
@@ -10375,6 +10758,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -10457,8 +10851,8 @@
    "num_binaries": 200,
    "sense": "min",
    "status": "timelimit",
-   "objective": 4808.0,
-   "bound": 3291.925329539998,
+   "objective": 4561.999999999935,
+   "bound": 3310.751841218776,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 4521.0"
@@ -10466,33 +10860,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 5188.0,
-     "bound": 3291.925329539998,
-     "time": 120.0050202080165,
+     "objective": 4561.999999999935,
+     "bound": 3310.751841218776,
+     "time": 600.007649624953,
      "raw_status": "Time limit reached",
-     "nodes": 2,
+     "nodes": 1578,
      "verify": {
       "feasible": true,
-      "objective": 5188.0,
-      "max_viol": 0.0,
-      "worst": ""
+      "objective": 4561.999999999935,
+      "max_viol": 3.269606807521086e-13,
+      "worst": "var z8736=-3.269606807521086e-13 < lb 0.0"
      },
-     "peak_rss_mb": 467.2
+     "peak_rss_mb": 591.2
     },
     "scip": {
      "status": "timelimit",
-     "objective": 4808.0,
+     "objective": 4707.0,
      "bound": 3288.5270882277164,
-     "time": 120.0520857500378,
+     "time": 600.0590283329948,
      "raw_status": "timelimit",
      "nodes": 1,
      "verify": {
       "feasible": true,
-      "objective": 4807.999999999997,
-      "max_viol": 9.880984919163893e-15,
-      "worst": "var z8307=-9.880984919163893e-15 < lb 0.0"
+      "objective": 4706.999999999999,
+      "max_viol": 3.552713678800501e-15,
+      "worst": "var z13842=-3.552713678800501e-15 < lb 0.0"
      },
-     "peak_rss_mb": 552.1
+     "peak_rss_mb": 601.6
     }
    },
    "ref_runs": [
@@ -10513,6 +10907,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -10595,8 +11000,8 @@
    "num_binaries": 4320,
    "sense": "min",
    "status": "timelimit",
-   "objective": 20564.0,
-   "bound": 14863.167505093736,
+   "objective": 19707.0,
+   "bound": 15727.68132883673,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 19449.0"
@@ -10604,33 +11009,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 22462.0,
-     "bound": 12591.0,
-     "time": 120.002718542004,
+     "objective": 20252.000000000004,
+     "bound": 14711.0,
+     "time": 600.002078999998,
      "raw_status": "Time limit reached",
-     "nodes": 3536,
+     "nodes": 21940,
      "verify": {
       "feasible": true,
-      "objective": 22462.0,
-      "max_viol": 1.8189894035458565e-12,
-      "worst": "row id10400 activity 1.630976016677477e-12 > 0.0"
+      "objective": 20252.000000000004,
+      "max_viol": 8.412825991399586e-12,
+      "worst": "var id9728=-3.287429241876499e-12 < lb 0.0"
      },
-     "peak_rss_mb": 269.7
+     "peak_rss_mb": 383.7
     },
     "scip": {
      "status": "timelimit",
-     "objective": 20564.0,
-     "bound": 14863.167505093736,
-     "time": 120.0004964999971,
+     "objective": 19707.0,
+     "bound": 15727.68132883673,
+     "time": 599.999490541988,
      "raw_status": "timelimit",
-     "nodes": 1423,
+     "nodes": 10356,
      "verify": {
       "feasible": true,
-      "objective": 20564.0,
-      "max_viol": 1.7602628961357398e-14,
-      "worst": "var id10303=-1.7602628961357398e-14 < lb 0.0"
+      "objective": 19707.0,
+      "max_viol": 5.551115123125783e-17,
+      "worst": "row id6669 activity 5.551115123125783e-17 > 0.0"
      },
-     "peak_rss_mb": 184.5
+     "peak_rss_mb": 290.9
     }
    },
    "ref_runs": [
@@ -10651,6 +11056,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -10811,43 +11227,41 @@
    "num_integers": 2872,
    "num_binaries": 2872,
    "sense": "min",
-   "status": "timelimit",
+   "status": "optimal",
    "objective": -230.9891622857143,
-   "bound": -231.06356706661603,
+   "bound": -230.9891622857143,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal -230.9891623"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
+     "status": "optimal",
      "objective": -230.9891622857143,
-     "bound": -231.06356706661603,
-     "time": 120.00396604201524,
-     "raw_status": "Time limit reached",
-     "nodes": 8464,
+     "bound": -230.9891622857143,
+     "time": 270.597893041966,
+     "raw_status": "Optimal",
+     "nodes": 37456,
      "verify": {
       "feasible": true,
       "objective": -230.9891622857143,
       "max_viol": 1.1368683772161603e-13,
       "worst": "row c82 activity 1.1368683772161603e-13 > 0.0"
      },
-     "peak_rss_mb": 366.0
+     "peak_rss_mb": 443.5
     },
     "scip": {
      "status": "timelimit",
      "objective": -230.98916228571426,
      "bound": -231.06356706666665,
-     "time": 120.00469737499952,
+     "time": 600.0012619579793,
      "raw_status": "timelimit",
-     "nodes": 28373,
+     "nodes": 153301,
      "verify": {
       "feasible": true,
       "objective": -230.98916228571434,
       "max_viol": 2.886579864025407e-14,
       "worst": "row c77 activity 2.886579864025407e-14 > 0.0"
      },
-     "peak_rss_mb": 286.3
+     "peak_rss_mb": 750.2
     }
    },
    "ref_runs": [
@@ -10868,6 +11282,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -11767,41 +12192,33 @@
    "sense": "min",
    "status": "timelimit",
    "objective": 48.99999999999999,
-   "bound": 48.0,
+   "bound": 47.18666666666668,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 48.0"
    ],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 48.99999999999999,
-     "bound": 48.0,
-     "time": 120.03292058303487,
-     "raw_status": "Time limit reached",
-     "nodes": 4857,
-     "verify": {
-      "feasible": true,
-      "objective": 48.99999999999999,
-      "max_viol": 2.609468197078968e-12,
-      "worst": "row c226 activity 2.609468197078968e-12 > 0.0"
-     },
-     "peak_rss_mb": 881.4
+     "status": "memlimit",
+     "objective": null,
+     "bound": null,
+     "time": 458.7978643339593,
+     "error": "killed: RSS above 2800 MB"
     },
     "scip": {
      "status": "timelimit",
-     "objective": 50.0,
+     "objective": 48.99999999999999,
      "bound": 47.18666666666668,
-     "time": 120.00095750001492,
+     "time": 600.0004718339769,
      "raw_status": "timelimit",
-     "nodes": 6246,
+     "nodes": 19806,
      "verify": {
       "feasible": true,
-      "objective": 50.0,
-      "max_viol": 0.0,
-      "worst": ""
+      "objective": 48.99999999999999,
+      "max_viol": 9.547918011776346e-15,
+      "worst": "var B9908(2)=1.0000000000000095 > ub 1.0"
      },
-     "peak_rss_mb": 516.6
+     "peak_rss_mb": 738.0
     }
    },
    "ref_runs": [
@@ -11822,6 +12239,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -11836,8 +12264,8 @@
    "num_binaries": 396,
    "sense": "min",
    "status": "timelimit",
-   "objective": 1745.12418234612,
-   "bound": 1523.5266971404203,
+   "objective": 1745.1241823460161,
+   "bound": 1635.6645383581858,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 1745.123813"
@@ -11845,33 +12273,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 1745.12418234612,
-     "bound": 1523.5266971404203,
-     "time": 120.0037477920414,
+     "objective": 1745.1241823460161,
+     "bound": 1635.6645383581858,
+     "time": 600.0057654170087,
      "raw_status": "Time limit reached",
-     "nodes": 73483,
+     "nodes": 382233,
      "verify": {
       "feasible": true,
-      "objective": 1745.12418234612,
-      "max_viol": 7.937472901176079e-11,
-      "worst": "row c56 activity 1.9999999998412505 < 2.0"
+      "objective": 1745.1241823460161,
+      "max_viol": 2.824089446053013e-13,
+      "worst": "row c671 activity 4.123105625616496 < 4.123105625617661"
      },
-     "peak_rss_mb": 173.2
+     "peak_rss_mb": 209.3
     },
     "scip": {
      "status": "timelimit",
-     "objective": 1772.962522548985,
-     "bound": 1499.7160870995085,
-     "time": 120.00005516700912,
+     "objective": 1745.1241823460325,
+     "bound": 1556.4583617102192,
+     "time": 599.999519917008,
      "raw_status": "timelimit",
-     "nodes": 57328,
+     "nodes": 593386,
      "verify": {
       "feasible": true,
-      "objective": 1772.9625225489851,
-      "max_viol": 4.529709940470639e-14,
-      "worst": "row c40 activity 1.9999999999999094 < 2.0"
+      "objective": 1745.1241823460332,
+      "max_viol": 1.292489448994514e-15,
+      "worst": "row c477 activity 4.123105625617655 < 4.123105625617661"
      },
-     "peak_rss_mb": 304.3
+     "peak_rss_mb": 1101.8
     }
    },
    "ref_runs": [
@@ -11894,6 +12322,17 @@
      "solvers": [
       "scip"
      ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
     }
    ]
   },
@@ -11906,8 +12345,8 @@
    "num_binaries": 2000,
    "sense": "min",
    "status": "timelimit",
-   "objective": 24605.027534604073,
-   "bound": 23558.02684284581,
+   "objective": 24256.312289833997,
+   "bound": 24095.69630620746,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 24256.3122898"
@@ -11915,33 +12354,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 24668.081312298775,
-     "bound": 23434.07191402062,
-     "time": 120.00532087497413,
+     "objective": 24256.312289833997,
+     "bound": 24095.69630620746,
+     "time": 600.052713541023,
      "raw_status": "Time limit reached",
-     "nodes": 1803,
+     "nodes": 9962,
      "verify": {
       "feasible": true,
-      "objective": 24668.081312298775,
-      "max_viol": 1.0591527654923993e-13,
-      "worst": "row c35770 activity 1.000000000000106 > 1.0"
+      "objective": 24256.312289833997,
+      "max_viol": 1.552757922240744e-12,
+      "worst": "row c26597 activity 1.552757922240744e-12 > 0.0"
      },
-     "peak_rss_mb": 327.7
+     "peak_rss_mb": 515.4
     },
     "scip": {
      "status": "timelimit",
-     "objective": 24605.027534604073,
-     "bound": 23558.02684284581,
-     "time": 120.00262662500609,
+     "objective": 24363.78063857555,
+     "bound": 23932.906330888727,
+     "time": 600.0022732089856,
      "raw_status": "timelimit",
-     "nodes": 660,
+     "nodes": 6480,
      "verify": {
       "feasible": true,
-      "objective": 24605.027534604073,
-      "max_viol": 3.885780586188048e-15,
-      "worst": "var x7287=-3.885780586188048e-15 < lb 0.0"
+      "objective": 24363.780638575547,
+      "max_viol": 5.517808432387028e-14,
+      "worst": "var x6435=-5.517808432387028e-14 < lb 0.0"
      },
-     "peak_rss_mb": 338.0
+     "peak_rss_mb": 454.3
     }
    },
    "ref_runs": [
@@ -11962,6 +12401,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -12399,43 +12849,41 @@
    "num_integers": 360,
    "num_binaries": 360,
    "sense": "min",
-   "status": "timelimit",
-   "objective": 130596.0,
-   "bound": 130474.30547538454,
+   "status": "optimal",
+   "objective": 130595.99999999999,
+   "bound": 130595.99999999999,
    "agree": true,
-   "notes": [
-    "no solver proved the result; MIPLIB solu: optimal 130595.9999999999"
-   ],
+   "notes": [],
    "solvers": {
     "highs": {
-     "status": "timelimit",
-     "objective": 130598.99999999828,
-     "bound": 130474.30547538454,
-     "time": 120.00255350000225,
-     "raw_status": "Time limit reached",
-     "nodes": 32492,
+     "status": "optimal",
+     "objective": 130595.99999999999,
+     "bound": 130595.99999999999,
+     "time": 162.73004033300094,
+     "raw_status": "Optimal",
+     "nodes": 40458,
      "verify": {
       "feasible": true,
-      "objective": 130598.99999999828,
-      "max_viol": 1.334161806582489e-08,
-      "worst": "row VUB08110 activity 1.334161806582489e-08 > 0.0"
+      "objective": 130595.99999999999,
+      "max_viol": 4.724398650068872e-11,
+      "worst": "row VUB01115 activity 4.724398650068872e-11 > 0.0"
      },
-     "peak_rss_mb": 130.0
+     "peak_rss_mb": 132.7
     },
     "scip": {
-     "status": "timelimit",
+     "status": "optimal",
      "objective": 130596.0,
-     "bound": 130465.46240049574,
-     "time": 120.00021316704806,
-     "raw_status": "timelimit",
-     "nodes": 100435,
+     "bound": 130596.0,
+     "time": 386.37186658295104,
+     "raw_status": "optimal",
+     "nodes": 390707,
      "verify": {
       "feasible": true,
       "objective": 130596.0,
       "max_viol": 6.811059652786103e-13,
       "worst": "row VUB12125 activity 6.811059652786103e-13 > 0.0"
      },
-     "peak_rss_mb": 200.7
+     "peak_rss_mb": 226.5
     }
    },
    "ref_runs": [
@@ -12456,6 +12904,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -12663,8 +13122,8 @@
    "num_binaries": 6415,
    "sense": "min",
    "status": "timelimit",
-   "objective": 5190536.0,
-   "bound": 5183587.513456773,
+   "objective": 5189619.0,
+   "bound": 5183861.911509435,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 5189487.0"
@@ -12672,33 +13131,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 5190536.0,
-     "bound": 5183028.591189696,
-     "time": 120.00640212500002,
+     "objective": 5189619.0,
+     "bound": 5183861.911509435,
+     "time": 600.0131942910375,
      "raw_status": "Time limit reached",
-     "nodes": 614,
+     "nodes": 4219,
      "verify": {
       "feasible": true,
-      "objective": 5190536.0,
-      "max_viol": 4.973799150320701e-14,
-      "worst": "row R22032 activity 4.973799150320701e-14 > 0.0"
+      "objective": 5189619.0,
+      "max_viol": 5.10702591327572e-13,
+      "worst": "var X37498=1.0000000000000073 > ub 1.0"
      },
-     "peak_rss_mb": 572.5
+     "peak_rss_mb": 769.4
     },
     "scip": {
      "status": "timelimit",
-     "objective": 25326094.0012,
-     "bound": 5183587.513456773,
-     "time": 119.99787816696335,
+     "objective": 5675865.0027000215,
+     "bound": 5183680.708327983,
+     "time": 600.0008973749937,
      "raw_status": "timelimit",
-     "nodes": 198,
+     "nodes": 1002,
      "verify": {
       "feasible": true,
-      "objective": 25326094.0012,
-      "max_viol": 0.0,
-      "worst": ""
+      "objective": 5675865.0027000215,
+      "max_viol": 2.932883276385446e-14,
+      "worst": "row R22032 activity 2.932883276385446e-14 > 0.0"
      },
-     "peak_rss_mb": 325.7
+     "peak_rss_mb": 356.6
     }
    },
    "ref_runs": [
@@ -12719,6 +13178,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -12953,8 +13423,8 @@
    "num_binaries": 379,
    "sense": "min",
    "status": "timelimit",
-   "objective": 319.0,
-   "bound": 286.8568142364735,
+   "objective": 314.0,
+   "bound": 301.41035110676677,
    "agree": true,
    "notes": [
     "no solver proved the result; MIPLIB solu: optimal 314.0"
@@ -12962,33 +13432,33 @@
    "solvers": {
     "highs": {
      "status": "timelimit",
-     "objective": 320.9999999999999,
-     "bound": 282.0,
-     "time": 120.04462629102636,
+     "objective": 316.0,
+     "bound": 293.0,
+     "time": 600.0104075419949,
      "raw_status": "Time limit reached",
-     "nodes": 6140,
+     "nodes": 38812,
      "verify": {
       "feasible": true,
-      "objective": 320.9999999999999,
-      "max_viol": 3.472000464910252e-12,
-      "worst": "var y_q148_Day_2_Period_4=1.000000000002829 > ub 1.0"
+      "objective": 316.0,
+      "max_viol": 4.518607710224387e-14,
+      "worst": "var y_compact_q160_Day_2_Period_3=-4.374278717023117e-14 < lb 0.0"
      },
-     "peak_rss_mb": 655.8
+     "peak_rss_mb": 873.0
     },
     "scip": {
      "status": "timelimit",
-     "objective": 319.0,
-     "bound": 286.8568142364735,
-     "time": 120.00009362504352,
+     "objective": 314.0,
+     "bound": 301.41035110676677,
+     "time": 599.9994593330193,
      "raw_status": "timelimit",
-     "nodes": 1633,
+     "nodes": 19001,
      "verify": {
       "feasible": true,
-      "objective": 319.0,
+      "objective": 314.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 321.5
+     "peak_rss_mb": 441.5
     }
    },
    "ref_runs": [
@@ -13009,6 +13479,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
@@ -13170,31 +13651,31 @@
      "status": "timelimit",
      "objective": -8.0,
      "bound": -9.0,
-     "time": 120.0032559169922,
+     "time": 600.0123822079622,
      "raw_status": "Time limit reached",
-     "nodes": 22259,
+     "nodes": 142226,
      "verify": {
       "feasible": true,
       "objective": -8.0,
       "max_viol": 9.769962616701378e-15,
       "worst": "var x#6#10=1.0000000000000098 > ub 1.0"
      },
-     "peak_rss_mb": 293.4
+     "peak_rss_mb": 467.6
     },
     "scip": {
      "status": "timelimit",
      "objective": -8.0,
      "bound": -9.0,
-     "time": 120.00060508301249,
+     "time": 600.0000082500046,
      "raw_status": "timelimit",
-     "nodes": 3734,
+     "nodes": 59292,
      "verify": {
       "feasible": true,
       "objective": -8.0,
       "max_viol": 0.0,
       "worst": ""
      },
-     "peak_rss_mb": 215.0
+     "peak_rss_mb": 255.2
     }
    },
    "ref_runs": [
@@ -13215,6 +13696,17 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    },
+    {
+     "date": "2026-11-02",
+     "time_limit": 600.0,
+     "threads": 4,
+     "jobs": 2,
+     "mem_limit_mb": 2800,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }
