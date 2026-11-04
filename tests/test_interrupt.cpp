@@ -39,6 +39,20 @@ double seconds_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
+// Latency limits below are for optimized builds; address / undefined-behavior sanitizer builds run
+// several times slower (the linux-sanitizers CI job measured 2.2 s for a 0.2 s stop).
+#if defined(__SANITIZE_ADDRESS__)
+constexpr double kSlow = 4.0;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr double kSlow = 4.0;
+#else
+constexpr double kSlow = 1.0;
+#endif
+#else
+constexpr double kSlow = 1.0;
+#endif
+
 }  // namespace
 
 TEST(interrupt_scope_inheritance) {
@@ -72,7 +86,7 @@ TEST(interrupt_stops_the_search) {
     auto t0 = std::chrono::steady_clock::now();
     SolveResult r = solve(m, sp);
     CHECK(r.status == Status::Interrupted);
-    CHECK(seconds_since(t0) < 1.0);
+    CHECK(seconds_since(t0) < 1.0 * kSlow);
     // Set from another thread during the search: stops within a fraction of a second, with the
     // incumbent found so far and a valid bound.
     flag = false;
@@ -86,8 +100,8 @@ TEST(interrupt_stops_the_search) {
     setter.join();
     CHECK(r.status == Status::Interrupted);
     // Typically 3-40 ms after the flag; slow shared CI machines need more room.
-    if (!(t < 0.7 + 2.0)) std::fprintf(stderr, "interrupt latency: %.3f s after the flag\n", t - 0.7);
-    CHECK(t < 0.7 + 2.0);
+    if (!(t < 0.7 + 2.0 * kSlow)) std::fprintf(stderr, "interrupt latency: %.3f s after the flag\n", t - 0.7);
+    CHECK(t < 0.7 + 2.0 * kSlow);
     if (r.has_solution) {
       CHECK(m.violation(r.x).max() <= 1e-6);
       CHECK(r.bound <= r.objective + 1e-6);
@@ -151,7 +165,7 @@ TEST(interrupt_lp_and_qp) {
       const SolveResult r = solve(m, sp);
       CHECK(r.status == Status::Interrupted);
       if (r.status != Status::Interrupted) std::printf("  %s method %d: %s\n", name, method, to_string(r.status));
-      CHECK(seconds_since(t0) < 1.0);
+      CHECK(seconds_since(t0) < 1.0 * kSlow);
     }
   }
 }
@@ -315,7 +329,7 @@ TEST(barrier_time_limit_is_fine_grained) {
     const SolveResult r = solve(m, sp);
     const double t = seconds_since(t0);
     CHECK(r.status == Status::TimeLimit);
-    CHECK(t < 2.0);
-    if (t >= 2.0) std::printf("  method %d: %.2fs\n", method, t);
+    CHECK(t < 2.0 * kSlow);
+    if (t >= 2.0 * kSlow) std::printf("  method %d: %.2fs\n", method, t);
   }
 }
