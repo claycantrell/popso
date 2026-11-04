@@ -9,6 +9,7 @@
 #include "milp/core/model.hpp"
 #include "milp/heuristics/diving.hpp"
 #include "milp/heuristics/fj.hpp"
+#include "milp/heuristics/lmip.hpp"
 #include "milp/heuristics/localsearch.hpp"
 #include "milp/heuristics/submip.hpp"
 #include "milp/search/mip_problem.hpp"
@@ -313,4 +314,154 @@ TEST(crossover_fixes_agreeing_columns) {
   CHECK(!crossover(p, {&a}, kInf, lim, sol));
   CHECK(!crossover(p, {&a, &a}, kInf, lim, sol));
   CHECK(st2.solves == 0);
+}
+
+// Local-MIP style search (heuristics/lmip.hpp): every reported point is feasible, objectives
+// strictly decrease, the run is reproducible for a seed and budget.
+TEST(lmip_set_cover_feasible_and_improving) {
+  for (unsigned seed = 1; seed <= 20; ++seed) {
+    MipProblem p = set_cover(seed, 60, 40);
+    LocalMipLimits lim;
+    lim.effort = 2000000;
+    lim.seed = seed;
+    double last = kInf;
+    int sols = 0;
+    bool ok = local_mip(p, lim, [&](const std::vector<double>& x, double obj) {
+      CHECK(p.max_violation(x) <= 1e-6);
+      CHECK(obj < last);
+      CHECK_NEAR(obj, p.objective(x) - p.offset, 1e-9);
+      last = obj;
+      ++sols;
+    });
+    CHECK(ok);
+    CHECK(sols >= 1);
+  }
+}
+
+TEST(lmip_mixed_feasible) {
+  int found = 0;
+  for (unsigned seed = 1; seed <= 60; ++seed) {
+    MipProblem p = mixed(seed);
+    LocalMipLimits lim;
+    lim.effort = 1000000;
+    lim.seed = seed;
+    found += local_mip(p, lim, [&](const std::vector<double>& x, double obj) {
+      CHECK(p.max_violation(x) <= 1e-6);
+      CHECK_NEAR(obj, p.objective(x) - p.offset, 1e-6);
+    });
+  }
+  CHECK(found >= 40);
+}
+
+TEST(lmip_start_and_cutoff) {
+  // From a feasible start with its value as the cutoff, only strictly better points are reported.
+  for (unsigned seed = 1; seed <= 10; ++seed) {
+    MipProblem p = set_cover(seed, 40, 30);
+    std::vector<double> start(p.num_cols(), 1.0);
+    const double c0 = p.objective(start) - p.offset;
+    LocalMipLimits lim;
+    lim.effort = 1000000;
+    lim.seed = seed;
+    lim.start = &start;
+    lim.cutoff = c0;
+    bool any = local_mip(p, lim, [&](const std::vector<double>& x, double obj) {
+      CHECK(p.max_violation(x) <= 1e-6);
+      CHECK(obj < c0);
+    });
+    CHECK(any);  // all-ones is far from optimal
+  }
+}
+
+TEST(lmip_deterministic) {
+  for (unsigned s : {7u, 8u}) {
+    MipProblem p = s == 7 ? set_cover(s, 200, 120) : mixed(s);
+    auto run = [&](std::vector<double>& out) {
+      LocalMipLimits lim;
+      lim.effort = 3000000;
+      lim.seed = 3;
+      LocalMipStats st;
+      local_mip(p, lim, [&](const std::vector<double>& x, double obj) {
+        out.push_back(obj);
+        out.insert(out.end(), x.begin(), x.end());
+      }, &st);
+      out.push_back(static_cast<double>(st.steps));
+      out.push_back(static_cast<double>(st.effort));
+    };
+    std::vector<double> a, b;
+    run(a);
+    run(b);
+    CHECK(a == b);
+  }
+}
+
+TEST(lmip_infeasible_terminates) {
+  // x fixed at 0 makes x + y >= 2 unsatisfiable: the search must stop on its effort budget.
+  ModelBuilder b;
+  b.add_col("x", 1, 0, 0, VarType::Integer);
+  b.add_col("y", 1, 0, 1, VarType::Binary);
+  const Index r = b.add_row("r", 2, kInf);
+  b.add_coef(r, 0, 1);
+  b.add_coef(r, 1, 1);
+  MipProblem p = make_problem(b.build());
+  LocalMipLimits lim;
+  lim.effort = 100000;
+  CHECK(!local_mip(p, lim, [](const std::vector<double>&, double) {}));
+  // With random restarts on stalls it still ends on the effort budget.
+  lim.stall_effort = 1000;
+  lim.stall_restart = true;
+  LocalMipStats st;
+  CHECK(!local_mip(p, lim, [](const std::vector<double>&, double) {}, &st));
+  CHECK(st.restarts >= 2);
+  CHECK(st.effort >= lim.effort && st.effort < lim.effort + 100000);
+}
+
+TEST(lmip_stall_restart_mixed_feasible) {
+  // Short stalls with restarts: every point reported is still feasible.
+  int found = 0;
+  for (unsigned seed = 1; seed <= 30; ++seed) {
+    MipProblem p = mixed(seed);
+    LocalMipLimits lim;
+    lim.effort = 500000;
+    lim.stall_effort = 5000;
+    lim.stall_restart = true;
+    lim.seed = seed;
+    found += local_mip(p, lim, [&](const std::vector<double>& x, double) { CHECK(p.max_violation(x) <= 1e-6); });
+  }
+  CHECK(found >= 20);
+}
+
+TEST(lp_rens_feasible_and_deterministic) {
+  // The root-LP sub-MIP must only report feasible points below the cutoff, leave the root LP as it
+  // was, and (iteration limits only) return the same point on a rerun.
+  int found = 0;
+  for (unsigned seed = 1; seed <= 30; ++seed) {
+    MipProblem p = seed % 2 ? mixed(seed) : set_cover(seed, 60, 40);
+    DualSimplex lp;
+    lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
+    if (lp.solve(LpOptions{}) != LpStatus::Optimal) continue;
+    const double obj0 = lp.objective();
+    SubMipLimits lim;
+    lim.node_limit = 200;
+    lim.time_limit = 1e9;
+    lim.iteration_limit = 200000;
+    SubMipStats ss;
+    lim.stats = &ss;
+    std::vector<double> sol, sol2;
+    LpRensStats st;
+    const bool ok = lp_rens(p, lp, kInf, lim, sol, 0.7, 4, &st);
+    CHECK(lp.objective() == obj0);
+    for (Index j = 0; j < p.num_cols(); ++j) CHECK(lp.col_lower(j) == p.col_lb[j] && lp.col_upper(j) == p.col_ub[j]);
+    if (!ok) continue;
+    ++found;
+    CHECK(p.max_violation(sol) <= 1e-6);
+    CHECK(st.attempts >= 1);
+    CHECK(ss.solves >= 1);
+    // A cutoff at the found value: anything returned must be strictly better.
+    const double cut = p.objective(sol);
+    if (lp_rens(p, lp, cut, lim, sol2, 0.7, 4)) CHECK(p.objective(sol2) < cut);
+    std::vector<double> again;
+    REQUIRE(lp_rens(p, lp, kInf, lim, again, 0.7, 4));
+    CHECK(again == sol);
+  }
+  CHECK(found >= 10);
 }

@@ -5,12 +5,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <random>
 #include <string>
 
 #include "milp/core/model.hpp"
 #include "milp/cuts/cut_loop.hpp"
+#include "milp/cuts/mcf.hpp"
 #include "milp/io/mps_reader.hpp"
 #include "milp/solver/solver.hpp"
 #include "test_framework.hpp"
@@ -286,6 +288,75 @@ Model random_mcnd(std::mt19937& rng) {
   return b.build();
 }
 
+// Random multi-commodity network design for the network cut-set separator: arcs (directed) or edges
+// (undirected: one flow column per direction and commodity, both in the edge's capacity row) with
+// capacity rows sum_k x <= c y (y binary or a small integer module count), commodity balances
+// (outflow - inflow = supply, sometimes as inequalities), optionally per-commodity linking x_k <= d_k y.
+// `big`: more nodes and commodities (for the solver, not for enumeration).
+Model random_netdesign(std::mt19937& rng, bool undirected, bool big = false) {
+  ModelBuilder b;
+  const int nn = big ? 5 + rng() % 4 : 3 + rng() % 2;
+  std::vector<std::pair<int, int>> arcs;
+  for (int v = 1; v < nn; ++v) arcs.emplace_back(static_cast<int>(rng() % v), v);
+  const int extra = big ? 3 + rng() % 6 : rng() % 2;
+  for (int t = 0; t < extra; ++t) {
+    const int i = rng() % nn, j = rng() % nn;
+    if (i != j) arcs.emplace_back(i, j);
+  }
+  if (!undirected) {
+    const size_t na = arcs.size();
+    for (size_t a = 0; a < na; ++a) {
+      if (rng() % 2) arcs.emplace_back(arcs[a].second, arcs[a].first);
+    }
+  }
+  const int nk = big ? 2 + rng() % 3 : 1 + rng() % 2;
+  const bool modules = rng() % 2;
+  const bool linking = !modules && rng() % 2;
+  std::vector<double> dem(nk);
+  for (int k = 0; k < nk; ++k) dem[k] = 1.0 + rng() % 5;
+  const double c = modules ? 2.0 + rng() % 4 : 3.0 + rng() % 6;
+  std::vector<std::vector<std::vector<Index>>> x(arcs.size());  // [arc][commodity][direction]
+  for (size_t a = 0; a < arcs.size(); ++a) {
+    const Index y = b.add_col("y" + std::to_string(a), 2.0 + rng() % 9, 0.0, modules ? 2.0 : 1.0,
+                              modules ? VarType::Integer : VarType::Binary);
+    const Index cap = b.add_row("cap" + std::to_string(a), -kInf, 0.0);
+    b.add_coef(cap, y, -c);
+    x[a].resize(nk);
+    for (int k = 0; k < nk; ++k) {
+      for (int dir = 0; dir < (undirected ? 2 : 1); ++dir) {
+        const Index j = b.add_col("x" + std::to_string(a) + "_" + std::to_string(k) + "_" + std::to_string(dir),
+                                  0.1 * (rng() % 5), 0.0, kInf);
+        x[a][k].push_back(j);
+        b.add_coef(cap, j, 1.0);
+        if (linking) {
+          const Index lk = b.add_row("lk", -kInf, 0.0);
+          b.add_coef(lk, j, 1.0), b.add_coef(lk, y, -dem[k]);
+        }
+      }
+    }
+  }
+  for (int k = 0; k < nk; ++k) {
+    const int o = rng() % nn;
+    int d = rng() % nn;
+    if (d == o) d = (o + 1) % nn;
+    for (int v = 0; v < nn; ++v) {
+      const double s = v == o ? dem[k] : v == d ? -dem[k] : 0.0;
+      const int kind = rng() % 6;  // mostly equalities, sometimes >= at the origin or <= at the destination
+      const double lo = kind == 0 && v == d ? -kInf : s, up = kind == 1 && v == o ? kInf : s;
+      const Index r = b.add_row("bal" + std::to_string(k) + "_" + std::to_string(v), lo, up);
+      for (size_t a = 0; a < arcs.size(); ++a) {
+        for (size_t dir = 0; dir < x[a][k].size(); ++dir) {
+          const int tail = dir == 0 ? arcs[a].first : arcs[a].second, head = dir == 0 ? arcs[a].second : arcs[a].first;
+          if (tail == v) b.add_coef(r, x[a][k][dir], 1.0);
+          if (head == v) b.add_coef(r, x[a][k][dir], -1.0);
+        }
+      }
+    }
+  }
+  b.model().sense = ObjSense::Minimize;
+  return b.build();
+}
+
 // Runs the cut loop with the given separators and checks every cut.
 void check_cuts_valid(const MipProblem& p, const CutLoopOptions& opt, int* ncuts, int* ninvalid) {
   // Flow cover cuts are opt-in in the solver; the validity tests always include them.
@@ -317,9 +388,9 @@ void check_cuts_valid(const MipProblem& p, const CutLoopOptions& opt, int* ncuts
   }
 }
 
-CutLoopOptions only(bool gomory, bool cover, bool mir, bool clique = false) {
+CutLoopOptions only(bool gomory, bool cover, bool mir, bool clique = false, bool mcf = false) {
   CutLoopOptions o;
-  o.gomory = gomory, o.cover = cover, o.mir = mir, o.clique = clique;
+  o.gomory = gomory, o.cover = cover, o.mir = mir, o.clique = clique, o.mcf = mcf || (gomory && cover && mir && clique);
   o.max_rounds = 10;
   o.stall_rounds = 100;
   return o;
@@ -776,6 +847,97 @@ TEST(cuts_random_validity_multicommodity_network) {
   CHECK_EQ(ninvalid, 0);
 }
 
+TEST(cuts_mcf_network_detection) {
+  // Directed: 3 nodes, 2 commodities, arcs 0->1, 1->2, 0->2 with capacity rows x_a1 + x_a2 <= 4 y_a.
+  {
+    ModelBuilder b;
+    const std::vector<std::pair<int, int>> arcs{{0, 1}, {1, 2}, {0, 2}};
+    std::vector<std::vector<Index>> x(3);
+    for (size_t a = 0; a < arcs.size(); ++a) {
+      const Index y = b.add_col("y", 1.0, 0, 1, VarType::Binary);
+      const Index cap = b.add_row("cap", -kInf, 0.0);
+      b.add_coef(cap, y, -4.0);
+      for (int k = 0; k < 2; ++k) {
+        x[a].push_back(b.add_col("x", 0.0, 0, kInf));
+        b.add_coef(cap, x[a][k], 1.0);
+      }
+    }
+    for (int k = 0; k < 2; ++k) {
+      for (int v = 0; v < 3; ++v) {
+        // inflow - outflow = demand (negated orientation for commodity 1)
+        const double s = k == 0 ? 1.0 : -1.0, d = v == 2 ? 2.0 : v == 0 ? -2.0 : 0.0;
+        const Index r = b.add_row("bal", s * d, s * d);
+        for (size_t a = 0; a < arcs.size(); ++a) {
+          if (arcs[a].second == v) b.add_coef(r, x[a][k], s);
+          if (arcs[a].first == v) b.add_coef(r, x[a][k], -s);
+        }
+      }
+    }
+    MipProblem p = make_problem(b.build());
+    const McfNetwork net = detect_mcf_network(p);
+    CHECK_EQ(net.num_nodes, 3);
+    CHECK_EQ(net.num_comms, 2);
+    CHECK_EQ(static_cast<int>(net.arcs.size()), 3);
+    for (const auto& a : net.arcs) CHECK(a.cap_row >= 0 && a.tail >= 0 && a.head >= 0 && a.tail != a.head);
+    // Both commodities oriented alike (commodity 1's rows are negated in the model): the multiplied
+    // sides (supplies) agree per node.
+    std::vector<double> supply(6, std::numeric_limits<double>::quiet_NaN());
+    for (const auto& fr : net.flow_rows) {
+      const double s = p.row_lb[fr.row] * fr.mult;
+      if (std::isnan(supply[fr.node])) supply[fr.node] = s;
+      CHECK_NEAR(supply[fr.node], s, 1e-12);
+    }
+  }
+  // Undirected: one edge capacity row per edge shared by both directions of both commodities.
+  {
+    std::mt19937 rng(5);
+    int found = 0;
+    for (int t = 0; t < 20; ++t) {
+      MipProblem p = make_problem(random_netdesign(rng, true));
+      const McfNetwork net = detect_mcf_network(p);
+      if (net.empty()) continue;
+      ++found;
+      Index cap = 0;
+      for (const auto& a : net.arcs) cap += a.cap_row >= 0;
+      CHECK(cap > 0);
+      CHECK(net.num_nodes >= 2);
+    }
+    CHECK(found >= 15);
+  }
+  // No network: a knapsack with continuous columns.
+  {
+    ModelBuilder b;
+    const Index y = b.add_col("y", 1.0, 0, 1, VarType::Binary);
+    const Index x1 = b.add_col("x1", 1.0, 0, 5), x2 = b.add_col("x2", 1.0, 0, 5);
+    const Index r = b.add_row("r", -kInf, 4.0);
+    b.add_coef(r, x1, 1.0), b.add_coef(r, x2, 1.0), b.add_coef(r, y, 3.0);
+    MipProblem p = make_problem(b.build());
+    CHECK(detect_mcf_network(p).empty());
+  }
+}
+
+TEST(cuts_mcf_random_validity) {
+  // Network cut-set cuts alone (and with all separators) on small random network design models: every cut
+  // holds at every feasible point (enumeration of the design columns, an LP over the flows).
+  std::mt19937 rng(73);
+  int ncuts = 0, ninvalid = 0, feasible = 0;
+  for (int t = 0; t < iters(160); ++t) {
+    Model m = t % 4 == 0 ? random_mcnd(rng) : t % 4 == 1 ? random_fcnf(rng) : random_netdesign(rng, t % 4 == 3);
+    MipProblem p = make_problem(m);
+    if (enumerate_optimum(p) == kInf) continue;
+    ++feasible;
+    check_cuts_valid(p, only(false, false, false, false, true), &ncuts, &ninvalid);
+    check_cuts_valid(p, only(true, true, true, true, true), &ncuts, &ninvalid);
+  }
+  const int nmcf = g_origin_count["mcf"];
+  std::printf("  network cut-sets: %d feasible, %d cuts checked (%d mcf), %d invalid (", feasible, ncuts, nmcf, ninvalid);
+  for (auto& [k, v] : g_origin_count) std::printf(" %s %d", k.c_str(), v);
+  std::printf(" )\n");
+  g_origin_count.clear();
+  CHECK(nmcf > 50);
+  CHECK_EQ(ninvalid, 0);
+}
+
 TEST(cuts_mir_multicommodity_cut_set) {
   // Two commodities from node 0 to node 1 (demands 3 and 4) over one arc with modules of size 5:
   // x_1 + x_2 <= 5 y, x_1 = 3, x_2 = 4. The LP takes y = 1.4; the balance rows aggregated with the
@@ -1115,6 +1277,49 @@ TEST(cuts_larger_random_satisfied_by_optimum) {
   }
   std::printf("  larger: %d cuts checked against optima, %d violated\n", checked, bad);
   CHECK(checked > 200);
+  CHECK_EQ(bad, 0);
+}
+
+TEST(cuts_mcf_satisfied_by_optimum) {
+  // Larger random network design models: every network cut-set cut holds at the optimum found without
+  // cuts, and the solver with cuts finds the same optimum.
+  std::mt19937 rng(97);
+  SolverParams params;
+  params.verbosity = 0;
+  params.threads = 1;
+  params.mip_rel_gap = 1e-9;
+  params.mip_abs_gap = 1e-9;
+  params.node_limit = 20000;
+  int checked = 0, bad = 0, solved = 0;
+  for (int t = 0; t < iters(40); ++t) {
+    Model m = random_netdesign(rng, t % 2 == 1, true);
+    set_no_cuts(true);
+    SolveResult r0 = solve(m, params);
+    set_no_cuts(false);
+    if (r0.status != Status::Optimal) continue;
+    ++solved;
+    MipProblem p = make_problem(m);
+    DualSimplex lp;
+    lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
+    Logger log(0);
+    Timer timer;
+    std::vector<Cut> cuts;
+    cut_loop(p, lp, only(false, false, false, false, true), log, timer, kInf, &cuts);
+    for (const Cut& c : cuts) {
+      ++checked;
+      const double viol = c.activity(r0.x.data()) - c.rhs;
+      if (viol > 1e-6 * std::max(1.0, std::abs(c.rhs))) {
+        ++bad;
+        std::fprintf(stderr, "  %s cut violated by optimum: %g\n", c.origin, viol);
+      }
+    }
+    SolveResult r1 = solve(m, params);
+    if (r1.status != Status::Optimal) continue;
+    CHECK_NEAR(r1.objective, r0.objective, 1e-6 * std::max(1.0, std::abs(r0.objective)));
+  }
+  std::printf("  network design: %d solved, %d mcf cuts checked against optima, %d violated\n", solved, checked, bad);
+  CHECK(solved >= 20);
+  CHECK(checked > 20);
   CHECK_EQ(bad, 0);
 }
 

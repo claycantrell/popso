@@ -4,8 +4,9 @@ import ctypes
 import math
 import numbers
 import os
+import threading
 
-from ._lib import lib
+from ._lib import INCUMBENT_CALLBACK, lib
 
 INF = float("inf")
 
@@ -21,6 +22,12 @@ SOS2 = 2
 MINIMIZE = 1
 MAXIMIZE = -1
 
+# Basis status (Result.var_basis / Result.constr_basis).
+BASIC = 0
+AT_LOWER = 1
+AT_UPPER = 2
+AT_ZERO = 3  # nonbasic free variable (or free constraint) at zero
+
 _VTYPES = {
     CONTINUOUS: CONTINUOUS, INTEGER: INTEGER, BINARY: BINARY, SEMICONTINUOUS: SEMICONTINUOUS,
     SEMIINTEGER: SEMIINTEGER,
@@ -32,8 +39,8 @@ _SENSES = {MINIMIZE: MINIMIZE, MAXIMIZE: MAXIMIZE, "min": MINIMIZE, "max": MAXIM
            "minimize": MINIMIZE, "maximize": MAXIMIZE}
 
 PARAMS = ("time_limit", "threads", "mip_gap", "mip_abs_gap", "seed", "deterministic", "verbosity",
-          "mem_limit", "node_limit", "presolve", "racing", "lp_method")
-_INT_PARAMS = {"threads", "seed", "verbosity", "mem_limit", "node_limit", "racing", "lp_method"}
+          "mem_limit", "node_limit", "presolve", "racing", "lp_method", "duals")
+_INT_PARAMS = {"threads", "seed", "verbosity", "mem_limit", "node_limit", "racing", "lp_method", "duals"}
 # lp_method also accepts these names.
 LP_METHODS = {"auto": 0, "simplex": 1, "barrier": 2}
 _BOOL_PARAMS = {"deterministic", "presolve"}
@@ -473,14 +480,22 @@ class Result:
     status: "OPTIMAL", "INFEASIBLE", "TIME_LIMIT", ...; objective / x are None without a solution.
     Index it with a Var, a variable name or an index: result[x], result["x"], result[0].
 
-    duals (one per constraint) and reduced_costs (one per variable): continuous QPs solved to
-    optimality only, else None. d = c + Q x - A^T y; when minimizing, a dual is >= 0 at an active
-    lower and <= 0 at an active upper bound (opposite signs when maximizing). result.dual(c) and
-    result.reduced_cost(x) look single values up.
+    duals (one per constraint) and reduced_costs (one per variable), else None: LPs and continuous
+    QPs solved to optimality; for a MILP with a solution and the parameter duals=2, the duals of an
+    optimal basis of the LP with the integer variables fixed at the solution (fixed_mip_duals is then
+    True). If the solve stopped early, the solution's continuous part need not be optimal for that
+    fixed LP: the duals then belong to the fixed LP's optimum and need not be complementary to the
+    returned continuous values (the solution itself is not changed). Duals whose recovery fails a
+    consistency check (their basis does not reproduce the solution's objective) or is interrupted
+    are dropped (None).
+    d = c + Q x - A^T y; when minimizing, a dual is >= 0 at an active lower and <= 0 at an active
+    upper bound (opposite signs when maximizing). result.dual(c) and result.reduced_cost(x) look
+    single values up. var_basis / constr_basis: the optimal basis of LP and fixed-MIP duals
+    (popso.BASIC, AT_LOWER, AT_UPPER, AT_ZERO per variable / constraint), else None.
     """
 
     def __init__(self, model, status, objective, bound, gap, nodes, lp_iterations, time, x, duals=None,
-                 reduced_costs=None):
+                 reduced_costs=None, fixed_mip_duals=False, var_basis=None, constr_basis=None):
         self._model = model
         self.status = status
         self.objective = objective
@@ -492,6 +507,9 @@ class Result:
         self.x = x
         self.duals = duals
         self.reduced_costs = reduced_costs
+        self.fixed_mip_duals = fixed_mip_duals
+        self.var_basis = var_basis
+        self.constr_basis = constr_basis
 
     @property
     def has_solution(self):
@@ -516,13 +534,15 @@ class Result:
     def dual(self, constr):
         """Dual value of a constraint (a Constr or a row index)."""
         if self.duals is None:
-            raise ValueError("no dual values (continuous QPs solved to optimality only; status %s)" % self.status)
+            raise ValueError("no dual values (LPs and continuous QPs solved to optimality, MILPs with duals=2; "
+                             "status %s)" % self.status)
         return self.duals[constr.index if isinstance(constr, Constr) else int(constr)]
 
     def reduced_cost(self, key):
         """Reduced cost of a variable (a Var, a name or an index)."""
         if self.reduced_costs is None:
-            raise ValueError("no reduced costs (continuous QPs solved to optimality only; status %s)" % self.status)
+            raise ValueError("no reduced costs (LPs and continuous QPs solved to optimality, MILPs with duals=2; "
+                             "status %s)" % self.status)
         return self.reduced_costs[self._model._var_index(key)]
 
     def as_dict(self):
@@ -547,6 +567,8 @@ class Model:
         if not h:
             raise MemoryError("popso: cannot create a model")
         self._h = h
+        self._callback = None      # the ctypes callback object (kept alive while set)
+        self._callback_error = None  # exception raised by the incumbent callback during solve()
         self.params = Params(self)
         if name:
             self.name = name
@@ -824,13 +846,93 @@ class Model:
     # -- solving
     def solve(self, **params):
         """Solves the model and returns a Result. Keyword arguments set parameters first
-        (e.g. solve(time_limit=10, threads=2))."""
+        (e.g. solve(time_limit=10, threads=2)).
+
+        Ctrl-C (KeyboardInterrupt) during the solve stops it like interrupt(): solve() returns the
+        result with status "INTERRUPTED" and the best solution found so far. (Called from the main
+        thread, the native solve runs on a helper thread so that the main thread can receive the
+        signal.) An exception raised by the incumbent callback stops the solve and is re-raised here."""
         for k, v in params.items():
             if k not in PARAMS:
                 raise TypeError("unknown parameter %r" % k)
             self.set_param(k, v)
-        self._check(lib.popso_solve(self._h))
+        self._callback_error = None
+        # The native solve keeps calling the callback it started with: keep its ctypes object alive
+        # until the solve returns, even if the callback is replaced or removed meanwhile.
+        callback = self._callback  # noqa: F841
+        if threading.current_thread() is threading.main_thread():
+            code = self._solve_interruptible()
+        else:
+            code = lib.popso_solve(self._h)
+        err, self._callback_error = self._callback_error, None
+        if err is not None:
+            raise err
+        self._check(code)
         return self.result()
+
+    def _solve_interruptible(self):
+        box = []
+        done = threading.Event()
+
+        def run():
+            try:
+                box.append(lib.popso_solve(self._h))
+            finally:
+                done.set()
+
+        # Waiting on an Event (not Thread.join, whose state a KeyboardInterrupt can corrupt in
+        # some Python versions).
+        threading.Thread(target=run, name="popso-solve", daemon=True).start()
+        interrupted = False
+        try:
+            while True:
+                try:
+                    while not done.wait(0.1):
+                        if interrupted:
+                            # Repeated: a request sent before the native solve started is cleared by it.
+                            lib.popso_interrupt(self._h)
+                    break
+                except KeyboardInterrupt:
+                    interrupted = True
+                    lib.popso_interrupt(self._h)
+        finally:
+            # Any other exception escaping the wait: the native solve must not outlive this call
+            # (the model could be freed under it), so stop it and wait for the helper thread.
+            while not done.is_set():
+                try:
+                    lib.popso_interrupt(self._h)
+                    done.wait(0.1)
+                except KeyboardInterrupt:
+                    pass
+        return box[0]
+
+    def interrupt(self):
+        """Asks a solve() running in another thread to stop soon (status "INTERRUPTED", with the best
+        solution so far). Safe to call from any thread; no effect when no solve is running."""
+        self._check(lib.popso_interrupt(self._h))
+
+    def set_incumbent_callback(self, fn):
+        """Calls fn(objective, bound, x) for each new best solution during solve(): its objective, the
+        best bound (both in the model's sense) and the values of all variables (a list indexed like
+        Var.index). A true return value stops the solve (status "INTERRUPTED"). Calls come one at a
+        time, possibly from solver threads; an exception stops the solve and is re-raised by solve().
+        fn=None removes the callback. Not called for quadratic objectives."""
+        if fn is None:
+            self._check(lib.popso_set_incumbent_callback(self._h, INCUMBENT_CALLBACK(), None))
+            self._callback = None
+            return
+
+        def trampoline(_data, objective, bound, xp, n):
+            try:
+                return 1 if fn(objective, bound, xp[:n]) else 0
+            except BaseException as e:  # noqa: B036 - re-raised by solve()
+                if self._callback_error is None:
+                    self._callback_error = e
+                return 1
+
+        cb = INCUMBENT_CALLBACK(trampoline)
+        self._check(lib.popso_set_incumbent_callback(self._h, cb, None))
+        self._callback = cb
 
     def result(self):
         """The result of the last solve."""
@@ -856,17 +958,22 @@ class Model:
             buf = (ctypes.c_double * n)()
             self._check(lib.popso_get_solution(h, buf, n))
             x = list(buf)
-        duals = reduced_costs = None
-        if lib.popso_has_duals(h):
+        duals = reduced_costs = var_basis = constr_basis = None
+        has_duals = lib.popso_has_duals(h)
+        if has_duals:
             rows, n = self.num_constrs, self.num_vars
             ybuf, dbuf = (ctypes.c_double * max(rows, 1))(), (ctypes.c_double * max(n, 1))()
             self._check(lib.popso_get_duals(h, ybuf, rows))
             self._check(lib.popso_get_reduced_costs(h, dbuf, n))
             duals, reduced_costs = list(ybuf)[:rows], list(dbuf)[:n]
+            if lib.popso_has_basis(h):
+                vb, rb = (ctypes.c_int * max(n, 1))(), (ctypes.c_int * max(rows, 1))()
+                self._check(lib.popso_get_basis(h, vb, rb))
+                var_basis, constr_basis = list(vb)[:n], list(rb)[:rows]
         return Result(self, _dec(lib.popso_status_string(status)), objective, get_d(lib.popso_get_bound),
                       get_d(lib.popso_get_gap), get_ll(lib.popso_get_node_count),
                       get_ll(lib.popso_get_lp_iterations), get_d(lib.popso_get_solve_time), x, duals,
-                      reduced_costs)
+                      reduced_costs, has_duals == 2, var_basis, constr_basis)
 
     def write_solution(self, filename):
         self._check(lib.popso_write_solution(self._h, _enc(os.fspath(filename))))

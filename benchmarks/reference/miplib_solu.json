@@ -3,15 +3,23 @@
  "instances": {
   "30n20b8": {
    "status": "optimal",
-   "objective": 302.0
+   "objective": 302.0,
+   "gz_bytes": 523719
   },
   "50v-10": {
    "status": "optimal",
-   "objective": 3311.1799841
+   "objective": 3311.1799841,
+   "gz_bytes": 37959
   },
   "CMS750_4": {
    "status": "optimal",
-   "objective": 252.0
+   "objective": 252.0,
+   "gz_bytes": 333059
+  },
+  "academictimetablesmall": {
+   "status": "optimal",
+   "objective": 0.0,
+   "gz_bytes": 1246366
   },
   "air05": {
    "status": "optimal",
@@ -26,7 +34,8 @@
     "objective": 26373.999999999996,
     "time": 22.87,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 208038
   },
   "app1-1": {
    "status": "optimal",
@@ -41,11 +50,38 @@
     "objective": -2.9999999999999996,
     "time": 19.76,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 133073
   },
   "app1-2": {
    "status": "optimal",
-   "objective": -41.0
+   "objective": -41.0,
+   "gz_bytes": 1394169
+  },
+  "assign1-5-8": {
+   "status": "optimal",
+   "objective": 211.999999999998,
+   "gz_bytes": 12566
+  },
+  "atlanta-ip": {
+   "status": "optimal",
+   "objective": 90.009878614,
+   "gz_bytes": 1459587
+  },
+  "b1c1s1": {
+   "status": "optimal",
+   "objective": 24544.25,
+   "gz_bytes": 72442
+  },
+  "bab2": {
+   "status": "optimal",
+   "objective": -357544.3115,
+   "gz_bytes": 8231597
+  },
+  "bab6": {
+   "status": "optimal",
+   "objective": -284248.2307000001,
+   "gz_bytes": 5396522
   },
   "beasleyC3": {
    "status": "optimal",
@@ -60,7 +96,8 @@
     "objective": 754.0000000000002,
     "time": 16.23,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 35144
   },
   "binkar10_1": {
    "status": "optimal",
@@ -77,15 +114,43 @@
     "time_limit": 300
    },
    "note": "Official .solu 6741.38002 is only reached by violating integrality/bounds by up to 8.2e-7 on 7 variables (inside a 1e-6 tolerance). With integrality enforced at 1e-6, HiGHS 1.15 and SCIP 10 and ours all prove 6742.200024; that value is used as the reference (2026-11-02).",
-   "solu_official": 6741.38002393972
+   "solu_official": 6741.38002393972,
+   "gz_bytes": 30533
+  },
+  "blp-ar98": {
+   "status": "optimal",
+   "objective": 6205.2147104,
+   "gz_bytes": 1006691
   },
   "blp-ic98": {
    "status": "optimal",
-   "objective": 4491.44758395
+   "objective": 4491.44758395,
+   "gz_bytes": 944213
+  },
+  "bnatt400": {
+   "status": "optimal",
+   "objective": 1.0,
+   "gz_bytes": 125909
+  },
+  "bnatt500": {
+   "status": "infeasible",
+   "objective": null,
+   "gz_bytes": 154193
   },
   "bppc4-08": {
    "status": "optimal",
-   "objective": 53.0
+   "objective": 53.0,
+   "gz_bytes": 77423
+  },
+  "brazil3": {
+   "status": "optimal",
+   "objective": 24.0,
+   "gz_bytes": 671862
+  },
+  "buildingenergy": {
+   "status": "optimal",
+   "objective": 33283.853236,
+   "gz_bytes": 4483468
   },
   "cbs-cta": {
    "status": "optimal",
@@ -100,11 +165,28 @@
     "objective": 0.0,
     "time": 46.0,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 455701
+  },
+  "chromaticindex1024-7": {
+   "status": "optimal",
+   "objective": 4.0,
+   "gz_bytes": 2229056
   },
   "chromaticindex512-7": {
    "status": "optimal",
-   "objective": 4.0
+   "objective": 4.0,
+   "gz_bytes": 1073824
+  },
+  "cmflsp50-24-8-8": {
+   "status": "optimal",
+   "objective": 55789389.886,
+   "gz_bytes": 852638
+  },
+  "co-100": {
+   "status": "optimal",
+   "objective": 2639942.06,
+   "gz_bytes": 7287957
   },
   "cod105": {
    "status": "optimal",
@@ -119,19 +201,48 @@
     "objective": -11.999999999999298,
     "time": 82.68,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 200503
+  },
+  "comp07-2idx": {
+   "status": "optimal",
+   "objective": 6.0,
+   "gz_bytes": 537855
+  },
+  "comp21-2idx": {
+   "status": "optimal",
+   "objective": 74.0,
+   "gz_bytes": 359953
   },
   "cost266-UUE": {
    "status": "optimal",
-   "objective": 25148940.55999998
+   "objective": 25148940.55999998,
+   "gz_bytes": 103586
+  },
+  "cryptanalysiskb128n5obj14": {
+   "status": "infeasible",
+   "objective": null,
+   "gz_bytes": 1765615
+  },
+  "cryptanalysiskb128n5obj16": {
+   "status": "optimal",
+   "objective": 0.0,
+   "gz_bytes": 1765584
   },
   "csched007": {
    "status": "optimal",
-   "objective": 350.9999999999955
+   "objective": 350.9999999999955,
+   "gz_bytes": 34830
   },
   "csched008": {
    "status": "optimal",
-   "objective": 173.0
+   "objective": 173.0,
+   "gz_bytes": 30990
+  },
+  "cvs16r128-89": {
+   "status": "optimal",
+   "objective": -97.0,
+   "gz_bytes": 84844
   },
   "dano3_3": {
    "status": "optimal",
@@ -146,11 +257,13 @@
     "objective": 576.3446330306425,
     "time": 79.63,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 267627
   },
   "dano3_5": {
    "status": "optimal",
-   "objective": 576.9249159565619
+   "objective": 576.9249159565619,
+   "gz_bytes": 267647
   },
   "decomp2": {
    "status": "optimal",
@@ -165,7 +278,8 @@
     "objective": -160.0,
     "time": 4.9,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 346146
   },
   "drayage-100-23": {
    "status": "optimal",
@@ -180,7 +294,8 @@
     "objective": 103333.87407302856,
     "time": 0.63,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 250746
   },
   "drayage-25-23": {
    "status": "optimal",
@@ -195,7 +310,13 @@
     "objective": 101282.64701843262,
     "time": 1.79,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 250750
+  },
+  "dws008-01": {
+   "status": "optimal",
+   "objective": 37412.60458794508,
+   "gz_bytes": 362618
   },
   "eil33-2": {
    "status": "optimal",
@@ -210,7 +331,13 @@
     "objective": 934.0079160000269,
     "time": 130.05,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 143418
+  },
+  "eilA101-2": {
+   "status": "optimal",
+   "objective": 880.9201079999999,
+   "gz_bytes": 3221783
   },
   "enlight_hard": {
    "status": "optimal",
@@ -225,7 +352,18 @@
     "objective": 37.00000000000006,
     "time": 13.08,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 3872
+  },
+  "ex10": {
+   "status": "optimal",
+   "objective": 100.0,
+   "gz_bytes": 5374321
+  },
+  "ex9": {
+   "status": "optimal",
+   "objective": 81.0,
+   "gz_bytes": 2432094
   },
   "exp-1-500-5-5": {
    "status": "optimal",
@@ -240,11 +378,28 @@
     "objective": 65886.99999999965,
     "time": 5.4,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 19201
+  },
+  "fast0507": {
+   "status": "optimal",
+   "objective": 174.0,
+   "gz_bytes": 1282725
+  },
+  "fastxgemm-n2r6s0t2": {
+   "status": "optimal",
+   "objective": 230.0,
+   "gz_bytes": 112266
+  },
+  "fhnw-binpack4-4": {
+   "status": "infeasible",
+   "objective": null,
+   "gz_bytes": 14138
   },
   "fhnw-binpack4-48": {
    "status": "optimal",
-   "objective": 0.0
+   "objective": 0.0,
+   "gz_bytes": 101816
   },
   "fiball": {
    "status": "optimal",
@@ -259,31 +414,58 @@
     "objective": 138.0,
     "time": 112.79,
     "time_limit": 300
-   }
+   },
+   "gz_bytes": 475984
+  },
+  "gen-ip002": {
+   "status": "optimal",
+   "objective": -4783.733392,
+   "gz_bytes": 10577
   },
   "gen-ip054": {
    "status": "optimal",
-   "objective": 6840.96564179
+   "objective": 6840.96564179,
+   "gz_bytes": 5884
   },
   "germanrr": {
    "status": "optimal",
-   "objective": 47095869.649
+   "objective": 47095869.649,
+   "gz_bytes": 750368
+  },
+  "gfd-schedulen180f7d50m30k18": {
+   "status": "optimal",
+   "objective": 1.0,
+   "gz_bytes": 7284293
+  },
+  "glass-sc": {
+   "status": "optimal",
+   "objective": 23.0,
+   "gz_bytes": 244253
   },
   "glass4": {
    "status": "optimal",
-   "objective": 1200012599.972384
+   "objective": 1200012599.972384,
+   "gz_bytes": 12661
   },
   "gmu-35-40": {
    "status": "optimal",
-   "objective": -2406733.3688
+   "objective": -2406733.3688,
+   "gz_bytes": 42251
   },
   "gmu-35-50": {
    "status": "optimal",
-   "objective": -2607958.33
+   "objective": -2607958.33,
+   "gz_bytes": 68420
+  },
+  "graph20-20-1rand": {
+   "status": "optimal",
+   "objective": -9.0,
+   "gz_bytes": 171179
   },
   "graphdraw-domain": {
    "status": "optimal",
-   "objective": 19685.99997550038
+   "objective": 19685.99997550038,
+   "gz_bytes": 18092
   },
   "h80x6320d": {
    "status": "optimal",
@@ -298,15 +480,33 @@
     "objective": 6382.099049980758,
     "time": 9.93,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 201388
+  },
+  "highschool1-aigio": {
+   "status": "optimal",
+   "objective": 0.0,
+   "gz_bytes": 7464764
+  },
+  "hypothyroid-k1": {
+   "status": "optimal",
+   "objective": -2851.0,
+   "gz_bytes": 1272773
   },
   "ic97_potential": {
    "status": "optimal",
-   "objective": 3941.99993090225
+   "objective": 3941.99993090225,
+   "gz_bytes": 26260
   },
   "icir97_tension": {
    "status": "optimal",
-   "objective": 6375.0
+   "objective": 6375.0,
+   "gz_bytes": 106088
+  },
+  "irish-electricity": {
+   "status": "optimal",
+   "objective": 3723497.591396,
+   "gz_bytes": 2557007
   },
   "irp": {
    "status": "optimal",
@@ -321,19 +521,68 @@
     "objective": 12159.492836,
     "time": 16.39,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 505962
+  },
+  "istanbul-no-cutoff": {
+   "status": "optimal",
+   "objective": 204.08170701,
+   "gz_bytes": 398498
+  },
+  "k1mushroom": {
+   "status": "optimal",
+   "objective": -3288.0,
+   "gz_bytes": 4664966
+  },
+  "lectsched-5-obj": {
+   "status": "optimal",
+   "objective": 24.0,
+   "gz_bytes": 1029612
   },
   "leo1": {
    "status": "optimal",
-   "objective": 404227536.16
+   "objective": 404227536.16,
+   "gz_bytes": 499587
+  },
+  "leo2": {
+   "status": "optimal",
+   "objective": 404077441.12,
+   "gz_bytes": 837528
   },
   "lotsize": {
    "status": "optimal",
-   "objective": 1480195.0
+   "objective": 1480195.0,
+   "gz_bytes": 48803
+  },
+  "mad": {
+   "status": "optimal",
+   "objective": 0.0268,
+   "gz_bytes": 16882
+  },
+  "map10": {
+   "status": "optimal",
+   "objective": -495.0,
+   "gz_bytes": 4059095
+  },
+  "map16715-04": {
+   "status": "optimal",
+   "objective": -111.0,
+   "gz_bytes": 4059102
+  },
+  "markshare2": {
+   "status": "optimal",
+   "objective": 1.0,
+   "gz_bytes": 2179
+  },
+  "markshare_4_0": {
+   "status": "optimal",
+   "objective": 1.0,
+   "gz_bytes": 797
   },
   "mas74": {
    "status": "optimal",
-   "objective": 11801.18572
+   "objective": 11801.18572,
+   "gz_bytes": 9840
   },
   "mas76": {
    "status": "optimal",
@@ -348,7 +597,8 @@
     "objective": 40005.05414074198,
     "time": 83.44,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 9186
   },
   "mc11": {
    "status": "optimal",
@@ -363,11 +613,13 @@
     "objective": 11689.0,
     "time": 25.26,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 40584
   },
   "mcsched": {
    "status": "optimal",
-   "objective": 211913.0
+   "objective": 211913.0,
+   "gz_bytes": 45739
   },
   "mik-250-20-75-4": {
    "status": "optimal",
@@ -382,11 +634,23 @@
     "objective": -52301.00000000069,
     "time": 9.33,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 45471
   },
   "milo-v12-6-r2-40-1": {
    "status": "optimal",
-   "objective": 326481.14282799
+   "objective": 326481.14282799,
+   "gz_bytes": 98049
+  },
+  "momentum1": {
+   "status": "optimal",
+   "objective": 109143.4935,
+   "gz_bytes": 725301
+  },
+  "mushroom-best": {
+   "status": "optimal",
+   "objective": 0.0553337612,
+   "gz_bytes": 746435
   },
   "mzzv11": {
    "status": "optimal",
@@ -401,15 +665,23 @@
     "objective": -21718.0,
     "time": 74.73,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 476395
   },
   "mzzv42z": {
    "status": "optimal",
-   "objective": -20540.0
+   "objective": -20540.0,
+   "gz_bytes": 517017
   },
   "n2seq36q": {
    "status": "optimal",
-   "objective": 52200.0
+   "objective": 52200.0,
+   "gz_bytes": 828356
+  },
+  "n3div36": {
+   "status": "optimal",
+   "objective": 130800.0,
+   "gz_bytes": 1546075
   },
   "n5-3": {
    "status": "optimal",
@@ -424,11 +696,13 @@
     "objective": 8105.000000000005,
     "time": 17.32,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 47192
   },
   "neos-1122047": {
    "status": "optimal",
-   "objective": 161.0
+   "objective": 161.0,
+   "gz_bytes": 1103323
   },
   "neos-1171448": {
    "status": "optimal",
@@ -443,11 +717,18 @@
     "objective": -308.9999999999999,
     "time": 114.06,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 568026
   },
   "neos-1171737": {
    "status": "optimal",
-   "objective": -195.0
+   "objective": -195.0,
+   "gz_bytes": 218965
+  },
+  "neos-1354092": {
+   "status": "optimal",
+   "objective": 46.0,
+   "gz_bytes": 521771
   },
   "neos-1445765": {
    "status": "optimal",
@@ -462,11 +743,13 @@
     "objective": -17783.0,
     "time": 52.69,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 217931
   },
   "neos-1456979": {
    "status": "optimal",
-   "objective": 176.0
+   "objective": 176.0,
+   "gz_bytes": 198207
   },
   "neos-1582420": {
    "status": "optimal",
@@ -481,7 +764,23 @@
     "objective": 90.99999999999993,
     "time": 17.95,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 180792
+  },
+  "neos-2075418-temuka": {
+   "status": "infeasible",
+   "objective": null,
+   "gz_bytes": 23443590
+  },
+  "neos-2657525-crna": {
+   "status": "optimal",
+   "objective": 1.810748,
+   "gz_bytes": 12286
+  },
+  "neos-2746589-doon": {
+   "status": "optimal",
+   "objective": 2008.199999999999,
+   "gz_bytes": 1460084
   },
   "neos-2978193-inde": {
    "status": "optimal",
@@ -496,11 +795,28 @@
     "objective": -2.3880616860000012,
     "time": 27.83,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 290433
+  },
+  "neos-2987310-joes": {
+   "status": "optimal",
+   "objective": -607702988.3,
+   "gz_bytes": 2192331
   },
   "neos-3004026-krka": {
    "status": "optimal",
-   "objective": 0.0
+   "objective": 0.0,
+   "gz_bytes": 292209
+  },
+  "neos-3024952-loue": {
+   "status": "optimal",
+   "objective": 26756.0,
+   "gz_bytes": 108040
+  },
+  "neos-3046615-murg": {
+   "status": "optimal",
+   "objective": 1600.0,
+   "gz_bytes": 8706
   },
   "neos-3083819-nubu": {
    "status": "optimal",
@@ -515,11 +831,13 @@
     "objective": 6307996.000000001,
     "time": 6.7,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 156714
   },
   "neos-3216931-puriri": {
    "status": "optimal",
-   "objective": 71320.0
+   "objective": 71320.0,
+   "gz_bytes": 361129
   },
   "neos-3381206-awhea": {
    "status": "optimal",
@@ -534,7 +852,23 @@
     "objective": 453.0,
     "time": 0.48,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 23793
+  },
+  "neos-3402294-bobin": {
+   "status": "optimal",
+   "objective": 0.06724999999999949,
+   "gz_bytes": 8835384
+  },
+  "neos-3402454-bohle": {
+   "status": "infeasible",
+   "objective": null,
+   "gz_bytes": 40228951
+  },
+  "neos-3555904-turama": {
+   "status": "optimal",
+   "objective": -34.7,
+   "gz_bytes": 4000934
   },
   "neos-3627168-kasai": {
    "status": "optimal",
@@ -549,27 +883,128 @@
     "objective": 988585.6199999939,
     "time": 58.19,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 29391
+  },
+  "neos-3656078-kumeu": {
+   "status": "optimal",
+   "objective": -13172.2,
+   "gz_bytes": 381769
+  },
+  "neos-3754480-nidda": {
+   "status": "optimal",
+   "objective": 12939.7540104743,
+   "gz_bytes": 11954
+  },
+  "neos-3988577-wolgan": {
+   "status": "infeasible",
+   "objective": null,
+   "gz_bytes": 1331706
+  },
+  "neos-4300652-rahue": {
+   "status": "optimal",
+   "objective": 2.1416,
+   "gz_bytes": 1098496
   },
   "neos-4338804-snowy": {
    "status": "optimal",
-   "objective": 1471.0
+   "objective": 1471.0,
+   "gz_bytes": 37835
   },
   "neos-4387871-tavua": {
    "status": "optimal",
-   "objective": 33.384729927
+   "objective": 33.384729927,
+   "gz_bytes": 119012
+  },
+  "neos-4413714-turia": {
+   "status": "optimal",
+   "objective": 45.3701670199998,
+   "gz_bytes": 4388361
+  },
+  "neos-4532248-waihi": {
+   "status": "optimal",
+   "objective": 61.59999999999999,
+   "gz_bytes": 3067547
+  },
+  "neos-4647030-tutaki": {
+   "status": "optimal",
+   "objective": 27265.70599999996,
+   "gz_bytes": 10340987
+  },
+  "neos-4722843-widden": {
+   "status": "optimal",
+   "objective": 25009.662227,
+   "gz_bytes": 1761006
   },
   "neos-4738912-atrato": {
    "status": "optimal",
-   "objective": 283627956.595
+   "objective": 283627956.595,
+   "gz_bytes": 112252
+  },
+  "neos-4763324-toguru": {
+   "status": "optimal",
+   "objective": 1613.03884585,
+   "gz_bytes": 2926380
   },
   "neos-4954672-berkel": {
    "status": "optimal",
-   "objective": 2612710.0
+   "objective": 2612710.0,
+   "gz_bytes": 42946
+  },
+  "neos-5049753-cuanza": {
+   "status": "optimal",
+   "objective": 561.9999971689,
+   "gz_bytes": 7265612
+  },
+  "neos-5052403-cygnet": {
+   "status": "optimal",
+   "objective": 182.0,
+   "gz_bytes": 14440631
+  },
+  "neos-5093327-huahum": {
+   "status": "optimal",
+   "objective": 6259.999997125895,
+   "gz_bytes": 2654598
+  },
+  "neos-5104907-jarama": {
+   "status": "optimal",
+   "objective": 935.0,
+   "gz_bytes": 10470856
   },
   "neos-5107597-kakapo": {
    "status": "optimal",
-   "objective": 3644.99999999952
+   "objective": 3644.99999999952,
+   "gz_bytes": 118273
+  },
+  "neos-5114902-kasavu": {
+   "status": "optimal",
+   "objective": 655.0,
+   "gz_bytes": 21617326
+  },
+  "neos-5188808-nattai": {
+   "status": "optimal",
+   "objective": 0.110283622999984,
+   "gz_bytes": 602163
+  },
+  "neos-5195221-niemur": {
+   "status": "optimal",
+   "objective": 0.0038354326,
+   "gz_bytes": 877067
+  },
+  "neos-631710": {
+   "status": "optimal",
+   "objective": 203.0,
+   "gz_bytes": 4433560
+  },
+  "neos-662469": {
+   "status": "optimal",
+   "objective": 184379.9999999999,
+   "gz_bytes": 723284
+  },
+  "neos-787933": {
+   "status": "optimal",
+   "objective": 30.0,
+   "gz_bytes": 1521295
   },
   "neos-827175": {
    "status": "optimal",
@@ -584,7 +1019,23 @@
     "objective": 112.00152,
     "time": 3.17,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 590523
+  },
+  "neos-848589": {
+   "status": "optimal",
+   "objective": 2351.40309999697,
+   "gz_bytes": 6360152
+  },
+  "neos-860300": {
+   "status": "optimal",
+   "objective": 3200.999999999998,
+   "gz_bytes": 994991
+  },
+  "neos-873061": {
+   "status": "optimal",
+   "objective": 113.6562385063,
+   "gz_bytes": 2817318
   },
   "neos-911970": {
    "status": "optimal",
@@ -599,11 +1050,13 @@
     "objective": 54.75999999999199,
     "time": 6.62,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 16586
   },
   "neos-933966": {
    "status": "optimal",
-   "objective": 318.0
+   "objective": 318.0,
+   "gz_bytes": 1008832
   },
   "neos-950242": {
    "status": "optimal",
@@ -618,11 +1071,18 @@
     "objective": 3.999999999999986,
     "time": 20.46,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 521081
+  },
+  "neos-957323": {
+   "status": "optimal",
+   "objective": -237.7566815,
+   "gz_bytes": 1950076
   },
   "neos-960392": {
    "status": "optimal",
-   "objective": -238.0
+   "objective": -238.0,
+   "gz_bytes": 849084
   },
   "neos17": {
    "status": "optimal",
@@ -637,7 +1097,8 @@
     "objective": 0.15000257742257742,
     "time": 5.58,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 76383
   },
   "neos5": {
    "status": "optimal",
@@ -652,7 +1113,13 @@
     "objective": 14.999999999984242,
     "time": 58.32,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 5686
+  },
+  "neos8": {
+   "status": "optimal",
+   "objective": -3719.0,
+   "gz_bytes": 1291940
   },
   "neos859080": {
    "status": "infeasible",
@@ -667,11 +1134,28 @@
     "objective": null,
     "time": 0.85,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 6320
+  },
+  "net12": {
+   "status": "optimal",
+   "objective": 214.0,
+   "gz_bytes": 456877
+  },
+  "netdiversion": {
+   "status": "optimal",
+   "objective": 242.0,
+   "gz_bytes": 3523559
   },
   "nexp-150-20-8-5": {
    "status": "optimal",
-   "objective": 231.0
+   "objective": 231.0,
+   "gz_bytes": 257609
+  },
+  "ns1116954": {
+   "status": "optimal",
+   "objective": 0.0,
+   "gz_bytes": 2199181
   },
   "ns1208400": {
    "status": "optimal",
@@ -686,11 +1170,28 @@
     "objective": 2.000000000000062,
     "time": 52.32,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 258129
+  },
+  "ns1644855": {
+   "status": "optimal",
+   "objective": -1524.33333333333,
+   "gz_bytes": 5427468
+  },
+  "ns1760995": {
+   "status": "optimal",
+   "objective": -549.21438505,
+   "gz_bytes": 8844497
   },
   "ns1830653": {
    "status": "optimal",
-   "objective": 20622.0
+   "objective": 20622.0,
+   "gz_bytes": 339657
+  },
+  "ns1952667": {
+   "status": "optimal",
+   "objective": 0.0,
+   "gz_bytes": 1077480
   },
   "nu25-pr12": {
    "status": "optimal",
@@ -705,7 +1206,28 @@
     "objective": 53905.0,
     "time": 2.46,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 115033
+  },
+  "nursesched-medium-hint03": {
+   "status": "optimal",
+   "objective": 115.0,
+   "gz_bytes": 2832596
+  },
+  "nursesched-sprint02": {
+   "status": "optimal",
+   "objective": 57.99999999999999,
+   "gz_bytes": 888719
+  },
+  "nw04": {
+   "status": "optimal",
+   "objective": 16862.0,
+   "gz_bytes": 1875816
+  },
+  "opm2-z10-s4": {
+   "status": "optimal",
+   "objective": -33269.0,
+   "gz_bytes": 2054440
   },
   "p200x1188c": {
    "status": "optimal",
@@ -720,7 +1242,13 @@
     "objective": 15077.999999999996,
     "time": 0.39,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 36690
+  },
+  "peg-solitaire-a3": {
+   "status": "optimal",
+   "objective": 1.0,
+   "gz_bytes": 188324
   },
   "pg": {
    "status": "optimal",
@@ -735,11 +1263,23 @@
     "objective": -8674.342607117189,
     "time": 3.22,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 40207
   },
   "pg5_34": {
    "status": "optimal",
-   "objective": -14339.35345
+   "objective": -14339.35345,
+   "gz_bytes": 46778
+  },
+  "physiciansched3-3": {
+   "status": "optimal",
+   "objective": 2623271.326667,
+   "gz_bytes": 5255220
+  },
+  "physiciansched6-2": {
+   "status": "optimal",
+   "objective": 49324.0,
+   "gz_bytes": 2941739
   },
   "piperout-08": {
    "status": "optimal",
@@ -754,7 +1294,8 @@
     "objective": 125055.0,
     "time": 12.38,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 333612
   },
   "piperout-27": {
    "status": "optimal",
@@ -769,11 +1310,23 @@
     "objective": 8124.0,
     "time": 18.8,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 397055
   },
   "pk1": {
    "status": "optimal",
-   "objective": 11.0
+   "objective": 11.0,
+   "gz_bytes": 4005
+  },
+  "proteindesign121hz512p9": {
+   "status": "optimal",
+   "objective": 1473.0,
+   "gz_bytes": 2697139
+  },
+  "proteindesign122trx11p8": {
+   "status": "optimal",
+   "objective": 1747.0,
+   "gz_bytes": 2158150
   },
   "qap10": {
    "status": "optimal",
@@ -788,15 +1341,48 @@
     "objective": 339.9999999999973,
     "time": 40.33,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 82641
+  },
+  "radiationm18-12-05": {
+   "status": "optimal",
+   "objective": 17566.0,
+   "gz_bytes": 787112
+  },
+  "radiationm40-10-02": {
+   "status": "optimal",
+   "objective": 155328.0,
+   "gz_bytes": 3321729
+  },
+  "rail01": {
+   "status": "optimal",
+   "objective": -70.5699643,
+   "gz_bytes": 2030414
+  },
+  "rail02": {
+   "status": "optimal",
+   "objective": -200.4499077,
+   "gz_bytes": 4244101
+  },
+  "rail507": {
+   "status": "optimal",
+   "objective": 174.0,
+   "gz_bytes": 1857299
   },
   "ran14x18-disj-8": {
    "status": "optimal",
-   "objective": 3712.0
+   "objective": 3712.0,
+   "gz_bytes": 58880
+  },
+  "rd-rplusc-21": {
+   "status": "optimal",
+   "objective": 165395.275295,
+   "gz_bytes": 3957712
   },
   "reblock115": {
    "status": "optimal",
-   "objective": -36800603.2332
+   "objective": -36800603.2332,
+   "gz_bytes": 98516
   },
   "rmatr100-p10": {
    "status": "optimal",
@@ -811,23 +1397,43 @@
     "objective": 422.9999999999975,
     "time": 57.68,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 153825
   },
   "rmatr200-p5": {
    "status": "optimal",
-   "objective": 4521.0
+   "objective": 4521.0,
+   "gz_bytes": 779587
   },
   "rocI-4-11": {
    "status": "optimal",
-   "objective": -6020203.0
+   "objective": -6020203.0,
+   "gz_bytes": 212318
+  },
+  "rocII-5-11": {
+   "status": "optimal",
+   "objective": -6.675504731538,
+   "gz_bytes": 1376352
   },
   "rococoB10-011000": {
    "status": "optimal",
-   "objective": 19449.0
+   "objective": 19449.0,
+   "gz_bytes": 102783
   },
   "rococoC10-001000": {
    "status": "optimal",
-   "objective": 11460.0
+   "objective": 11460.0,
+   "gz_bytes": 68392
+  },
+  "roi2alpha3n4": {
+   "status": "optimal",
+   "objective": -63.20849503,
+   "gz_bytes": 7054282
+  },
+  "roi5alpha10n8": {
+   "status": "optimal",
+   "objective": -52.322274351,
+   "gz_bytes": 18877110
   },
   "roll3000": {
    "status": "optimal",
@@ -842,11 +1448,43 @@
     "objective": 12890.000000000633,
     "time": 24.9,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 103405
+  },
+  "s100": {
+   "status": "optimal",
+   "objective": -0.1697235270583,
+   "gz_bytes": 11354025
+  },
+  "s250r10": {
+   "status": "optimal",
+   "objective": -0.1717804834232,
+   "gz_bytes": 9010683
+  },
+  "satellites2-40": {
+   "status": "optimal",
+   "objective": -19.0,
+   "gz_bytes": 1166802
+  },
+  "satellites2-60-fs": {
+   "status": "optimal",
+   "objective": -19.0000000001,
+   "gz_bytes": 626369
+  },
+  "savsched1": {
+   "status": "optimal",
+   "objective": 3217.7,
+   "gz_bytes": 10320747
   },
   "sct2": {
    "status": "optimal",
-   "objective": -230.9891623
+   "objective": -230.9891623,
+   "gz_bytes": 122939
+  },
+  "seymour": {
+   "status": "optimal",
+   "objective": 423.0,
+   "gz_bytes": 142768
   },
   "seymour1": {
    "status": "optimal",
@@ -861,7 +1499,28 @@
     "objective": 410.7637013945249,
     "time": 96.9,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 143198
+  },
+  "sing326": {
+   "status": "optimal",
+   "objective": 7753674.85376,
+   "gz_bytes": 1530805
+  },
+  "sing44": {
+   "status": "optimal",
+   "objective": 8128831.1772,
+   "gz_bytes": 1608025
+  },
+  "snp-02-004-104": {
+   "status": "optimal",
+   "objective": 586803238.6567289,
+   "gz_bytes": 3682882
+  },
+  "sorrell3": {
+   "status": "optimal",
+   "objective": -16.0,
+   "gz_bytes": 2757231
   },
   "sp150x300d": {
    "status": "optimal",
@@ -876,19 +1535,88 @@
     "objective": 69.0,
     "time": 0.05,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 8719
+  },
+  "sp97ar": {
+   "status": "optimal",
+   "objective": 660705645.759,
+   "gz_bytes": 1258683
+  },
+  "sp98ar": {
+   "status": "optimal",
+   "objective": 529740623.2,
+   "gz_bytes": 1744913
+  },
+  "splice1k1": {
+   "status": "optimal",
+   "objective": -394.0,
+   "gz_bytes": 4957833
+  },
+  "square41": {
+   "status": "optimal",
+   "objective": 15.0,
+   "gz_bytes": 41163139
+  },
+  "square47": {
+   "status": "optimal",
+   "objective": 15.9999999997877,
+   "gz_bytes": 81570680
+  },
+  "supportcase10": {
+   "status": "optimal",
+   "objective": 7.0,
+   "gz_bytes": 2771990
+  },
+  "supportcase12": {
+   "status": "optimal",
+   "objective": -7559.533053817,
+   "gz_bytes": 13212147
   },
   "supportcase18": {
    "status": "optimal",
-   "objective": 48.0
+   "objective": 48.0,
+   "gz_bytes": 139221
+  },
+  "supportcase19": {
+   "status": "optimal",
+   "objective": 12677205.99992052,
+   "gz_bytes": 28123548
+  },
+  "supportcase22": {
+   "status": "best_known",
+   "objective": 110.0,
+   "gz_bytes": 7906114
   },
   "supportcase26": {
    "status": "optimal",
-   "objective": 1745.123813
+   "objective": 1745.123813,
+   "gz_bytes": 16561
+  },
+  "supportcase33": {
+   "status": "optimal",
+   "objective": -345.0,
+   "gz_bytes": 1179208
   },
   "supportcase40": {
    "status": "optimal",
-   "objective": 24256.3122898
+   "objective": 24256.3122898,
+   "gz_bytes": 799627
+  },
+  "supportcase42": {
+   "status": "optimal",
+   "objective": 7.75863072227,
+   "gz_bytes": 2359987
+  },
+  "supportcase6": {
+   "status": "optimal",
+   "objective": 51906.47737,
+   "gz_bytes": 4280118
+  },
+  "supportcase7": {
+   "status": "optimal",
+   "objective": -1132.223177,
+   "gz_bytes": 8836933
   },
   "swath1": {
    "status": "optimal",
@@ -903,7 +1631,8 @@
     "objective": 379.07129574999965,
     "time": 18.15,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 183404
   },
   "swath3": {
    "status": "optimal",
@@ -918,7 +1647,18 @@
     "objective": 397.76134364999996,
     "time": 100.66,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 183422
+  },
+  "tbfp-network": {
+   "status": "optimal",
+   "objective": 24.16319444,
+   "gz_bytes": 894096
+  },
+  "thor50dday": {
+   "status": "optimal",
+   "objective": 40417.0,
+   "gz_bytes": 1869276
   },
   "timtab1": {
    "status": "optimal",
@@ -933,27 +1673,63 @@
     "objective": 764771.9999997799,
     "time": 51.0,
     "time_limit": 120
-   }
+   },
+   "gz_bytes": 7077
   },
   "tr12-30": {
    "status": "optimal",
-   "objective": 130595.9999999999
+   "objective": 130595.9999999999,
+   "gz_bytes": 19895
+  },
+  "traininstance2": {
+   "status": "optimal",
+   "objective": 71820.0,
+   "gz_bytes": 329354
+  },
+  "traininstance6": {
+   "status": "optimal",
+   "objective": 28290.0,
+   "gz_bytes": 261304
   },
   "trento1": {
    "status": "optimal",
-   "objective": 5189487.0
+   "objective": 5189487.0,
+   "gz_bytes": 432430
+  },
+  "triptim1": {
+   "status": "optimal",
+   "objective": 22.8680999999999,
+   "gz_bytes": 1944089
+  },
+  "uccase12": {
+   "status": "optimal",
+   "objective": 11507.4050616,
+   "gz_bytes": 2932050
+  },
+  "uccase9": {
+   "status": "optimal",
+   "objective": 10993.131409,
+   "gz_bytes": 1914738
   },
   "uct-subprob": {
    "status": "optimal",
-   "objective": 314.0
+   "objective": 314.0,
+   "gz_bytes": 74931
   },
   "unitcal_7": {
    "status": "optimal",
-   "objective": 19635558.244
+   "objective": 19635558.244,
+   "gz_bytes": 781676
+  },
+  "var-smallemery-m6j6": {
+   "status": "optimal",
+   "objective": -149.37501,
+   "gz_bytes": 3069394
   },
   "wachplan": {
    "status": "optimal",
-   "objective": -8.0
+   "objective": -8.0,
+   "gz_bytes": 332043
   }
  },
  "highs_note": "HiGHS 1.15 single-thread, rel/abs gap 1e-9, Apple M-series, 3-6 concurrent solves; time_limit is the limit used in the selection run",
@@ -1114,6 +1890,248 @@
    "trento1",
    "uct-subprob",
    "unitcal_7",
+   "wachplan"
+  ],
+  "benchmark": [
+   "30n20b8",
+   "50v-10",
+   "academictimetablesmall",
+   "air05",
+   "app1-1",
+   "app1-2",
+   "assign1-5-8",
+   "atlanta-ip",
+   "b1c1s1",
+   "bab2",
+   "bab6",
+   "beasleyC3",
+   "binkar10_1",
+   "blp-ar98",
+   "blp-ic98",
+   "bnatt400",
+   "bnatt500",
+   "bppc4-08",
+   "brazil3",
+   "buildingenergy",
+   "cbs-cta",
+   "chromaticindex1024-7",
+   "chromaticindex512-7",
+   "cmflsp50-24-8-8",
+   "CMS750_4",
+   "co-100",
+   "cod105",
+   "comp07-2idx",
+   "comp21-2idx",
+   "cost266-UUE",
+   "cryptanalysiskb128n5obj14",
+   "cryptanalysiskb128n5obj16",
+   "csched007",
+   "csched008",
+   "cvs16r128-89",
+   "dano3_3",
+   "dano3_5",
+   "decomp2",
+   "drayage-100-23",
+   "drayage-25-23",
+   "dws008-01",
+   "eil33-2",
+   "eilA101-2",
+   "enlight_hard",
+   "ex10",
+   "ex9",
+   "exp-1-500-5-5",
+   "fast0507",
+   "fastxgemm-n2r6s0t2",
+   "fhnw-binpack4-4",
+   "fhnw-binpack4-48",
+   "fiball",
+   "gen-ip002",
+   "gen-ip054",
+   "germanrr",
+   "gfd-schedulen180f7d50m30k18",
+   "glass-sc",
+   "glass4",
+   "gmu-35-40",
+   "gmu-35-50",
+   "graph20-20-1rand",
+   "graphdraw-domain",
+   "h80x6320d",
+   "highschool1-aigio",
+   "hypothyroid-k1",
+   "ic97_potential",
+   "icir97_tension",
+   "irish-electricity",
+   "irp",
+   "istanbul-no-cutoff",
+   "k1mushroom",
+   "lectsched-5-obj",
+   "leo1",
+   "leo2",
+   "lotsize",
+   "mad",
+   "map10",
+   "map16715-04",
+   "markshare_4_0",
+   "markshare2",
+   "mas74",
+   "mas76",
+   "mc11",
+   "mcsched",
+   "mik-250-20-75-4",
+   "milo-v12-6-r2-40-1",
+   "momentum1",
+   "mushroom-best",
+   "mzzv11",
+   "mzzv42z",
+   "n2seq36q",
+   "n3div36",
+   "n5-3",
+   "neos-1122047",
+   "neos-1171448",
+   "neos-1171737",
+   "neos-1354092",
+   "neos-1445765",
+   "neos-1456979",
+   "neos-1582420",
+   "neos-2075418-temuka",
+   "neos-2657525-crna",
+   "neos-2746589-doon",
+   "neos-2978193-inde",
+   "neos-2987310-joes",
+   "neos-3004026-krka",
+   "neos-3024952-loue",
+   "neos-3046615-murg",
+   "neos-3083819-nubu",
+   "neos-3216931-puriri",
+   "neos-3381206-awhea",
+   "neos-3402294-bobin",
+   "neos-3402454-bohle",
+   "neos-3555904-turama",
+   "neos-3627168-kasai",
+   "neos-3656078-kumeu",
+   "neos-3754480-nidda",
+   "neos-3988577-wolgan",
+   "neos-4300652-rahue",
+   "neos-4338804-snowy",
+   "neos-4387871-tavua",
+   "neos-4413714-turia",
+   "neos-4532248-waihi",
+   "neos-4647030-tutaki",
+   "neos-4722843-widden",
+   "neos-4738912-atrato",
+   "neos-4763324-toguru",
+   "neos-4954672-berkel",
+   "neos-5049753-cuanza",
+   "neos-5052403-cygnet",
+   "neos-5093327-huahum",
+   "neos-5104907-jarama",
+   "neos-5107597-kakapo",
+   "neos-5114902-kasavu",
+   "neos-5188808-nattai",
+   "neos-5195221-niemur",
+   "neos-631710",
+   "neos-662469",
+   "neos-787933",
+   "neos-827175",
+   "neos-848589",
+   "neos-860300",
+   "neos-873061",
+   "neos-911970",
+   "neos-933966",
+   "neos-950242",
+   "neos-957323",
+   "neos-960392",
+   "neos17",
+   "neos5",
+   "neos8",
+   "neos859080",
+   "net12",
+   "netdiversion",
+   "nexp-150-20-8-5",
+   "ns1116954",
+   "ns1208400",
+   "ns1644855",
+   "ns1760995",
+   "ns1830653",
+   "ns1952667",
+   "nu25-pr12",
+   "nursesched-medium-hint03",
+   "nursesched-sprint02",
+   "nw04",
+   "opm2-z10-s4",
+   "p200x1188c",
+   "peg-solitaire-a3",
+   "pg",
+   "pg5_34",
+   "physiciansched3-3",
+   "physiciansched6-2",
+   "piperout-08",
+   "piperout-27",
+   "pk1",
+   "proteindesign121hz512p9",
+   "proteindesign122trx11p8",
+   "qap10",
+   "radiationm18-12-05",
+   "radiationm40-10-02",
+   "rail01",
+   "rail02",
+   "rail507",
+   "ran14x18-disj-8",
+   "rd-rplusc-21",
+   "reblock115",
+   "rmatr100-p10",
+   "rmatr200-p5",
+   "rocI-4-11",
+   "rocII-5-11",
+   "rococoB10-011000",
+   "rococoC10-001000",
+   "roi2alpha3n4",
+   "roi5alpha10n8",
+   "roll3000",
+   "s100",
+   "s250r10",
+   "satellites2-40",
+   "satellites2-60-fs",
+   "savsched1",
+   "sct2",
+   "seymour",
+   "seymour1",
+   "sing326",
+   "sing44",
+   "snp-02-004-104",
+   "sorrell3",
+   "sp150x300d",
+   "sp97ar",
+   "sp98ar",
+   "splice1k1",
+   "square41",
+   "square47",
+   "supportcase10",
+   "supportcase12",
+   "supportcase18",
+   "supportcase19",
+   "supportcase22",
+   "supportcase26",
+   "supportcase33",
+   "supportcase40",
+   "supportcase42",
+   "supportcase6",
+   "supportcase7",
+   "swath1",
+   "swath3",
+   "tbfp-network",
+   "thor50dday",
+   "timtab1",
+   "tr12-30",
+   "traininstance2",
+   "traininstance6",
+   "trento1",
+   "triptim1",
+   "uccase12",
+   "uccase9",
+   "uct-subprob",
+   "unitcal_7",
+   "var-smallemery-m6j6",
    "wachplan"
   ]
  }

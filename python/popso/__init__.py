@@ -16,6 +16,10 @@ package, in the build/ directory of a source checkout, and on the system library
 
 from ._lib import path as library_path
 from .model import (
+    AT_LOWER,
+    AT_UPPER,
+    AT_ZERO,
+    BASIC,
     BINARY,
     CONTINUOUS,
     INF,
@@ -44,7 +48,7 @@ from .model import (
 __version__ = version()
 
 __all__ = [
-    "BINARY", "CONTINUOUS", "INF", "INTEGER", "MAXIMIZE", "MINIMIZE", "PARAMS", "SEMICONTINUOUS", "SEMIINTEGER",
+    "AT_LOWER", "AT_UPPER", "AT_ZERO", "BASIC", "BINARY", "CONTINUOUS", "INF", "INTEGER", "MAXIMIZE", "MINIMIZE", "PARAMS", "SEMICONTINUOUS", "SEMIINTEGER",
     "SOS1", "SOS2", "Constr", "Constraint", "LinExpr", "Model", "Params", "PopsoError", "QuadExpr", "Result", "Var",
     "library_path", "read_lp", "read_mps", "version",
 ]

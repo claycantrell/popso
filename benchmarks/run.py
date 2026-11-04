@@ -15,7 +15,10 @@ reader) and compares status/objective with the reference results.
 Wrong answers (infeasible solution, wrong status, objective mismatch vs the
 reference) are reported loudly and make the exit code 1.
 
-Writes benchmarks/results/<timestamp>_<git-sha>.json and .csv.
+Writes benchmarks/results/<timestamp>_<git-sha>.json and .csv.  While running,
+every finished instance is appended to <timestamp>_<git-sha>.jsonl (removed once
+the .json is written), so an interrupted run loses at most the instance in
+progress and can be continued with  --resume <that .jsonl>  (same command line).
 """
 
 from __future__ import annotations
@@ -30,10 +33,11 @@ import os
 import platform
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -41,7 +45,7 @@ REPO = BENCH.parent
 sys.path.insert(0, str(BENCH))
 
 from lib import mps  # noqa: E402
-from lib.proc import run_capped  # noqa: E402
+from lib.proc import kill_all, run_capped  # noqa: E402
 from lib.solfile import (INF_OR_UNBD, INFEASIBLE, OPTIMAL, TIMELIMIT,  # noqa: E402
                          UNBOUNDED, read_sol)
 
@@ -86,7 +90,10 @@ def expand(patterns):
     for p in patterns:
         pp = Path(p)
         if pp.is_dir():
-            files += sorted(pp.glob("*.mps"))
+            # x.mps and x.mps.gz in one directory: the instance runs once (from x.mps)
+            plain = sorted(pp.glob("*.mps"))
+            names = {inst_name(f) for f in plain}
+            files += plain + [f for f in sorted(pp.glob("*.mps.gz")) if inst_name(f) not in names]
         else:
             files += [Path(f) for f in sorted(glob.glob(p))]
     seen, out = set(), []
@@ -105,6 +112,12 @@ def repo_rel(path) -> str:
         if cand.is_relative_to(REPO):
             return cand.relative_to(REPO).as_posix()
     return os.path.relpath(p, REPO)
+
+
+def _shown(path) -> str:
+    """Path for messages: repository-relative inside the repo, absolute outside."""
+    r = repo_rel(path)
+    return str(Path(path).resolve()) if r.startswith("..") else r
 
 
 def _strip_repo(s: str) -> str:
@@ -166,6 +179,13 @@ def load_references(ref_path, solu_path):
                             # it, while the solutions.json consensus is a time limit)
                             refs[n]["times"][s] = (refs[n]["times"][s][0], r["status"])
                     refs[n].update({"status": e["status"], "objective": z, "bound": z, "source": "reference+miplib"})
+                elif e.get("objective") is not None and refs[n]["status"] != OPTIMAL:
+                    # MIPLIB best known value (not proven): keep the reference status/bound,
+                    # but use the better of the reference incumbent and the best known value
+                    z, rz = e["objective"], refs[n]["objective"]
+                    sense = -1 if d_ref["instances"][n].get("sense") == "max" else 1
+                    if rz is None or sense * (rz - z) > 0:
+                        refs[n].update({"objective": z, "source": "reference+miplib"})
             else:
                 refs[n] = {"status": e["status"], "objective": e.get("objective"),
                            "bound": None, "source": "miplib", "times": {}}
@@ -183,16 +203,15 @@ def better(sense, a, b, tol):
     return sense * (b - a) > tol * max(1.0, abs(b))
 
 
-def classify(model, sol, ref, args):
-    """Return (class, message, details)."""
-    sense = model.sense
+def classify(sense, v, sol, ref, args):
+    """Return (class, message, details).  `v` is the mps.Verification of sol.values
+    (None when the .sol has no values), `sense` the model's objective sense."""
     details = {}
     st = sol.status
     if sol.errors:
         return ERROR, "malformed .sol: " + "; ".join(sol.errors[:3]), details
     has_values = bool(sol.values)
     if has_values:
-        v = mps.verify(model, sol.values, args.feas_tol, args.int_tol)
         details["verify"] = v.to_dict()
         details["objective_recomputed"] = v.objective
         if not v.feasible:
@@ -228,6 +247,9 @@ def classify(model, sol, ref, args):
             return WRONG, f"claimed {st} but reference optimum is {rz}", details
         return UNSOLVED, f"status {sol.raw_status or st}", details
     if rst == INFEASIBLE:
+        if obj is not None:
+            return WRONG, (f"verified feasible solution ({obj}) but the reference says infeasible "
+                           f"(reference wrong, or the solution exploits the tolerances?)"), details
         if st in (INFEASIBLE, INF_OR_UNBD):
             return OK, "", details
         if st in (OPTIMAL, UNBOUNDED):
@@ -239,10 +261,13 @@ def classify(model, sol, ref, args):
         if st in (OPTIMAL, INFEASIBLE):
             return WRONG, f"claimed {st} but reference says unbounded", details
         return UNSOLVED, f"status {sol.raw_status or st}", details
-    # reference has no proven status (time limit / best known only)
+    # reference has no proven status (time limit / MIPLIB best known only): a verified
+    # objective better than the best known one is fine (only a proven dual bound can refute it)
     rb = ref.get("bound")
     if obj is not None and rb is not None and better(sense, obj, rb, tol):
         return WRONG, f"verified objective {obj} beyond reference dual bound {rb}", details
+    if obj is not None and rz is not None and better(sense, obj, rz, tol):
+        details["improves_best_known"] = True
     if st == OPTIMAL:
         if rz is not None and better(sense, rz, obj, tol):
             return WRONG, f"claimed optimal {obj} but a better solution {rz} is known", details
@@ -250,6 +275,48 @@ def classify(model, sol, ref, args):
     if st in (INFEASIBLE, UNBOUNDED) and rz is not None:
         return WRONG, f"claimed {st} but a feasible solution ({rz}) is known", details
     return UNSOLVED, f"status {sol.raw_status or st}", details
+
+
+def verify_worker(argv):
+    """`run.py --verify-worker MPS SOL FEASTOL INTTOL CHECK`: read the model (and verify
+    the .sol when CHECK is 1) in a separate, memory-capped process; prints one JSON line."""
+    path, sol_path, feastol, inttol, check = argv
+    try:
+        model = mps.read_mps(path)
+    except mps.MPSError as e:
+        print(json.dumps({"error": f"cannot read MPS: {e}"}))
+        return 0
+    v = None
+    if check == "1":
+        v = mps.verify(model, read_sol(sol_path).values, float(feastol), float(inttol)).to_dict()
+    print(json.dumps({"sense": model.sense, "verify": v}))
+    return 0
+
+
+def verify_capped(path, sol_path, check, args, tmpdir):
+    """Run verify_worker under the RSS watchdog (--verify-mem-limit): the pure-Python
+    model of a large MIPLIB instance takes several GB.  Returns (sense, Verification
+    or None, error message or None)."""
+    out_path = tmpdir / f"{inst_name(path)}.verify"
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--verify-worker", str(path), str(sol_path),
+           repr(args.feas_tol), repr(args.int_tol), "1" if check else "0"]
+    with open(out_path, "w+") as out:
+        rc, reason, wall, peak = run_capped(cmd, args.verify_timeout, args.verify_mem_limit or None,
+                                            stdout=out, stderr=subprocess.STDOUT)
+        out.seek(0)
+        text = out.read()
+    out_path.unlink()
+    if reason == "memlimit":
+        return None, None, f"killed above {args.verify_mem_limit} MB (raise --verify-mem-limit)"
+    if reason == "timeout":
+        return None, None, f"killed after {wall:.0f} s (raise --verify-timeout)"
+    lines = [ln for ln in text.splitlines() if ln.startswith("{")]
+    if rc != 0 or not lines:
+        return None, None, f"crashed (exit {rc}): {text[-300:]}"
+    d = json.loads(lines[-1])
+    if "error" in d:
+        return None, None, d["error"]
+    return d["sense"], (mps.Verification(**d["verify"]) if d["verify"] else None), None
 
 
 def run_one(path, args, solver_cmd, tmpdir, refs):
@@ -295,12 +362,11 @@ def run_one(path, args, solver_cmd, tmpdir, refs):
         return rec
     sol = read_sol(sol_path)
     rec["status"], rec["objective"] = sol.status, sol.objective
-    try:
-        model = mps.read_mps(path)
-    except mps.MPSError as e:
-        rec.update({"class": ERROR, "message": f"verifier cannot read MPS: {e}"})
+    sense, v, verr = verify_capped(path, sol_path, bool(sol.values) and not sol.errors, args, tmpdir)
+    if verr:
+        rec.update({"class": ERROR, "message": f"verifier: {verr}"})
         return rec
-    cls, msg, details = classify(model, sol, ref, args)
+    cls, msg, details = classify(sense, v, sol, ref, args)
     if sol.status == MEMLIMIT and cls == UNSOLVED:
         cls = MEMLIMIT
     if rc != 0 and cls != WRONG:
@@ -336,7 +402,43 @@ def resolve_solver(spec):
     return cmd
 
 
+RESUME_KEYS = ("time_limit", "threads", "mem_limit_mb", "gap", "opt_tol", "feas_tol", "int_tol")
+
+
+def load_partial(path: Path):
+    """Records of an earlier (possibly interrupted) run: a .jsonl written incrementally
+    (first line {"meta": ...}, then one {"result": ...} per instance; a torn last line
+    from a crash is ignored) or a finished .json.  Returns (meta, [records])."""
+    if path.suffix == ".json":
+        d = json.loads(path.read_text())
+        return d["meta"], d["results"]
+    meta, recs = None, []
+    for ln in path.read_text().splitlines():
+        try:
+            d = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if "meta" in d:
+            meta = d["meta"]
+        elif "result" in d:
+            recs.append(d["result"])
+    if meta is None:
+        raise ValueError(f"{path}: no meta line")
+    return meta, recs
+
+
+class _Terminated(Exception):
+    pass
+
+
+def _on_sigterm(signum, frame):
+    raise _Terminated()
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--verify-worker"]:
+        return verify_worker(argv[1:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("instances", nargs="*", help="files, globs or directories "
                     "(default: benchmarks/instances; with --miplib: benchmarks/miplib)")
@@ -373,6 +475,18 @@ def main(argv=None):
     ap.add_argument("--keep-sols", action="store_true", help="keep .sol/.log under results/tmp")
     ap.add_argument("--strict", action="store_true",
                     help="exit code 1 also when an instance is not solved (errors, limits; for CI)")
+    ap.add_argument("--resume", metavar="FILE",
+                    help="continue an interrupted run: FILE is its results/<stamp>_<sha>.jsonl (or a "
+                         "finished .json); instances recorded there are skipped, new results are "
+                         "appended to it and the final .json/.csv get its name. Use the same command "
+                         "line (time limit, threads, gap, memory limit must match)")
+    ap.add_argument("--redo", default="",
+                    help="with --resume: comma list of classes to run again (e.g. error,memlimit)")
+    ap.add_argument("--verify-mem-limit", type=int, default=4096,
+                    help="memory cap (MB) of the Python verifier process (reads the MPS file; large "
+                         "MIPLIB instances need GBs; 0 = none)")
+    ap.add_argument("--verify-timeout", type=float, default=900.0,
+                    help="wall-clock limit (s) of the Python verifier process")
     args = ap.parse_args(argv)
 
     solver_cmd = resolve_solver(args.solver)
@@ -383,7 +497,7 @@ def main(argv=None):
     missing = [str(f) for f in set_files if not f.exists()]
     if missing:
         print(f"{len(missing)} instance file(s) of the set are missing (run benchmarks/miplib/download.py "
-              f"--wide?): {missing[:5]}", file=sys.stderr)
+              f"--wide / --benchmark?): {missing[:5]}", file=sys.stderr)
         return 2
     pats = args.instances or ([] if set_files else [str(BENCH / ("miplib" if args.miplib else "instances"))])
     files = expand(pats + [str(f) for f in set_files])
@@ -411,15 +525,67 @@ def main(argv=None):
     refs = load_references(args.reference, args.miplib_solu)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     sha = git_sha()
+    out_dir = Path(args.out_dir)
+    base = f"{stamp}_{sha}" + (f"_{args.tag}" if args.tag else "")
+    meta = {
+        "timestamp": stamp, "git_sha": sha, "solver": _strip_repo(args.solver), "time_limit": args.time_limit,
+        "threads": args.threads, "jobs": args.jobs, "mem_limit_mb": args.mem_limit,
+        "gap": args.gap,
+        "opt_tol": args.opt_tol,
+        "feas_tol": args.feas_tol, "int_tol": args.int_tol, "argv": [_strip_repo(a) for a in argv],
+        "platform": platform.platform(), "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+    }
+    done, skipped = [], []  # records of the run being resumed; their files
+    if args.resume:
+        if args.no_save:
+            print("--resume and --no-save exclude each other", file=sys.stderr)
+            return 2
+        rpath = Path(args.resume)
+        try:
+            old_meta, done = load_partial(rpath)
+        except (OSError, ValueError, KeyError) as e:
+            print(f"cannot resume from {rpath}: {e}", file=sys.stderr)
+            return 2
+        diff = {k: (old_meta.get(k), meta[k]) for k in RESUME_KEYS if old_meta.get(k) != meta[k]}
+        if diff:
+            print(f"cannot resume {rpath}: settings differ (old, new): {diff}", file=sys.stderr)
+            return 2
+        if old_meta.get("git_sha") != sha:
+            print(f"WARNING: resuming a run of {old_meta.get('git_sha')} with {sha}", file=sys.stderr)
+        redo = {c.strip() for c in args.redo.split(",") if c.strip()}
+        done = [r for r in done if r["class"] not in redo]
+        resumed = list(old_meta.get("resumed", [])) + [
+            {"timestamp": stamp, "git_sha": sha, "argv": meta["argv"], "kept": len(done)}]
+        meta = {**old_meta, "resumed": resumed}
+        out_dir = rpath.parent
+        base = rpath.name.removesuffix(".jsonl").removesuffix(".json")
+        finished = {r["instance"] for r in done}
+        skipped = [f for f in files if inst_name(f) in finished]
+        files = [f for f in files if inst_name(f) not in finished]
+        print(f"resuming {rpath}: {len(done)} instance(s) recorded, {len(skipped)} of the selection "
+              f"skipped, {len(files)} to run")
+    jsonl = out_dir / f"{base}.jsonl"
+    if not args.no_save:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # (re)write the header and the kept records; also drops --redo records and a torn last line
+        tmp = jsonl.with_suffix(".jsonl.tmp")
+        with open(tmp, "w") as fh:
+            fh.write(json.dumps({"meta": meta}) + "\n")
+            for r in done:
+                fh.write(json.dumps({"result": r}) + "\n")
+        tmp.replace(jsonl)
     tmpdir = BENCH / "results" / "tmp" / f"{stamp}_{sha}"
     tmpdir.mkdir(parents=True, exist_ok=True)
 
     print(f"running {len(files)} instances, time limit {args.time_limit:g}s, threads {args.threads}, "
           f"gap {args.gap:g}, mem {args.mem_limit} MB, jobs {args.jobs}, solver {args.solver} @ {sha}")
+    if not args.no_save:
+        print(f"progress: {_shown(jsonl)}  (after an interruption: same command + --resume {_shown(jsonl)})")
     hdr = f"{'instance':<40} {'class':<8} {'status':<11} {'objective':>18} {'ref':>18} {'time':>8} {'highs':>8}"
     print(hdr)
     print("-" * len(hdr))
-    recs = []
+    recs = list(done)
 
     def show(r):
         def f(x):
@@ -434,16 +600,42 @@ def main(argv=None):
             line += f"   << {r['message']}"
         print(line, flush=True)
 
-    if args.jobs > 1:
-        with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-            for r in ex.map(lambda p: run_one(p, args, solver_cmd, tmpdir, refs), files):
-                show(r)
-                recs.append(r)
-    else:
-        for p in files:
-            r = run_one(p, args, solver_cmd, tmpdir, refs)
-            show(r)
-            recs.append(r)
+    def record(r):
+        show(r)
+        recs.append(r)
+        if not args.no_save:
+            # one line per finished instance: a crash loses at most the instances still running
+            with open(jsonl, "a") as fh:
+                fh.write(json.dumps({"result": r}) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+
+    old_term = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        if args.jobs > 1:
+            with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+                futs = [ex.submit(run_one, p, args, solver_cmd, tmpdir, refs) for p in files]
+                try:
+                    for fut in as_completed(futs):
+                        record(fut.result())
+                except BaseException:
+                    for fu in futs:
+                        fu.cancel()
+                    kill_all()
+                    raise
+        else:
+            for p in files:
+                record(run_one(p, args, solver_cmd, tmpdir, refs))
+    except (KeyboardInterrupt, _Terminated):
+        kill_all()
+        print(f"\ninterrupted; {len(recs)} instance(s) recorded", file=sys.stderr)
+        if not args.no_save:
+            print(f"continue with the same command plus  --resume {_shown(jsonl)}", file=sys.stderr)
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
+    order = {inst_name(f): i for i, f in enumerate(skipped + files)}
+    recs.sort(key=lambda r: order.get(r["instance"], -1))
 
     # ----------------------------------------------------------- summary
     tl = args.time_limit
@@ -504,20 +696,10 @@ def main(argv=None):
           "possibly on another machine / with a longer time limit)")
 
     if not args.no_save:
-        out_dir = Path(args.out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        base = f"{stamp}_{sha}" + (f"_{args.tag}" if args.tag else "")
-        meta = {
-            "timestamp": stamp, "git_sha": sha, "solver": _strip_repo(args.solver), "time_limit": tl,
-            "threads": args.threads, "jobs": args.jobs, "mem_limit_mb": args.mem_limit,
-            "gap": args.gap,
-            "opt_tol": args.opt_tol,
-            "feas_tol": args.feas_tol, "int_tol": args.int_tol, "argv": [_strip_repo(a) for a in sys.argv[1:]],
-            "platform": platform.platform(), "machine": platform.machine(),
-            "cpu_count": os.cpu_count(),
-        }
-        (out_dir / f"{base}.json").write_text(
-            json.dumps({"meta": meta, "summary": summary, "results": recs}, indent=1) + "\n")
+        tmp = out_dir / f"{base}.json.tmp"
+        tmp.write_text(json.dumps({"meta": meta, "summary": summary, "results": recs}, indent=1) + "\n")
+        tmp.replace(out_dir / f"{base}.json")
+        jsonl.unlink(missing_ok=True)  # everything is in the .json now
         cols = ["instance", "class", "status", "objective", "ref_status", "ref_objective", "time", "peak_rss_mb",
                 "ref_highs_time", "ref_scip_time", "gap_to_ref", "max_viol", "returncode", "message"]
         with open(out_dir / f"{base}.csv", "w", newline="") as fh:

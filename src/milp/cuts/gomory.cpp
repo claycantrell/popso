@@ -29,6 +29,14 @@ class GomorySeparator : public Separator {
 
 bool near_int(double v, double tol) { return std::abs(v - std::round(v)) <= tol; }
 
+// Integer, or implied integer (MipProblem::implied_int: integral in some optimal solution) with integral
+// global bounds.
+bool int_col(const MipProblem& p, Index j) {
+  if (p.is_int[j]) return true;
+  auto ib = [](double b) { return !is_finite(b) || b == std::round(b); };
+  return p.is_implied_int(j) && ib(p.col_lb[j]) && ib(p.col_ub[j]);
+}
+
 void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   const MipProblem& p = ctx.p;
   DualSimplex& lp = ctx.lp;
@@ -40,7 +48,7 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   int_row_.assign(m, 1);
   for (Index i = 0; i < m; ++i) {
     for (Index k = R.begin(i); k < R.end(i) && int_row_[i]; ++k) {
-      int_row_[i] = p.is_int[R.index[k]] && R.value[k] == std::round(R.value[k]);
+      int_row_[i] = int_col(p, R.index[k]) && R.value[k] == std::round(R.value[k]);
     }
   }
 
@@ -120,7 +128,7 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
       const double a = sign * a0;  // coefficient of y_j
       bool integer;
       if (j < n) {
-        integer = p.is_int[j];
+        integer = p.is_int[j] || (p.is_implied_int(j) && bound == std::round(bound));
       } else {
         integer = int_row_[j - n] && near_int(bound, 1e-9);
       }

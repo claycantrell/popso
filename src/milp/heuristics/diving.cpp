@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/timer.hpp"
 
 namespace milp {
@@ -120,7 +121,7 @@ bool dive(const MipProblem& p, DualSimplex& lp, DiveRule rule, const SimpleRound
       break;
     }
     const long long used = lp.iterations() - it0;
-    if (used >= limits.iteration_budget || timer.elapsed() > limits.time_limit) break;
+    if (used >= limits.iteration_budget || timer.elapsed() > limits.time_limit || interrupted()) break;
 
     const double v = x[c.j];
     const double lo = lp.col_lower(c.j), hi = lp.col_upper(c.j);

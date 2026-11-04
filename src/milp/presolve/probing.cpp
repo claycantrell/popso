@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "milp/core/interrupt.hpp"
+
 namespace milp {
 
 namespace {
@@ -58,7 +60,7 @@ class Prober {
     size_t lo = 0, hi = cand.size();
     bool reversed = false;
     while (lo < hi) {
-      if (work_ > limit_) break;
+      if (work_ > limit_ || ((res.probes & 15) == 0 && interrupted())) break;
       static const double idle_frac = [] { const char* v = std::getenv("MILP_PROBE_IDLE"); return v ? std::atof(v) : 0.1; }();
       if (idle > static_cast<long long>(idle_frac * static_cast<double>(limit_))) {
         if (reversed || !allow_switch) break;

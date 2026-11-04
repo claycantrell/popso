@@ -11,12 +11,14 @@
 #include <thread>
 #include <vector>
 
+#include "milp/core/interrupt.hpp"
+
 namespace milp {
 
 class WorkerPool {
  public:
   explicit WorkerPool(int threads) {
-    for (int t = 1; t < threads; ++t) workers_.emplace_back([this] { loop(); });
+    for (int t = 1; t < threads; ++t) workers_.emplace_back(inherit_interrupt([this] { loop(); }));
   }
   ~WorkerPool() {
     {

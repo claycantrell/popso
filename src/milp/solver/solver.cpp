@@ -2,17 +2,23 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/log.hpp"
 #include "milp/core/timer.hpp"
+#include "milp/heuristics/fpr.hpp"
+#include "milp/heuristics/lmip.hpp"
 #include "milp/io/mps_reader.hpp"
 #include "milp/io/solution.hpp"
-#include "milp/lp/simplex.hpp"
 #include "milp/presolve/presolve.hpp"
 #include "milp/qp/miqp.hpp"
 #include "milp/qp/qp.hpp"
@@ -22,6 +28,8 @@
 #include "milp/search/sst.hpp"
 #include "milp/search/symmetry.hpp"
 #include "milp/search/mip_problem.hpp"
+#include "milp/solver/duals.hpp"
+#include "milp/solver/postsolve.hpp"
 #include "milp/solver/reformulate.hpp"
 #include "milp/solver/start.hpp"
 
@@ -56,33 +64,6 @@ const char* to_string(LpMethod m) {
 
 namespace {
 
-// Repairs a point that violates the original rows slightly (postsolve round-off):
-// integers fixed at their rounded values, continuous columns re-optimized by LP.
-// Returns false if that LP fails or the result is still not feasible.
-bool polish_point(const MipProblem& p, const Timer& timer, double time_limit, std::vector<double>& x) {
-  std::vector<double> lb = p.col_lb, ub = p.col_ub;
-  bool any_cont = false;
-  for (Index j = 0; j < p.num_cols(); ++j) {
-    if (p.is_int[j]) lb[j] = ub[j] = std::round(x[j]);
-    else any_cont = true;
-  }
-  std::vector<double> y = x;
-  if (any_cont) {
-    DualSimplex lp;
-    lp.load(p.A, p.cost, lb, ub, p.row_lb, p.row_ub);
-    LpOptions opt;
-    opt.perturb = false;
-    opt.time_limit = std::max(1.0, time_limit - timer.elapsed());
-    if (lp.solve(opt) != LpStatus::Optimal) return false;
-    y.assign(lp.x(), lp.x() + p.num_cols());
-  } else {
-    for (Index j = 0; j < p.num_cols(); ++j) y[j] = lb[j];
-  }
-  if (!(p.max_violation(y) <= 1e-6)) return false;
-  x = std::move(y);
-  return true;
-}
-
 // Branch-and-bound, optionally as a race of differently seeded searches that
 // share incumbents; the first search to finish stops the others.
 MipResult search(const MipProblem& q, const SolverParams& params, const Logger& log, const Timer& timer,
@@ -97,7 +78,7 @@ MipResult search(const MipProblem& q, const SolverParams& params, const Logger& 
   std::vector<MipResult> res(K);
   std::vector<std::thread> pool;
   for (int k = 0; k < K; ++k) {
-    pool.emplace_back([&, k] {
+    pool.emplace_back(inherit_interrupt([&, k] {
       SolverParams pk = params;
       pk.threads = std::max(1, threads / K);
       pk.seed = params.seed + 7919u * static_cast<unsigned>(k);
@@ -112,7 +93,7 @@ MipResult search(const MipProblem& q, const SolverParams& params, const Logger& 
         int expected = -1;
         if (winner.compare_exchange_strong(expected, k)) stop = true;
       }
-    });
+    }));
   }
   for (auto& t : pool) t.join();
   const int w = winner.load() >= 0 ? winner.load() : 0;
@@ -207,7 +188,20 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
     return false;
   }
   const MipProblem& q = pre.reduced();
+  if (opts.sub_mip_heuristics && opts.restarts_done == 0 && opts.tree_restarts_done == 0 && !opts.sst_done &&
+      local_search_bench(q)) {
+    out->status = Status::Unknown;  // MILP_LS_BENCH: heuristic evaluation only
+    return true;
+  }
+  if (const char* fb = std::getenv("MILP_FPR_BENCH")) {
+    // Standalone heuristic comparison on the presolved problem (FPR vs FJ vs local MIP, same work
+    // budget); no search.
+    heuristic_bench(q, std::atoll(fb) > 0 ? std::atoll(fb) : 1000000000LL, params.seed, log);
+    out->status = Status::Unknown;
+    return true;
+  }
   MipResult mr;
+  std::function<void(const std::vector<double>&, double)> q_hook;  // opts.on_incumbent in q's columns
   if (q.num_cols() == 0) {
     // Everything was removed; remaining rows (if any) have no columns.
     for (Index i = 0; i < q.num_rows(); ++i) {
@@ -222,6 +216,13 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
     mr.objective = mr.bound = mr.root_bound = q.offset;
   } else {
     SearchOptions o = opts;
+    if (opts.on_incumbent) {
+      // Incumbents of q are reported in p's columns.
+      o.on_incumbent = [&pre, outer = opts.on_incumbent](const std::vector<double>& x, double bound) {
+        outer(pre.postsolve(x), bound);
+      };
+    }
+    q_hook = o.on_incumbent;
     if (!o.start.empty()) o.start = pre.crush(o.start);
     if (!o.debug_point.empty()) {
       o.debug_point = pre.crush(o.debug_point);
@@ -274,6 +275,7 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
       q2.row_ub.insert(q2.row_ub.end(), mr.cut_ub.begin(), mr.cut_ub.end());
     }
     SearchOptions o2 = opts;
+    o2.on_incumbent = q_hook;  // q2 has q's columns
     o2.sst_done = true;  // symmetry-breaking rows only before the first search
     // Root and in-tree restarts are counted separately (MILP_MAX_RESTARTS / MILP_MAX_TREE_RESTARTS).
     o2.restarts_done = opts.restarts_done + (mr.tree_restart ? 0 : 1);
@@ -313,30 +315,16 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
         mr2.bound = mr.objective;
       }
     }
+    // A restarted search stopped at a limit (time, interrupt) may not have re-solved its root yet;
+    // the bound before the restart is still valid (the restart only adds valid reductions).
+    if (mr2.status != Status::Optimal && mr2.status != Status::Infeasible && is_finite(mr.bound))
+      mr2.bound = std::max(mr2.bound, mr.bound);
     mr2.bound = std::min(mr2.bound, mr2.objective);
     mr = std::move(mr2);
   }
-  if (mr.has_solution) {
-    mr.x = pre.postsolve(mr.x);
-    const double viol = p.max_violation(mr.x);
-    std::vector<double> fixed = mr.x;
-    // The polished point rounds the integers exactly, so its objective may differ from the
-    // presolved one by round-off (n5-3: 8429 vs 8428.999991). Accept it within a relative 1e-6,
-    // and at any objective when the search stopped at a limit (a feasible point beats none).
-    if (!(viol <= 1e-6) && polish_point(p, timer, params.time_limit, fixed) &&
-        (mr.status != Status::Optimal ||
-         p.objective(fixed) <= mr.objective + 1e-6 * std::max(1.0, std::abs(mr.objective)))) {
-      log.log(1, "Postsolved solution violated the original problem by %.3g; repaired by an LP over the continuous "
-              "columns\n", viol);
-      mr.x = std::move(fixed);
-    } else if (!(viol <= 1e-6)) {
-      log.log(1, "WARNING: postsolved solution violates the original problem by %.3g; re-solving without presolve\n",
-              viol);
-      out->bound = mr.bound;  // still a valid bound for the caller's re-solve
-      return false;
-    }
-    mr.objective = p.objective(mr.x);
-    mr.bound = std::min(mr.bound, mr.objective);
+  if (!postsolve_result(p, pre, params, timer, log, &mr)) {
+    out->bound = mr.bound;  // still a valid bound for the caller's re-solve
+    return false;
   }
   *out = std::move(mr);
   return true;
@@ -410,10 +398,98 @@ bool presolve_tool(const Model& model, const MipProblem& p, const Logger& log, S
   return true;
 }
 
+// Reports new incumbents to SolverParams::on_incumbent: in the user model's columns (the first
+// num_cols of the solved problem's), serialized, only strictly improving ones. A callback that asks
+// to stop (or throws) sets the interrupt flag.
+class IncumbentReporter {
+ public:
+  IncumbentReporter(const Model& model, const SolverParams& params)
+      : model_(model), sense_(model.sense == ObjSense::Maximize ? -1.0 : 1.0), fn_(params.on_incumbent),
+        flag_(params.interrupt) {}
+  void report(const std::vector<double>& x_in, double bound) {
+    std::vector<double> x(x_in);
+    x.resize(static_cast<size_t>(model_.num_cols()));
+    const double obj = model_.objective_value(x);
+    std::lock_guard<std::mutex> lk(mu_);
+    if (stopped_ || !(sense_ * obj < best_)) return;
+    best_ = sense_ * obj;
+    bool stop = true;
+    try {
+      stop = fn_(x, obj, sense_ * std::min(bound, sense_ * obj));
+    } catch (...) {
+    }
+    if (stop) {
+      stopped_ = true;  // no calls after a stop request
+      if (flag_) flag_->store(true);
+    }
+  }
+
+ private:
+  const Model& model_;
+  const double sense_;
+  const std::function<bool(const std::vector<double>&, double, double)>& fn_;
+  std::atomic<bool>* flag_;
+  std::mutex mu_;
+  double best_ = kInf;
+  bool stopped_ = false;
+};
+
+// LP duals of a pure LP (the solution is optimal) or the fixed-MIP duals of a MILP
+// (SolverParams::duals >= 2), in the model's sense, with the basis they come from (solver/duals.hpp).
+void add_duals(const MipProblem& p, const SolverParams& params, const Timer& timer, const Logger& log, SolveResult& r) {
+  const bool mip = std::find(p.is_int.begin(), p.is_int.end(), 1) != p.is_int.end();
+  if (params.duals < (mip ? 2 : 1)) return;
+  if (!mip && r.status != Status::Optimal) return;
+  std::vector<double> lb, ub, x = r.x;
+  if (mip) {
+    lb = p.col_lb;
+    ub = p.col_ub;
+    for (Index j = 0; j < p.num_cols(); ++j) {
+      if (!p.is_int[j]) continue;
+      x[j] = std::round(x[j]);
+      lb[j] = ub[j] = std::clamp(x[j], p.col_lb[j], p.col_ub[j]);
+    }
+  }
+  const double t0 = timer.elapsed();
+  // Post-processing: at least a second even when the time limit is (nearly) used up.
+  const LpDualResult d = recover_lp_duals(p, lb, ub, x, std::max(1.0, params.time_limit - t0));
+  log.log(1, "Duals%s: %s, %lld simplex iterations (%.2fs)\n", mip ? " (integers fixed)" : "",
+          d.ok ? "recovered" : "failed", d.iterations, timer.elapsed() - t0);
+  if (!d.ok) return;
+  // The basis the duals come from must reproduce the solution's objective (an LP: the same optimum;
+  // fixed-MIP: the incumbent is feasible for the fixed LP, so its optimum is no worse). Otherwise
+  // the recovery went wrong (numerics, a point that is not optimal) and the duals would be stale.
+  const double obj = p.objective(x);
+  const DualObjectiveCheck check = check_dual_objective(d.objective, obj, mip);
+  if (check == DualObjectiveCheck::Mismatch) {
+    log.log(1, "Duals: dropped (their basis has objective %.10g, the solution %.10g)\n", p.display_sense * d.objective,
+            p.display_sense * obj);
+    return;
+  }
+  if (check == DualObjectiveCheck::BetterThanSolution) {
+    log.log(1, "Duals: the fixed LP's optimum %.10g is better than the incumbent's %.10g (its continuous part is not "
+            "optimal): the duals are those of the fixed LP's optimum\n", p.display_sense * d.objective,
+            p.display_sense * obj);
+  }
+  const double sense = p.display_sense;
+  r.row_dual = d.row_dual;
+  r.reduced_cost = d.reduced_cost;
+  for (double& v : r.row_dual) v *= sense;
+  for (double& v : r.reduced_cost) v *= sense;
+  r.col_basis.resize(d.col_status.size());
+  r.row_basis.resize(d.row_status.size());
+  for (size_t j = 0; j < d.col_status.size(); ++j) r.col_basis[j] = static_cast<int8_t>(d.col_status[j]);
+  for (size_t i = 0; i < d.row_status.size(); ++i) r.row_basis[i] = static_cast<int8_t>(d.row_status[i]);
+  r.has_duals = true;
+  r.fixed_mip_duals = mip;
+  r.stats.time = timer.elapsed();
+}
+
 // Solves a plain MILP; `implications` (logical constraints without a big-M form) go into the
 // searched problem, and presolve is skipped when there are any.
 SolveResult solve_plain(const Model& model, const std::vector<Implication>& implications, const SolverParams& params_in,
-                        const std::vector<double>& start, const Timer& timer, const Logger& log) {
+                        const std::vector<double>& start, const Timer& timer, const Logger& log,
+                        IncumbentReporter* reporter, bool allow_duals) {
   SolveResult r;
   MipProblem p;
   if (!MipProblem::from_model(model, &p)) {
@@ -432,6 +508,9 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
   SearchOptions opts;
   opts.allow_restart = true;
   opts.allow_tree_restart = true;
+  if (reporter) {
+    opts.on_incumbent = [reporter](const std::vector<double>& x, double bound) { reporter->report(x, bound); };
+  }
   if (const char* v = std::getenv("MILP_CUTOFF")) opts.cutoff = sense * std::atof(v);  // diagnostics: known bound
   if (const char* f = std::getenv("MILP_DEBUG_SOL_ORIG")) {
     // Debugging: a known optimal point of the user model (one value per column), followed through
@@ -456,6 +535,7 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
     const double presolved_bound = params.presolve && is_finite(mr.bound) ? mr.bound : -kInf;
     SearchOptions plain;
     plain.start = start_x;
+    plain.on_incumbent = opts.on_incumbent;
     mr = branch_and_bound(p, params, log, timer, plain);
     if (presolved_bound > mr.bound && !(mr.has_solution && presolved_bound > mr.objective)) {
       mr.bound = presolved_bound;
@@ -490,6 +570,7 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
   r.stats.nodes = mr.nodes;
   r.stats.lp_iterations = mr.lp_iterations;
   r.stats.root_bound = sense * mr.root_bound;
+  if (allow_duals && implications.empty() && r.has_solution && !interrupted()) add_duals(p, params, timer, log, r);
   return r;
 }
 
@@ -641,7 +722,10 @@ SolveResult solve_quadratic(const Model& model, const SolverParams& params, cons
 
 SolveResult solve(const Model& model, const SolverParams& params) { return solve(model, params, {}); }
 
-SolveResult solve(const Model& model, const SolverParams& params, const std::vector<double>& start) {
+namespace {
+
+SolveResult solve_model(const Model& model, const SolverParams& params, const std::vector<double>& start,
+                        IncumbentReporter* reporter) {
   Timer timer;
   Logger log(params.verbosity);
   if (model.has_quadratic()) {
@@ -661,7 +745,7 @@ SolveResult solve(const Model& model, const SolverParams& params, const std::vec
     }
     return r;
   }
-  if (!model.has_logical()) return solve_plain(model, {}, params, start, timer, log);
+  if (!model.has_logical()) return solve_plain(model, {}, params, start, timer, log, reporter, true);
   // Semi-continuous columns, SOS sets, indicator constraints: solved as a plain MILP with auxiliary
   // binaries (reformulate.hpp). MILP_LOGIC_BIGM overrides params.logic_big_m (diagnostics).
   const char* env_big_m = std::getenv("MILP_LOGIC_BIGM");
@@ -670,7 +754,7 @@ SolveResult solve(const Model& model, const SolverParams& params, const std::vec
           "%zu implications\n", model.num_semi(), model.sos.size(), model.indicators.size(), R.aux_cols, R.aux_rows,
           R.big_m, R.implications.size());
   const std::vector<double> st = start.empty() ? start : R.extend(start);
-  SolveResult r = solve_plain(R.model, R.implications, params, st, timer, log);
+  SolveResult r = solve_plain(R.model, R.implications, params, st, timer, log, reporter, false);
   if (r.has_solution) {
     r.x.resize(static_cast<size_t>(model.num_cols()));
     snap_logical(model, r.x);
@@ -679,6 +763,38 @@ SolveResult solve(const Model& model, const SolverParams& params, const std::vec
     if (!(viol <= 1e-5)) log.log(1, "WARNING: solution violates the logical constraints by %.3g\n", viol);
   }
   r.stats.time = timer.elapsed();
+  return r;
+}
+
+}  // namespace
+
+SolveResult solve(const Model& model, const SolverParams& params_in, const std::vector<double>& start) {
+  // The interrupt flags of this solve: the caller's (never written here) and a local one, set when
+  // the incumbent callback asks to stop (so the caller's flag stays clear for its next solve).
+  std::atomic<bool> local_flag{false};
+  SolverParams params = params_in;
+  params.interrupt = &local_flag;
+  params.on_incumbent = nullptr;  // reported through the reporter only (not copied into sub-solves)
+  InterruptScope scope(&local_flag, params_in.interrupt);
+  SolverParams cb_params = params;
+  cb_params.on_incumbent = params_in.on_incumbent;
+  std::optional<IncumbentReporter> reporter;
+  if (params_in.on_incumbent && !model.has_quadratic()) reporter.emplace(model, cb_params);
+  SolveResult r = solve_model(model, params, start, reporter ? &*reporter : nullptr);
+  // The final solution (postsolved and polished) if it improves on the last one reported.
+  if (reporter && r.has_solution) reporter->report(r.x, model.sense == ObjSense::Maximize ? -r.bound : r.bound);
+  if (local_flag.load() || (params_in.interrupt && params_in.interrupt->load())) {
+    switch (r.status) {
+      case Status::TimeLimit:
+      case Status::IterationLimit:
+      case Status::Unknown:
+      case Status::NumericalError:
+        r.status = Status::Interrupted;
+        break;
+      default:
+        break;
+    }
+  }
   return r;
 }
 

@@ -6,6 +6,7 @@
 #include <queue>
 #include <string>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/heuristics/fj.hpp"
 #include "milp/qp/qp.hpp"
 #include "milp/qp/qp_active.hpp"
@@ -360,7 +361,7 @@ void Miqp::run_fj(const std::vector<double>& xroot) {
 
 bool Miqp::limits_hit() {
   if (limit_status_ != Status::Unknown) return true;
-  if (timer_.elapsed() >= params_.time_limit) limit_status_ = Status::TimeLimit;
+  if (timer_.elapsed() >= params_.time_limit || interrupted()) limit_status_ = Status::TimeLimit;
   else if (params_.node_limit >= 0 && nodes_ >= params_.node_limit) limit_status_ = Status::NodeLimit;
   else if (params_.mem_limit_mb > 0 && open_bytes_ > params_.mem_limit_mb * 1024LL * 1024LL) limit_status_ = Status::MemoryLimit;
   return limit_status_ != Status::Unknown;

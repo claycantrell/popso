@@ -38,9 +38,10 @@ std::string format_duals(const Model& model, const SolveResult& result) {
   std::string out = "# Duals for model " + model.name + "\n";
   out += std::string("# Status = ") + to_string(result.status) + "\n";
   if (!result.has_duals) {
-    out += "# No dual values (available for continuous QPs solved to optimality)\n";
+    out += "# No dual values (LPs and continuous QPs solved to optimality, MILPs with a solution)\n";
     return out;
   }
+  if (result.fixed_mip_duals) out += "# Fixed-MIP duals: the LP with the integer variables fixed at the solution\n";
   char buf[64];
   auto line = [&](const char* kind, const std::string& name, double v) {
     out += kind;

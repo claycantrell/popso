@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/timer.hpp"
 #include "milp/lp/cholesky.hpp"
 
@@ -52,6 +53,7 @@ class NormalEquations {
     threads_ = threads;
     chol_.nnz_limit = nnz_limit;
     chol_.stop = stop;
+    chol_.interruptible = true;
     m_ = A.num_minor;
     n_ = A.num_major;
     dense_.assign(static_cast<size_t>(n_), 0);
@@ -309,7 +311,7 @@ class NormalEquations {
     double rz = dot(res, z);
     std::vector<double> best = y;
     double best_rel = rel;
-    for (int it = 0; it < max_it && rz > 0.0; ++it) {
+    for (int it = 0; it < max_it && rz > 0.0 && !interrupted_or_expired(); ++it) {
       multiply(p, q);
       const double pq = dot(p, q);
       if (!(pq > 0.0)) break;
@@ -374,6 +376,7 @@ class AugmentedSystem {
     A_ = &A;
     Q_ = Q && Q->nnz() > 0 ? Q : nullptr;
     chol_.stop = stop;
+    chol_.interruptible = true;
     n_ = A.num_major;
     m_ = A.num_minor;
     const Index N = n_ + m_;
@@ -544,6 +547,12 @@ class KktSolver {
   // [-H A^T; A delta] [dx; dy] = [r1; r2].
   double solve(const std::vector<double>& r1, const std::vector<double>& r2, std::vector<double>& dx,
                std::vector<double>& dy) {
+    if (interrupted_or_expired()) {
+      // The solve is abandoned (the iteration loop stops next): a zero direction.
+      dx.assign(static_cast<size_t>(A_->num_major), 0.0);
+      dy.assign(static_cast<size_t>(A_->num_minor), 0.0);
+      return 0.0;
+    }
     if (augmented_) return aug_.solve(r1, r2, dx, dy);
     const SparseMatrix& A = *A_;
     const Index n = A.num_major;
@@ -938,6 +947,9 @@ void Ipm::starting_point() {
 
 IpmResult Ipm::run() {
   IpmResult res;
+  // The time limit as a deadline: also checked inside the factorizations and the CG loops, which
+  // take seconds per iteration on large problems (as the interrupt flag is).
+  DeadlineScope deadline(opt_.time_limit - timer_.elapsed());
   if (!build()) {
     res.status = IpmStatus::PrimalInfeasible;
     finish(res);
@@ -955,7 +967,7 @@ IpmResult Ipm::run() {
   }
   const double t_an = timer_.elapsed();
   if (!kkt_.analyze(A_, At_, qdiag_, quadratic_ ? &qoff_ : nullptr, opt_.kkt, opt_.threads, opt_.stop, opt_.log)) {
-    res.status = opt_.stop && opt_.stop->load() ? IpmStatus::TimeLimit : IpmStatus::NumericalError;
+    res.status = (opt_.stop && opt_.stop->load()) || interrupted_or_expired() ? IpmStatus::TimeLimit : IpmStatus::NumericalError;
     finish(res);
     return res;
   }
@@ -1028,7 +1040,7 @@ IpmResult Ipm::run() {
       status = IpmStatus::IterationLimit;
       break;
     }
-    if (timer_.elapsed() > opt_.time_limit || (opt_.stop && opt_.stop->load(std::memory_order_relaxed))) {
+    if (timer_.elapsed() > opt_.time_limit || (opt_.stop && opt_.stop->load(std::memory_order_relaxed)) || interrupted_or_expired()) {
       status = IpmStatus::TimeLimit;
       break;
     }
@@ -1077,7 +1089,7 @@ IpmResult Ipm::run() {
     }
     const double t_f = timer_.elapsed();
     if (!kkt_.factor(h_, reg_d_, exact_ ? 0.0 : reg_d_)) {
-      status = opt_.stop && opt_.stop->load() ? IpmStatus::TimeLimit : IpmStatus::NumericalError;
+      status = (opt_.stop && opt_.stop->load()) || interrupted_or_expired() ? IpmStatus::TimeLimit : IpmStatus::NumericalError;
       break;
     }
     factor_time += timer_.elapsed() - t_f;

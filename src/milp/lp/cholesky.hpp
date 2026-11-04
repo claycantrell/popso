@@ -21,6 +21,7 @@
 #include <memory>
 #include <vector>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/types.hpp"
 
 namespace milp {
@@ -70,6 +71,13 @@ class SparseCholesky {
   bool too_large() const { return too_large_; }
   // analyze() and factorize() give up (return false) once this is set.
   const std::atomic<bool>* stop = nullptr;
+  // factorize() also gives up once the solve is interrupted or the thread's deadline passes
+  // (core/interrupt.hpp: interrupted_or_expired). Only for callers
+  // that treat a failed factorization as a stop (the barrier), not as a numerical verdict.
+  bool interruptible = false;
+  bool stop_requested() const {
+    return (stop && stop->load(std::memory_order_relaxed)) || (interruptible && interrupted_or_expired());
+  }
 
   SparseCholesky();
   ~SparseCholesky();
@@ -77,12 +85,14 @@ class SparseCholesky {
   SparseCholesky& operator=(SparseCholesky&&) noexcept;
 
  private:
-  void factor_supernode(Index J, std::vector<Index>& relmap, std::vector<double>& work,
+  // Returns false if stopped (stop flag or interrupt) part-way.
+  bool factor_supernode(Index J, std::vector<Index>& relmap, std::vector<double>& work,
                         std::vector<Index>& link_head, std::vector<Index>& link_next, std::vector<Index>& kpos);
   // T = lower part of X X^T for X = rows [0, nr) x columns [0, kw) (leading dimension ld), only
   // the first nc columns of the product; split over the pool when large.
-  // S: signs of the kw columns (null: all +1), T = X S X^T.
-  void syrk_rows(const double* X, size_t ld, Index kw, Index nc, Index nr, double* T, size_t ldT, const double* S);
+  // S: signs of the kw columns (null: all +1), T = X S X^T. Returns false if stopped part-way
+  // (interruptible only: interrupt or deadline).
+  bool syrk_rows(const double* X, size_t ld, Index kw, Index nc, Index nr, double* T, size_t ldT, const double* S);
   std::unique_ptr<WorkerPool> pool_;
 
   Index n_ = 0;

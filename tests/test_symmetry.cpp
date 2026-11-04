@@ -522,9 +522,11 @@ TEST(symmetry_end_to_end_same_optimum) {
   std::mt19937 rng(2024);
   int checked = 0;
   long long branched = 0;
-  // Zero-half cuts (odd cycles) solve most independent set instances at the root; the
-  // test needs symmetric searches that branch.
+  // Zero-half cuts (odd cycles) solve most independent set instances at the root, and root strong
+  // branching (fixings, root bound) closes many of the others there; the test needs symmetric
+  // searches that branch.
   set_env("MILP_NO_ZEROHALF", true);
+  set_env_value("MILP_ROOT_SB", "0");
   for (int t = 0; t < scaled(30); ++t) {
     Model m = duplicated_blocks(rng, 2 + rng() % 4, 2 + rng() % 4, rng() % 2, 1 + rng() % 3, 1 + rng() % 2);
     m.name = "blocks" + std::to_string(t);
@@ -567,6 +569,7 @@ TEST(symmetry_end_to_end_same_optimum) {
     }
   }
   set_env("MILP_NO_ZEROHALF", false);
+  set_env("MILP_ROOT_SB", false);
   CHECK(checked > 30);
   // The symmetric searches really branch (12-15 of the instances; the count moves with LP pivoting
   // details, so the bound leaves some room).

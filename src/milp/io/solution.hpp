@@ -23,7 +23,7 @@ std::string format_solution(const Model& model, const SolveResult& result);
 // Throws std::runtime_error on I/O failure.
 void write_solution(const std::string& path, const Model& model, const SolveResult& result);
 
-// Dual values (SolveResult::row_dual / reduced_cost; continuous QPs) as text:
+// Dual values (SolveResult::row_dual / reduced_cost: LPs, continuous QPs, fixed-MIP duals) as text:
 //
 //   # Duals for model <name>
 //   # Status = OPTIMAL

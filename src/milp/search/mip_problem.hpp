@@ -24,6 +24,15 @@ struct MipProblem {
   SparseMatrix A;  // CSC
   std::vector<double> cost, col_lb, col_ub, row_lb, row_ub;
   std::vector<char> is_int;
+  // Implied integers (set by presolve, presolve/implied_int.hpp): continuous columns that are integral in
+  // every feasible point with integral integers (primal rule), or that can be moved to an integral value in
+  // any feasible point without loss (dual rule). Empty, or one flag per column (columns beyond its size have
+  // none). Never branched on and not required for feasibility; used for objective integrality and treated
+  // as integers by c-MIR / Gomory cuts. Their bounds are integral (or infinite) when presolve sets them.
+  std::vector<char> implied_int;
+  bool is_implied_int(Index j) const {
+    return static_cast<size_t>(j) < implied_int.size() && implied_int[static_cast<size_t>(j)] != 0;
+  }
   double offset = 0.0;  // added to cost^T x
   double display_sense = 1.0;  // -1 if the user model maximizes (for logging only)
   std::vector<Implication> implications;  // usually empty; presolve and symmetry handling are off otherwise

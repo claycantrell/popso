@@ -11,7 +11,9 @@
 
 #include "milp/io/mps_reader.hpp"
 #include "milp/presolve/clique_merge.hpp"
+#include "milp/presolve/implied_int.hpp"
 #include "milp/presolve/presolve.hpp"
+#include "milp/solver/postsolve.hpp"
 #include "milp/solver/solver.hpp"
 #include "test_framework.hpp"
 
@@ -56,6 +58,7 @@ PresolveOptions only(bool bt, bool coef, bool par, bool dual, bool aggr) {
 PresolveOptions only_subst() {
   PresolveOptions o = only(false, false, false, false, false);
   o.substitution = true;
+  o.substitution_bounded = true;  // off by default (cut separators), kept for models where it is enabled
   return o;
 }
 
@@ -369,6 +372,180 @@ TEST(presolve_implied_free_substitution) {
   xr[reduced_index(pre, z)] = 0.5;
   xr[reduced_index(pre, w)] = 0.5;
   CHECK_NEAR(pre.postsolve(xr)[x], 2.5, 1e-12);
+}
+
+TEST(presolve_long_equation_singleton_substitution) {
+  // Objective-defining row z = sum_k c_k x_k with 1500 entries and a free singleton z (cost 1): z is
+  // substituted (the row is longer than kMaxSubstRow) and the row disappears.
+  Builder b;
+  const int n = 1500;
+  std::vector<std::pair<Index, double>> row;
+  std::vector<Index> xs;
+  for (int k = 0; k < n; ++k) {
+    xs.push_back(b.col(0.0, 0.0, 1.0, true));
+    row.push_back({xs.back(), (k < 10 ? 1.0 : 150.0) * (1 + k % 7)});  // z: coefficient 1 << 1e-2 * 1050
+  }
+  const Index z = b.col(1.0, -kInf, kInf);
+  row.push_back({z, -1.0});
+  b.row(0.0, 0.0, row);
+  std::vector<std::pair<Index, double>> cover;
+  for (int k = 0; k < 10; ++k) cover.push_back({xs[k], 1.0});
+  b.row(3.0, kInf, cover);
+  const Model model = b.b.build();
+  MipProblem p;
+  REQUIRE(MipProblem::from_model(model, &p));
+  Presolver pre;
+  REQUIRE(pre.run(p, only_subst(), kQuiet) == PresolveStatus::Reduced);
+  const MipProblem& q = pre.reduced();
+  CHECK_EQ(reduced_index(pre, z), -1);
+  CHECK_EQ(q.num_rows(), 1);
+  CHECK_EQ(q.cost[reduced_index(pre, xs[5])], 6.0);
+  std::vector<double> xr(q.num_cols(), 0.0);
+  xr[reduced_index(pre, xs[1])] = 1.0;
+  xr[reduced_index(pre, xs[6])] = 1.0;
+  CHECK_NEAR(pre.postsolve(xr)[z], 2.0 + 7.0, 1e-12);
+  // Solve end to end: the three cheapest of x0..x9 (coefficients 1, 2, .., 7, 1, 2, 3) -> 4.
+  SolverParams params;
+  params.verbosity = 0;
+  params.threads = 1;
+  const SolveResult r = solve(model, params);
+  REQUIRE(r.status == Status::Optimal);
+  CHECK_NEAR(r.objective, 4.0, 1e-9);
+}
+
+TEST(presolve_singleton_does_not_block_substitution) {
+  // 2 y + 3 w + c = 5: the integer singleton y does not qualify (2 does not divide 3); the continuous c
+  // (in one more row) is substituted instead.
+  Builder b;
+  const Index y = b.col(1.0, 0.0, 3.0, true);
+  const Index w = b.col(1.0, 0.0, 3.0, true);
+  const Index c = b.col(1.0, 0.0, 10.0);
+  const Index v = b.col(1.0, 0.0, 10.0);
+  b.row(5.0, 5.0, {{y, 2.0}, {w, 3.0}, {c, 1.0}});
+  b.row(1.0, kInf, {{c, 1.0}, {v, 1.0}});
+  Presolver pre;
+  REQUIRE(pre.run(b.build(), only_subst(), kQuiet) == PresolveStatus::Reduced);
+  CHECK_EQ(reduced_index(pre, c), -1);
+  CHECK(reduced_index(pre, y) >= 0);
+  std::vector<double> xr(pre.reduced().num_cols(), 0.0);
+  xr[reduced_index(pre, y)] = 1.0;
+  xr[reduced_index(pre, w)] = 1.0;
+  CHECK_NEAR(pre.postsolve(xr)[c], 0.0, 1e-12);
+}
+
+TEST(presolve_dual_bound_keeps_integral_value) {
+  // makespan C >= s_i + p_i with C's cost > 0: dual bound strengthening gives C <= max(ub_s + p) = 19 exactly
+  // (in the first round): no 1e-9 relative margin above an integral value.
+  Builder b;
+  const Index s1 = b.col(0.0, 0.0, 10.0, true);
+  const Index s2 = b.col(0.0, 2.0, 12.0, true);
+  const Index cmax = b.col(1.0, 0.0, kInf);
+  b.row(4.0, kInf, {{cmax, 1.0}, {s1, -1.0}});
+  b.row(7.0, kInf, {{cmax, 1.0}, {s2, -1.0}});
+  b.row(-kInf, 15.0, {{s1, 1.0}, {s2, 1.0}});
+  b.row(-3.0, 3.0, {{s1, 1.0}, {s2, -1.0}});  // locks s both ways (no dual fixing)
+  PresolveOptions o = only(false, false, false, true, false);
+  o.implied_int = false;
+  o.max_rounds = 1;  // later rounds keep shrinking the bounds
+  Presolver pre;
+  REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+  const Index rc = reduced_index(pre, cmax);
+  REQUIRE(rc >= 0);
+  const double ub = pre.reduced().col_ub[rc];
+  CHECK_EQ(ub, 19.0);
+}
+
+TEST(implied_integers_primal_chain) {
+  // Inventory chain s_t = s_{t-1} + x_t - d_t (integers x, integral d): every s_t is implied integer by the
+  // iterated primal rule; u = 0.5 x_1 + s_1 is not (non-integral ratio), nor is f in an inequality only.
+  Builder b;
+  std::vector<Index> x, st;
+  for (int t = 0; t < 4; ++t) x.push_back(b.col(1.0, 0.0, 10.0, true));
+  for (int t = 0; t < 4; ++t) st.push_back(b.col(0.5, 0.0, 30.5));
+  const Index u = b.col(1.0, 0.0, 100.0);
+  const Index f = b.col(1.0, 0.0, 100.0);
+  for (int t = 0; t < 4; ++t) {
+    std::vector<std::pair<Index, double>> r = {{st[t], 1.0}, {x[t], -1.0}};
+    if (t > 0) r.push_back({st[t - 1], -1.0});
+    b.row(-(t + 1.0), -(t + 1.0), r);
+  }
+  b.row(0.0, 0.0, {{u, 1.0}, {x[0], -0.5}, {st[0], -1.0}});
+  b.row(1.5, kInf, {{f, 1.0}, {x[1], 1.0}, {u, 1.0}});
+  const MipProblem p = b.build();
+  ImpliedIntStats is;
+  const std::vector<char> impl = detect_implied_integers(p, false, 1e-9, &is);
+  for (int t = 0; t < 4; ++t) CHECK(impl[st[t]]);
+  CHECK(!impl[u]);
+  CHECK(!impl[f]);
+  for (int t = 0; t < 4; ++t) CHECK(!impl[x[t]]);
+  CHECK_EQ(is.primal, 4);
+  CHECK_EQ(is.dual, 0);
+  // mark_implied_integers rounds the bounds (s_t <= 30).
+  MipProblem q = p;
+  CHECK_EQ(mark_implied_integers(q, false), 4);
+  CHECK_EQ(q.col_ub[st[0]], 30.0);
+  CHECK(q.is_implied_int(st[3]) && !q.is_implied_int(u) && !q.is_int[st[3]]);
+}
+
+TEST(implied_integers_dual_rule_makespan) {
+  // C >= s_i + p_i (integral p, integer s): only inequalities, so only the dual rule finds C. With a
+  // fractional p (2.5) the dual rule does not apply.
+  for (int frac = 0; frac < 2; ++frac) {
+    Builder b;
+    const Index s1 = b.col(0.0, 0.0, 10.0, true);
+    const Index s2 = b.col(0.0, 0.0, 10.0, true);
+    const Index cmax = b.col(1.0, 0.0, kInf);
+    b.row(frac ? 2.5 : 3.0, kInf, {{cmax, 1.0}, {s1, -1.0}});
+    b.row(4.0, kInf, {{cmax, 1.0}, {s2, -1.0}});
+    b.row(-kInf, 1.0, {{s1, 1.0}, {s2, -1.0}});
+    const MipProblem p = b.build();
+    CHECK(!detect_implied_integers(p, false)[cmax]);
+    ImpliedIntStats is;
+    CHECK_EQ(detect_implied_integers(p, true, 1e-9, &is)[cmax] != 0, frac == 0);
+    CHECK_EQ(is.dual, frac ? 0 : 1);
+    // Through presolve: the flag reaches the reduced problem (unless presolve removes C).
+    Presolver pre;
+    PresolveOptions o = only(false, false, false, false, false);
+    REQUIRE(pre.run(p, o, kQuiet) == PresolveStatus::Reduced);
+    const Index rc = reduced_index(pre, cmax);
+    REQUIRE(rc >= 0);
+    CHECK_EQ(pre.reduced().is_implied_int(rc), frac == 0);
+    CHECK_EQ(pre.stats().implied_int, frac ? 0 : 1);
+    o.implied_int_dual = false;
+    Presolver pre2;
+    REQUIRE(pre2.run(p, o, kQuiet) == PresolveStatus::Reduced);
+    CHECK(!pre2.reduced().is_implied_int(reduced_index(pre2, cmax)));
+  }
+}
+
+TEST(implied_integers_fractional_start_stays_feasible) {
+  // An implied integer is never required to be integral: a start with a fractional makespan (feasible)
+  // crushes to a feasible point of the reduced problem, and the solve finds the optimum 4 (s = 0, w = 1).
+  Builder b;
+  const Index s1 = b.col(0.0, 0.0, 10.0, true);
+  const Index s2 = b.col(0.0, 0.0, 10.0, true);
+  const Index cmax = b.col(1.0, 0.0, 40.0);
+  const Index w = b.col(0.0, 0.0, 1.0, true);
+  b.row(3.0, kInf, {{cmax, 1.0}, {s1, -1.0}});
+  b.row(4.0, kInf, {{cmax, 1.0}, {s2, -1.0}});
+  b.row(1.0, kInf, {{s1, 1.0}, {s2, 1.0}, {w, 1.0}});
+  b.row(-kInf, 1.0, {{s1, 1.0}, {w, 1.0}});
+  const Model model = b.b.build();
+  MipProblem p;
+  REQUIRE(MipProblem::from_model(model, &p));
+  Presolver pre;
+  PresolveOptions o = only(false, false, false, false, false);
+  REQUIRE(pre.run(p, o, kQuiet) == PresolveStatus::Reduced);
+  REQUIRE(pre.stats().implied_int >= 1);
+  const std::vector<double> start = {1.0, 2.0, 7.25, 0.0};
+  CHECK(p.max_violation(start) <= 1e-9);
+  CHECK(pre.reduced().max_violation(pre.crush(start)) <= 1e-9);
+  SolverParams params;
+  params.verbosity = 0;
+  params.threads = 1;
+  const SolveResult r = solve(model, params, start);
+  REQUIRE(r.status == Status::Optimal);
+  CHECK_NEAR(r.objective, 4.0, 1e-9);
 }
 
 TEST(presolve_parallel_columns) {
@@ -770,7 +947,9 @@ Status compare_with_presolve(const Model& m, int it) {
   MipProblem p;
   Presolver pre;
   const bool valid = MipProblem::from_model(m, &p);
-  const PresolveStatus ps = valid ? pre.run(p, PresolveOptions{}, kQuiet) : PresolveStatus::Infeasible;
+  PresolveOptions opt;
+  opt.substitution_bounded = it % 2 == 1;  // the default (off) and the opt-in variant
+  const PresolveStatus ps = valid ? pre.run(p, opt, kQuiet) : PresolveStatus::Infeasible;
   g_stats.aggregations += pre.stats().aggregations;
   g_stats.substitutions += pre.stats().substitutions;
   g_stats.probing_fixed += pre.stats().probing_fixed;
@@ -1046,4 +1225,199 @@ TEST(presolve_random_clique_models_match_no_presolve) {
   CHECK(optimal > iters / 3);
   CHECK(ext > 0);
   CHECK(fixed > 0);
+}
+
+// The search's answer on the presolved problem, mapped back (solver/postsolve.hpp). binkar10_1: penalty
+// columns (cost 1e6) are column singletons of equations s = z - a; presolve substitutes them out and
+// their bound s >= 0 becomes the row z - a >= 0, which an LP point may violate within the feasibility
+// tolerance. Postsolve clamps s into its bound, which moves that violation into the objective: the
+// postsolved incumbent came out 1e6 * 2.5e-8 worse than the search's, beyond the gap, as "optimal".
+namespace {
+
+struct PenaltyModel {
+  MipProblem p;
+  Index z1 = -1, z2 = -1, a1 = -1, a2 = -1, s1 = -1, s2 = -1;
+};
+
+// min -a1 - a2 + 1e6 (s1 + s2): s_k = z_k - a_k >= 0, a1 + a2 <= 1.5, z binary, a in [0, 1]. Optimum -1.
+PenaltyModel penalty_model() {
+  Builder b;
+  PenaltyModel m;
+  m.z1 = b.col(0.0, 0.0, 1.0, true);
+  m.z2 = b.col(0.0, 0.0, 1.0, true);
+  m.a1 = b.col(-1.0, 0.0, 1.0);
+  m.a2 = b.col(-1.0, 0.0, 1.0);
+  m.s1 = b.col(1e6, 0.0, kInf);
+  m.s2 = b.col(1e6, 0.0, kInf);
+  b.row(0.0, 0.0, {{m.z1, 1.0}, {m.a1, -1.0}, {m.s1, -1.0}});
+  b.row(0.0, 0.0, {{m.z2, 1.0}, {m.a2, -1.0}, {m.s2, -1.0}});
+  b.row(-kInf, 1.5, {{m.a1, 1.0}, {m.a2, 1.0}});
+  m.p = b.build();
+  return m;
+}
+
+// Presolves m (substitution only: s1, s2 go) and returns the search's answer at the reduced point
+// z = (z1, z2), a = (a1, a2), claimed optimal.
+MipResult penalty_answer(const PenaltyModel& m, Presolver& pre, double z1, double z2, double a1, double a2) {
+  PresolveOptions o = only(false, false, false, false, false);
+  o.substitution = true;
+  REQUIRE(pre.run(m.p, o, kQuiet) == PresolveStatus::Reduced);
+  const MipProblem& q = pre.reduced();
+  REQUIRE(reduced_index(pre, m.s1) == -1);
+  REQUIRE(reduced_index(pre, m.s2) == -1);
+  REQUIRE(q.num_cols() == 4);
+  std::vector<double> xr(4, 0.0);
+  xr[reduced_index(pre, m.z1)] = z1;
+  xr[reduced_index(pre, m.z2)] = z2;
+  xr[reduced_index(pre, m.a1)] = a1;
+  xr[reduced_index(pre, m.a2)] = a2;
+  MipResult mr;
+  mr.status = Status::Optimal;
+  mr.has_solution = true;
+  mr.x = xr;
+  mr.objective = mr.bound = q.objective(xr);
+  return mr;
+}
+
+}  // namespace
+
+namespace {
+
+// Random models with implied-integer structure: continuous columns defined by equations over integers
+// (chains through other continuous columns), makespan-like inequalities, some fractional coefficients
+// (no implied integer) and integral or half-integral costs.
+Model random_implint_model(std::mt19937& rng) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  ModelBuilder b;
+  const int ni = uni(2, 6), nc = uni(1, 4);
+  std::vector<Index> xi, xc;
+  for (int j = 0; j < ni; ++j) {
+    xi.push_back(b.add_col("i" + std::to_string(j), uni(-3, 3), uni(-2, 0), uni(1, 4), VarType::Integer));
+  }
+  for (int j = 0; j < nc; ++j) {
+    const double lb = uni(0, 4) == 0 ? -kInf : (uni(0, 3) == 0 ? -1.5 : 0.0);
+    const double ub = uni(0, 2) == 0 ? kInf : uni(5, 20) + 0.5 * uni(0, 1);
+    xc.push_back(b.add_col("c" + std::to_string(j), uni(-1, 3) * (uni(0, 3) ? 1.0 : 0.5), lb, ub));
+  }
+  auto pick = [&](const std::vector<Index>& v) { return v[uni(0, static_cast<int>(v.size()) - 1)]; };
+  int r = 0;
+  auto add_row = [&](double lo, double hi, const std::vector<std::pair<Index, double>>& coefs) {
+    const Index i = b.add_row("r" + std::to_string(r++), lo, hi);
+    std::vector<Index> seen;
+    for (const auto& [j, v] : coefs) {
+      if (std::find(seen.begin(), seen.end(), j) != seen.end()) continue;
+      seen.push_back(j);
+      b.add_coef(i, j, v);
+    }
+  };
+  for (int k = 0; k < nc; ++k) {
+    const Index c = xc[k];
+    const double a = uni(0, 2) == 0 ? 2.0 : 1.0;
+    const int kind = uni(0, 3);
+    std::vector<std::pair<Index, double>> coefs = {{c, a}};
+    for (int t = uni(1, 3); t > 0; --t) coefs.push_back({pick(xi), uni(-2, 2) * a * (uni(0, 5) ? 1.0 : 0.5)});
+    if (k > 0 && uni(0, 1)) coefs.push_back({xc[k - 1], -a});  // chain
+    const double side = a * uni(-3, 3) + (uni(0, 6) ? 0.0 : 0.5);
+    if (kind <= 1) {
+      add_row(side, side, coefs);
+    } else if (kind == 2) {  // makespan: c >= ... (several rows)
+      add_row(side, kInf, coefs);
+      add_row(side - a * uni(0, 2), kInf, {{c, a}, {pick(xi), -a}});
+    } else {
+      add_row(-kInf, side + a * 4, coefs);
+    }
+  }
+  for (int t = uni(0, 3); t > 0; --t) {  // knapsacks on the integers
+    std::vector<std::pair<Index, double>> coefs;
+    for (int q = uni(2, 4); q > 0; --q) coefs.push_back({pick(xi), static_cast<double>(uni(1, 5))});
+    add_row(-kInf, uni(2, 10), coefs);
+  }
+  if (uni(0, 1)) b.model().sense = ObjSense::Maximize;
+  return b.build();
+}
+
+}  // namespace
+
+TEST(postsolve_result_reoptimizes_objective_lost_to_clamping) {
+  const PenaltyModel m = penalty_model();
+  Presolver pre;
+  // An optimal LP point within the tolerance: a1 = d puts s1 = -d (z1 - a1 >= 0 violated by d), a2 = 1 - d
+  // puts s2 = d; objective -1, the optimum (-1e6 d and +1e6 d cancel).
+  const double d = 1e-7;
+  MipResult mr = penalty_answer(m, pre, 0.0, 1.0, d, 1.0 - d);
+  CHECK(pre.reduced().max_violation(mr.x) <= 1e-6);
+  CHECK_NEAR(mr.objective, -1.0, 1e-6);
+  // Postsolve clamps s1 to 0 and keeps s2 = d: -1 + 1e6 d, feasible within the tolerance.
+  const std::vector<double> xs = pre.postsolve(mr.x);
+  CHECK_NEAR(m.p.objective(xs), -0.9, 1e-6);
+  CHECK(m.p.max_violation(xs) <= 1e-6);
+  SolverParams params;
+  params.mip_rel_gap = 1e-6;
+  const Timer timer;
+  REQUIRE(postsolve_result(m.p, pre, params, timer, kQuiet, &mr));
+  CHECK(mr.has_solution);
+  CHECK_NEAR(mr.objective, -1.0, 1e-9);
+  CHECK_NEAR(m.p.objective(mr.x), mr.objective, 1e-12);
+  CHECK(m.p.max_violation(mr.x) <= 1e-9);
+  CHECK(mr.bound <= mr.objective);
+}
+
+TEST(postsolve_result_repairs_or_rejects_infeasible_points) {
+  // As above with d = 3e-6: the clamp leaves the postsolved point 3e-6 outside the row of s1, beyond the
+  // tolerance. Repaired by the LP when that keeps the search's objective (relative 1e-6) ...
+  const PenaltyModel m = penalty_model();
+  const double d = 3e-6;
+  SolverParams params;
+  const Timer timer;
+  Presolver pre;
+  MipResult mr = penalty_answer(m, pre, 0.0, 1.0, d, 1.0 - d);
+  CHECK(m.p.max_violation(pre.postsolve(mr.x)) > 1e-6);
+  REQUIRE(postsolve_result(m.p, pre, params, timer, kQuiet, &mr));
+  CHECK_NEAR(mr.objective, -1.0, 1e-9);
+  CHECK(m.p.max_violation(mr.x) <= 1e-9);
+  // ... else dropped (the caller solves without presolve): z = (0, 0), a1 = d claims -(1e6 + 1) d, the
+  // repaired point is worth 0.
+  Presolver pre2;
+  MipResult mr2 = penalty_answer(m, pre2, 0.0, 0.0, d, 0.0);
+  CHECK_NEAR(mr2.objective, -3.0, 1e-4);
+  CHECK(!postsolve_result(m.p, pre2, params, timer, kQuiet, &mr2));
+  CHECK(!mr2.has_solution);
+}
+
+TEST(presolve_random_implied_integer_models) {
+  // Presolve on / off agree, and an independent reference without objective integrality (costs divided by 3,
+  // so the objective is never integral) gives the same optimum: rounding the bound by the implied integers'
+  // objective integrality must not cut off the optimum.
+  std::mt19937 rng(fuzz_seed(2026u));
+  const int iters = fuzz_iters(800);
+  int optimal = 0;
+  long long implied = 0;
+  SolverParams params;
+  params.verbosity = 0;
+  params.threads = 1;
+  params.mip_rel_gap = 0.0;
+  params.mip_abs_gap = 1e-9;
+  params.node_limit = 20000;
+  for (int it = 0; it < iters; ++it) {
+    const Model m = random_implint_model(rng);
+    const Status st = compare_with_presolve(m, it);
+    MipProblem p;
+    REQUIRE(MipProblem::from_model(m, &p));
+    for (char c : detect_implied_integers(p)) implied += c;
+    if (st != Status::Optimal) continue;
+    ++optimal;
+    const SolveResult a = solve(m, params);
+    Model m3 = m;
+    for (double& c : m3.obj) c /= 3.0;
+    const SolveResult ref = solve(m3, params);
+    REQUIRE(a.status == Status::Optimal);
+    if (ref.status != Status::Optimal) continue;  // node limit
+    if (!CHECK_NEAR(a.objective, 3.0 * ref.objective, 1e-6 * std::max(1.0, std::abs(a.objective)))) {
+      std::fprintf(stderr, "  case %d: objective %.9g vs reference %.9g\n", it, a.objective, 3.0 * ref.objective);
+    }
+  }
+  std::printf("  implied-integer models: %d optimal, %lld implied integers\n", optimal, implied);
+  print_coverage("implint");
+  CHECK(optimal > iters / 4);
+  CHECK(implied > iters / 2);
 }

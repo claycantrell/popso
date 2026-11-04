@@ -1,6 +1,228 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 — 2026-11
+
+MILP: root strong branching, network cut-set cuts, a local-search primal heuristic and earlier
+root heuristics, conflict analysis by generalized resolution, presolve of long equations and
+implied integers. Also LP and fixed-MIP dual values, interrupts, an incumbent callback and gzipped
+input.
+
+**Benchmarks**
+- 43 hard MIPLIB 2017 instances (600 s, 4 threads): 15 solved, shifted geometric mean 324.9 s
+  (v0.3.0: 9, 468.9 s; HiGHS 12, SCIP 6). Newly solved: nexp-150-20-8-5 (16 s), tr12-30,
+  supportcase26, neos-1171737, neos-1456979, fhnw-binpack4-48; all nine solved before still are
+  (csched007 326 -> 171 s, gen-ip054 541 -> 217 s; glass4 356 -> 534 s).
+- 63-instance MIPLIB 2017 subset (120 s, 4 threads), seeds 0 / 1 / 2: 58 / 59 / 61 solved, shifted
+  geometric mean 10.7 / 10.8 / 9.9 s (v0.4.0: 59 / 59 / 58, 10.5 / 10.9 / 11.4 s); about 4% faster
+  over the three seeds.
+- Generated models (1 thread, 120 s): 146 of 148 solved (v0.4.0: 147); the difference is
+  binpack_hard_1, which depends on the seed in both versions.
+
+**Root strong branching rounds**
+- After the root cut loop and the root heuristics, the root strong-branches the fractional
+  candidates in pseudocost order (dual simplex warm starts from the root basis, at most
+  root LP iterations / 10 clamped to [100, 500] iterations per child, stop after 8 candidates
+  without a better score, total budget 0.5x the root LP iterations + 5000). A candidate whose one
+  child is infeasible or cut off is fixed to the other side globally; the root is then processed
+  again (propagation of the fixings, LP, up to 5 cut rounds that keep the earlier cut rows,
+  another pass) while passes fix and budget remains. The probes initialise the pseudocosts, the
+  root branches on the best probed candidate with its children's exact bounds, and
+  max over candidates of the smaller child bound is a global bound. Not in sub-MIP heuristics.
+  Knobs: `MILP_ROOT_SB=0` off, `MILP_ROOT_SB_WORK`, `_OFS`, `_ITERS`, `_CANDS`, `_LOOKAHEAD`,
+  `_PASSES`, `_CUTS`, `_SUBMIP=1`.
+- Root gap (miplib_wide_core, mean share of the root gap closed): 66.8 -> 67.3% (SCIP 64.6%), app1-1
+  78 -> 92.5% (SCIP 95%), seymour1 43 -> 48%; root time shifted geomean 3.86 -> 4.06 s.
+- End to end (miplib_wide_core, 120 s, 4 threads, A and B back to back): on the 35 instances
+  where root strong branching fixes columns or moves the root bound, 0.968x shifted geomean over seeds
+  1, 2 (1.010 / 0.928; solved 34 -> 33 / 33 -> 34), swath3 78 -> 31 s, timtab1 14 -> 6 s, ns1830653
+  94 -> 49 s; slower h80x6320d, mzzv11. Root time on the other 28: 1.045x. --deterministic
+  cflp_medium_1: 7286 -> 3623 nodes.
+- `CutLoopOptions::keep_rows`: a cut loop on an LP that already has cut rows only removes its own.
+
+**Interfaces: dual values, interrupts, incumbent callback, gzipped input**
+- LP duals: row duals, reduced costs and the optimal basis of LPs solved to optimality. Presolve
+  only postsolves primal points, so the duals are recovered in the original space after the solve:
+  a crossover (primal push only; `crossover()` now accepts a point without duals) from the
+  postsolved optimal point gives a basis of the original LP, and the simplex finishes it (primal
+  first). The duals of that optimal basis are complementary to the returned solution (any optimal
+  primal-dual pair is), with or without presolve; the primal solution and all search statistics are
+  unchanged. Cost: 0-75 cleanup iterations on the generated instances, < 0.01 s up to the medium
+  ones, 0.9 s on randlp_large (24 s solve). New `solver/duals.hpp`.
+- Fixed-MIP duals: the duals of the LP with the integer columns fixed at the incumbent, after the
+  solve, on request (`SolverParams::duals` = 2; 1 = LPs only, 0 = none). Not for models with
+  logical constraints (SOS, indicators, semi-continuous) or quadratic objectives.
+- Exposed as before for QPs: CLI `--duals <file>` (also sets fixed-MIP duals for MILPs; a comment
+  line marks them), C API `popso_get_duals` / `popso_get_reduced_costs` with the new parameter
+  `duals` (default 1 in the C API and Python, 0 in the CLI without `--duals`), `popso_has_duals`
+  returns 2 for fixed-MIP duals, new `popso_has_basis` / `popso_get_basis` (`POPSO_BASIS_BASIC`,
+  `_LOWER`, `_UPPER`, `_ZERO`); Python `Result.duals`, `reduced_costs`, `fixed_mip_duals`,
+  `var_basis`, `constr_basis` (`popso.BASIC`, `AT_LOWER`, `AT_UPPER`, `AT_ZERO`), `solve(duals=2)`.
+- Interrupts: `SolverParams::interrupt` (an `std::atomic<bool>*`); once set, the solve stops with
+  the existing status `Interrupted` (C `POPSO_STATUS_INTERRUPTED`) and the best solution so far. The
+  flag is installed as a thread-local pointer (`core/interrupt.hpp`) that every solver thread
+  inherits, and polled by the branch-and-bound loops (opportunistic and deterministic), the simplex
+  iterations, the barrier iterations, its Cholesky factorization (per supernode and panel) and CG
+  refinement, the cut loop, presolve rounds and probing, symmetry detection, feasibility jump,
+  diving, the feasibility pump, sub-MIP retries and the MIQP search. Measured stop latency after
+  the request: 3-40 ms (cflp_hard root and tree, randlp_large in the barrier, which took up to
+  1.5 s before the factorization and CG checks). Separate models in different threads do not
+  interrupt each other. C API `popso_interrupt(m)` (one lock-free atomic store: thread-safe and
+  async-signal-safe; the request is cleared when `popso_solve` starts). CLI: SIGINT (`std::signal`)
+  stops the solve and prints the normal summary; a second Ctrl-C ends the process. Python:
+  `Model.interrupt()`; Ctrl-C during `solve()` returns the result with status `"INTERRUPTED"` (the
+  native solve runs on a helper thread when called from the main thread).
+- Incumbent callback: `SolverParams::on_incumbent(x, objective, bound)` / C
+  `popso_set_incumbent_callback(m, fn, user_data)` with `int fn(void* user_data, double objective,
+  double bound, const double* x, int num_vars)`, Python `Model.set_incumbent_callback(fn)` with
+  `fn(objective, bound, x)`. The point is mapped back through presolve, symmetry reductions,
+  restarts and logical reformulations to the model's columns; calls are serialized, strictly
+  improving and, in deterministic mode, made at the deterministic merge points (identical sequences
+  across runs); the final postsolved solution is reported too if it improves. A nonzero / true
+  return (or a Python exception, re-raised by `solve()`) stops the solve like an interrupt; no calls
+  follow. Not for quadratic objectives.
+- Gzipped input: `.mps.gz` / `.lp.gz` (any file starting with the gzip magic bytes, whatever its
+  name) are decompressed while reading by a from-scratch inflate (`io/gzip.hpp`, RFC 1951/1952:
+  stored, fixed- and dynamic-Huffman blocks, all header flags, concatenated members, CRC-32 and
+  length checks; streaming input and output with a 32 KB window; ~280 MB/s). MIPLIB `.mps.gz` files
+  can be read directly (`benchmarks/miplib/download.py` still unpacks them).
+- No change to search results: `--deterministic --threads 2` gives the same nodes / LP iterations
+  (cflp_medium 7286 / 269906, gap_medium 8551 / 186860, lotsize_medium 7469 / 160109) at the same
+  speed (time ratios 0.99-1.004).
+- Tests: `lp_duals_kkt_random` (150 random LPs with every bound and row type and presolvable
+  structure, minimization and maximization, presolve on and off: stationarity, sign conditions,
+  complementarity <= 1e-7, strong duality, square basis), `lp_duals_generated_instances` (randlp,
+  transport, 20 lpsanity LPs), `fixed_mip_duals_match_fixed_lp` (80 random MILPs: the fixed-MIP duals
+  are optimal for the LP with the integers fixed, against its own solve), interrupt tests (preset
+  flag, flag set from a thread during the search, LP / barrier / MIQP paths, scope inheritance),
+  incumbent callback order / determinism / stop, gzip test vectors made with Python's zlib (levels
+  0-9, Huffman-only strategy, all header flags, two members, 368 KB with window slides, byte-by-byte
+  input), corrupt and truncated data, gzipped model files; C API and Python tests for all of it
+  (including a simulated Ctrl-C).
+
+**Primal heuristics: earlier incumbents**
+- Local-MIP style local search (new `heuristics/lmip.hpp`, after Lin et al., "Local-MIP", 2024/25):
+  tight moves, lift moves and breakthrough moves with weighted constraint scores, run first on the
+  feasibility-jump thread (default effort 3e9, about 5-10 s; random restarts while no solution is
+  known); in opportunistic mode the thread then restarts it from each new incumbent with the
+  incumbent as cutoff, at most 5% of the elapsed time. Single-threaded root heuristic study: a first
+  feasible point on 58 of 63 core instances (feasibility jump alone: 50) and 36 of 43 hard ones (28).
+  Measured end to end (miplib_wide_core, 120 s, 4 threads, seeds 1-2, x86-64 Linux machine): solved 102 ->
+  109 of 126, shifted geomean 20.2 -> 18.4 s. `MILP_LMIP=0` turns it off.
+- Root-LP sub-MIP (`lp_rens` in `heuristics/submip`), run at the root when no incumbent exists:
+  RENS with relaxed, checked fixing. Integer columns that are integral in the root LP are fixed in
+  batches (largest |reduced cost| first, then the longest columns), each batch propagated, the LP
+  re-solved and the restricted problem presolved (light probing); a batch the LP or presolve rejects
+  is undone and split, a single rejected column stays free; with no integral column left the least
+  fractional one is rounded. The sub-MIP on the remaining domain is retried with a bisection on the
+  fixing rate (exhausted: fix less; limit hit: fix more), and when the two bounds meet the fixings
+  between them are left free and the dive starts again from the target (0.7). Work budget in
+  deterministic mode (2x the root sub-MIP iteration cap), time otherwise (max(2 s, root time),
+  at most 10% of the remaining time). `MILP_NO_LP_RENS=1` turns it off.
+- Root heuristics without an incumbent run the sub-MIP heuristics (RENS, feasibility pump,
+  root-LP sub-MIP) and the four dives as one parallel batch (sub-MIPs first) instead of dives first;
+  in opportunistic mode every point is published as soon as its task ends (blp-ic98: first
+  incumbent 8 s instead of 16-21 s). `MILP_NO_ROOT_MERGE`, `MILP_NO_EARLY_PUBLISH`.
+- Root LNS rounds get at least 3 s (deterministic: 4x the LP iterations) when the incumbent is more
+  than 1% above the root bound (`MILP_ROOT_LNS_POOR`, seconds; 0 = off).
+- Tree LNS: on slow nodes the sub-MIPs no longer wait 100 nodes between calls; 10 nodes and 50000
+  search LP iterations since the last call suffice (`MILP_LNS_ITER_GAP`, 0 = off). The share of LP
+  work they may use is unchanged.
+- RINS caps its fixing rate: when the agreement between LP point and incumbent fixes > 60% and the
+  sub-MIP is exhausted (often already in presolve: nexp-150-20-8-5 fixed 95%), the next RINS
+  leaves a random subset of the agreeing columns free down to 10% below that rate (at least 50%);
+  a limit hit raises the cap again (`MILP_NO_RINS_CAP`).
+- Measured (60 instances of miplib_wide_core, 120 s, 4 threads, seeds 1-2, A and B back to
+  back): solved 110 -> 113 of 120, shifted geomean 13.67 -> 12.17 s (ratio 0.898, 90% CI
+  [0.832, 0.969]); blp-ic98 first incumbent 12.6-21 s -> 5.6-8 s. neos-3216931-puriri still has no
+  incumbent in 120 s.
+
+**Cutting planes and presolve**
+- Network cut-set cuts (new `cuts/mcf.hpp`, separator "mcf", root cut loop): multi-commodity flow
+  structure is detected (flow conservation rows, arc or undirected edge capacity rows with integer
+  design columns, nodes shared by the commodities), and for single nodes and the node sets formed by
+  contracting the non-binding arcs, the flow rows of the set plus the capacity rows of the crossing
+  arcs give c-MIR / aggregated cover cuts (as SCIP's mcf separator). nexp-150-20-8-5: root bound
+  92.4 -> 230.2 (optimum 231), solved in 22 s (4 threads; before: not solved in 600 s). `MILP_MCF=0`
+  turns it off.
+- Presolve no longer substitutes continuous columns with an objective coefficient out of an equation
+  when the equation does not imply their bounds (the bounds became the row's sides and the columns'
+  variable bounds were lost to the c-MIR path aggregation): tr12-30 root bound 127730 -> ~130000
+  (optimum 130596), solved in 274 s (4 threads; before: not solved in 600 s).
+  `MILP_PRESOLVE_ON=subst_bounded` restores the old behavior.
+
+**Presolve: long equations, implied integers**
+- Column singletons are substituted out of equations of any length (the 1000-entry limit now only
+  applies to non-singleton pivots), implied free singletons also when their coefficient is small
+  relative to the row (objective-defining rows z = c^T x: blp-ic98 z with 1 vs 1973), implied free
+  ones first; a singleton that does not qualify no longer keeps the other columns from being tried.
+  Presolved nonzeros: blp-ic98 191.7k -> 169.6k, leo1 114.2k -> 107.4k, swath1/3 31.7k -> 25.5k,
+  mcsched 7.4k -> 4.5k, germanrr 168.6k -> 157.9k, sct2 20.1k -> 19.0k (HiGHS: 175k / 107k / 25.5k /
+  4.6k / 158k / 18.8k).
+- Dual bound strengthening keeps an integral continuous bound integral (csched008's makespan bound
+  was 190.000000191: a relative 1e-9 margin on top of an exact 190).
+- Implied integers (`presolve/implied_int.hpp`): continuous columns integral in every feasible point
+  with integral integers (primal rule: an equation whose other columns are (implied) integer with
+  integral ratios and side, iterated to a fixed point) or movable to an integral value without loss
+  (dual rule: integral bounds and only such rows). Stored as `MipProblem::implied_int` (not
+  `is_int`): never branched on, not required for feasibility; their bounds are rounded; used for
+  objective integrality (replaces the one-level equation check of the search) and treated as integers
+  by the c-MIR and Gomory separators (with integral bounds). csched008 212 of 212 continuous columns,
+  csched007 292/292, uct-subprob 1445/1445, neos-3216931-puriri 159/159, trento1 668/683,
+  neos-827175 10248/10248; csched007/008 and uct-subprob now have an integral objective.
+  `MILP_PRESOLVE_OFF=implint` / `implint_dual` switch the detection / the dual rule off.
+- Measured (A and B back to back, 4 threads, 2 seeds, 120 s): 46 of the 63 core instances
+  presolve to byte-identical models (unchanged search, presolve time 9.68 vs 9.57 s); on the 17 others
+  solved 15 / 13 (seed 1) and 13 / 15 (seed 2), geomean time ratio 0.957, WRONG 0 (irp 0.44, eil33-2
+  0.58; swath3 / CMS750_4 lost a seed-1 solve). At 300 s: csched007 solved (288 s; was 2.9% gap),
+  uct-subprob optimum 314 found and bound 295.4 -> 298, sct2 gap 0.025% -> 0.017%; csched008 bound still
+  171; blp-ic98 35% fewer nodes (denser objective), bound 4454.7 -> 4450.5, incumbent 4508.4 -> 4504.9.
+- Tests: long objective-row substitution, singleton blocking, integral dual bound, primal chain and
+  dual (makespan) detection, a fractional start for an implied integer, 800 random implied-integer
+  models (presolve on / off and an objective-scaled reference without objective integrality), LP
+  duals with a substituted 1200-entry objective row.
+
+**Conflict analysis**
+- Cut-based conflict analysis by generalized resolution (new `search/genres.hpp`, after Mexi et al.,
+  "Cut-based conflict analysis in mixed integer programming", IJOC 2025): an infeasible or cut-off
+  node's dual proof is resolved against the reason constraints of the trail's bound changes, with
+  c-MIR reduction of the intermediate constraints, and the learned linear constraints are used next
+  to the existing conflict clauses. Validity tests by enumeration on random pure-integer and mixed
+  models. Measured (miplib_wide_core, 120 s, 4 threads, 3 seeds, A and B back to back): seed 1
+  solved 58 -> 60 of 63 at the same shifted geomean; seeds 2-3 solved 104 -> 105 of 126, shifted
+  geomean 20.16 -> 19.77 s. `MILP_GENRES=0` turns it off (`2`: conflict clauses only where the
+  resolution fails).
+
+**Fixes**
+- binkar10_1 (`--gap 1e-6`) sometimes ended OPTIMAL at a worse objective (6742.22-6743.43 for the
+  optimum 6742.200024; reproducible with `--deterministic --threads 2 --seed 4`). Presolve
+  substitutes its penalty columns (cost 1e6, column singletons of equations) out, so their bound
+  becomes a row of the presolved problem; an LP point may violate that row within the feasibility
+  tolerance, and postsolve, which clamps the substituted column into its bound, moved the violation
+  into the objective (2.5e-8 x 1e6). The search's incumbent and proof were for the presolved value
+  (6742.1993); the postsolved point was 0.026 worse. Now a postsolved point whose objective came out
+  worse than the search's gets its continuous columns re-optimized (integers fixed, LP at primal
+  tolerance 1e-9; 6742.200024 here), and the better point is kept (new `solver/postsolve.hpp`). The
+  search is unchanged.
+- A search stopped by a limit or an interrupt right after an in-tree restart reported its bound
+  as -inf; it now keeps the bound from before the restart.
+- Gzip input: the decompressed size is capped (default 16 GiB, `milp::set_gzip_max_output`), so a
+  small high-ratio file can no longer exhaust memory; the error names the file and the limit.
+- LP and fixed-MIP duals are dropped (with a log line) when the basis they come from does not
+  reproduce the solution's objective (relative 1e-6; fixed-MIP: may be better than the incumbent,
+  which is logged). Documented what fixed-MIP duals mean after an early stop (the fixed LP's
+  optimum, not necessarily complementary to the incumbent's continuous part).
+- The dual recovery (crossover and simplex cleanup) now honours interrupts and the time limit
+  (at least 1 s) and gives up on the duals when stopped; the crossover used to ignore both.
+- C++ API: a stop requested by the incumbent callback set the caller's `SolverParams::interrupt`
+  flag, so reusing the params interrupted the next solve at once. The callback now uses an
+  internal flag; the caller's flag is only read (`InterruptScope` takes two flags).
+- Python: any exception (not only KeyboardInterrupt) escaping the wait in `solve()` now interrupts
+  the native solve and waits for the helper thread, which used to keep running on a model that
+  could be freed.
+- Time limit inside the barrier: checked with the interrupt's fine-grained checks (Cholesky
+  supernodes and panels, CG refinement) through a thread-local deadline (`DeadlineScope`,
+  `interrupted_or_expired()`); `--time-limit 0.0001` on randlp_large stops after 0.5 s instead of
+  7 s.
 
 ## v0.4.2 — 2026-11
 
@@ -51,7 +273,7 @@ and symmetry-breaking reductions for MILP.
   barrier's final point, in the model's objective sense. CLI `--duals <file>` (`row <name>
   <value>` / `col <name> <value>` lines), C API `popso_has_duals`, `popso_get_duals`,
   `popso_get_reduced_costs`, Python `Result.duals`, `Result.reduced_costs`, `Result.dual(c)`,
-  `Result.reduced_cost(x)`. Not for LPs, MILPs and MIQPs.
+  `Result.reduced_cost(x)`. Not for MIQPs (LPs and MILPs: see "Interfaces" below).
 - Presolve for quadratic models (QP and MIQP): fixed and empty columns (their quadratic terms
   folded into the costs and the objective constant), dual fixing of columns without quadratic
   terms, empty, free and singleton rows, redundant row sides and infeasibility from row

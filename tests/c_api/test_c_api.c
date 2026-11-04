@@ -9,14 +9,19 @@
 
 static int failures = 0;
 static int checks = 0;
+static int trace = 0; /* C_API_TRACE=1: print every check's line (to find a crash) */
 
-#define CHECK(cond)                                                     \
-  do {                                                                  \
-    ++checks;                                                           \
-    if (!(cond)) {                                                      \
-      ++failures;                                                       \
+#define CHECK(cond)                                                       \
+  do {                                                                    \
+    int ok_;                                                              \
+    ++checks;                                                             \
+    if (trace) fprintf(stderr, "  line %d\n", __LINE__);                 \
+    ok_ = (cond) != 0;                                                    \
+    if (trace) fprintf(stderr, "  line %d done\n", __LINE__);            \
+    if (!ok_) {                                                           \
+      ++failures;                                                         \
       fprintf(stderr, "%s:%d: FAILED: %s\n", __FILE__, __LINE__, #cond); \
-    }                                                                   \
+    }                                                                     \
   } while (0)
 
 #define CHECK_OK(call) CHECK((call) == POPSO_OK)
@@ -200,6 +205,108 @@ static void test_infeasible_and_lp(void) {
   CHECK_OK(popso_get_solution(m, x, 2));
   CHECK_NEAR(x[0], 0.8);
   CHECK_NEAR(x[1], 0.6);
+  /* LP duals (default duals = 1): y = (0.4, 0.2), reduced costs 0, both rows at their lower bounds. */
+  {
+    double y[2], d[2], v;
+    int vs[2], rs[2];
+    CHECK_OK(popso_get_param(m, "duals", &v));
+    CHECK(v == 1.0);
+    CHECK(popso_has_duals(m) == 1);
+    CHECK_OK(popso_get_duals(m, y, 2));
+    CHECK_NEAR(y[0], 0.4);
+    CHECK_NEAR(y[1], 0.2);
+    CHECK_OK(popso_get_reduced_costs(m, d, 2));
+    CHECK(fabs(d[0]) < 1e-9 && fabs(d[1]) < 1e-9);
+    CHECK(popso_has_basis(m) == 1);
+    CHECK_OK(popso_get_basis(m, vs, rs));
+    CHECK(vs[0] == POPSO_BASIS_BASIC && vs[1] == POPSO_BASIS_BASIC);
+    CHECK(rs[0] == POPSO_BASIS_LOWER && rs[1] == POPSO_BASIS_LOWER);
+    CHECK_OK(popso_get_basis(m, NULL, rs));
+    /* Maximizing -x - y: the same point, duals of the opposite sign. */
+    {
+      const int all[2] = {0, 1};
+      const double neg[2] = {-1.0, -1.0};
+      CHECK_OK(popso_set_objective(m, 2, all, neg));
+      CHECK_OK(popso_set_objective_sense(m, POPSO_MAXIMIZE));
+    }
+    CHECK_OK(popso_solve(m));
+    CHECK_OK(popso_get_duals(m, y, 2));
+    CHECK_NEAR(y[0], -0.4);
+    CHECK_NEAR(y[1], -0.2);
+    CHECK_OK(popso_set_param(m, "duals", 0));
+    CHECK_OK(popso_solve(m));
+    CHECK(popso_has_duals(m) == 0 && popso_has_basis(m) == 0);
+    CHECK(popso_get_basis(m, vs, rs) == POPSO_ERROR_NO_SOLUTION);
+    CHECK(popso_set_param(m, "duals", 3) == POPSO_ERROR_INVALID_ARGUMENT);
+  }
+  popso_free(m);
+}
+
+/* Incumbent callback: records the objectives; stops after `stop_after` calls (0: never). */
+struct cb_state {
+  int calls;
+  int stop_after;
+  int num_vars;
+  double objectives[64];
+  double bounds[64];
+};
+
+static int record_incumbent(void* data, double objective, double bound, const double* x, int num_vars) {
+  struct cb_state* s = (struct cb_state*)data;
+  (void)x;
+  if (s->calls < 64) {
+    s->objectives[s->calls] = objective;
+    s->bounds[s->calls] = bound;
+  }
+  ++s->calls;
+  s->num_vars = num_vars;
+  return s->stop_after > 0 && s->calls >= s->stop_after;
+}
+
+static void test_control_and_fixed_duals(void) {
+  popso_model* m = build_small();
+  struct cb_state st;
+  double obj, y[3], d[3];
+  int k;
+  memset(&st, 0, sizeof st);
+  CHECK(popso_interrupt(NULL) == POPSO_ERROR_INVALID_ARGUMENT);
+  /* An interrupt while no solve runs does not affect the next solve. */
+  CHECK_OK(popso_interrupt(m));
+  CHECK_OK(popso_set_incumbent_callback(m, record_incumbent, &st));
+  CHECK_OK(popso_set_param(m, "duals", 2));
+  CHECK_OK(popso_solve(m));
+  CHECK(popso_get_status(m) == POPSO_STATUS_OPTIMAL);
+  CHECK(st.calls >= 1 && st.num_vars == 3);
+  CHECK_NEAR(st.objectives[st.calls - 1], 13.0);
+  for (k = 1; k < st.calls && k < 64; ++k) CHECK(st.objectives[k] > st.objectives[k - 1]); /* maximization */
+  for (k = 0; k < st.calls && k < 64; ++k) CHECK(st.bounds[k] >= st.objectives[k] - 1e-9);
+  /* Fixed-MIP duals: every variable is integer, so y = 0 and d = c. */
+  CHECK(popso_has_duals(m) == 2);
+  CHECK_OK(popso_get_duals(m, y, 3));
+  CHECK_OK(popso_get_reduced_costs(m, d, 3));
+  CHECK(y[0] == 0.0 && y[1] == 0.0 && y[2] == 0.0);
+  CHECK_NEAR(d[0], 5.0);
+  CHECK_NEAR(d[2], 3.0);
+  CHECK_OK(popso_set_incumbent_callback(m, NULL, NULL));
+  st.calls = 0;
+  CHECK_OK(popso_solve(m));
+  CHECK(st.calls == 0);
+  popso_free(m);
+
+  /* A callback that asks to stop at the first incumbent of a harder model. */
+  m = popso_create();
+  if (popso_read_mps(m, POPSO_SOURCE_DIR "/benchmarks/instances/cflp_medium_1.mps") == POPSO_OK) {
+    memset(&st, 0, sizeof st);
+    st.stop_after = 1;
+    CHECK_OK(popso_set_param(m, "threads", 2));
+    CHECK_OK(popso_set_incumbent_callback(m, record_incumbent, &st));
+    CHECK_OK(popso_solve(m));
+    CHECK(popso_get_status(m) == POPSO_STATUS_INTERRUPTED);
+    CHECK(st.calls == 1);
+    CHECK_OK(popso_get_objective(m, &obj));
+    CHECK(obj <= st.objectives[0] + 1e-6 * fabs(obj));
+    CHECK(strcmp(popso_status_string(POPSO_STATUS_INTERRUPTED), "INTERRUPTED") == 0);
+  }
   popso_free(m);
 }
 
@@ -429,14 +536,25 @@ static void test_quadratic(void) {
   popso_free(m);
 }
 
+#define RUN(t)                     \
+  do {                             \
+    fprintf(stderr, "c_api: %s\n", #t); \
+    t();                           \
+  } while (0)
+
 int main(void) {
-  test_basics();
-  test_quadratic();
-  test_logical();
-  test_build_and_solve();
-  test_errors_and_params();
-  test_infeasible_and_lp();
-  test_files_and_start();
+  /* Unbuffered, so a crash still shows which test was running. */
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+  trace = getenv("C_API_TRACE") != NULL;
+  RUN(test_basics);
+  RUN(test_quadratic);
+  RUN(test_logical);
+  RUN(test_build_and_solve);
+  RUN(test_errors_and_params);
+  RUN(test_infeasible_and_lp);
+  RUN(test_files_and_start);
+  RUN(test_control_and_fixed_duals);
   if (failures) {
     fprintf(stderr, "c_api: %d of %d checks failed\n", failures, checks);
     return 1;

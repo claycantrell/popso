@@ -2,6 +2,7 @@
 // Parallel LP-based branch-and-bound.
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -67,6 +68,10 @@ struct SearchOptions {
   std::vector<double> debug_point;
   // Symmetry-breaking rows were already considered for this problem (solver.cpp symmetry_rows).
   bool sst_done = false;
+  // Called after each new incumbent (outside the search's locks, possibly from several threads at
+  // once) with the point in this problem's columns and the current lower bound (internal, incl.
+  // the offset). Deterministic mode: at the deterministic merge points. Not passed to sub-MIPs.
+  std::function<void(const std::vector<double>& x, double bound)> on_incumbent;
 };
 
 MipResult branch_and_bound(const MipProblem& p, const SolverParams& params, const Logger& log, const Timer& timer,

@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "milp/io/charconv_compat.hpp"
+#include "milp/io/gzip.hpp"
 
 namespace milp {
 namespace {
@@ -898,21 +899,14 @@ void LpParser::parse_sos(int default_type) {
 }
 
 std::string read_file(const std::string& path) {
-  if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".gz") == 0)
-    throw LpError(path + ": gzipped LP files are not supported; decompress first");
-  std::FILE* f = std::fopen(path.c_str(), "rb");
-  if (!f) throw LpError(path + ": cannot open file");
-  std::string data;
-  std::error_code ec;
-  const auto size = std::filesystem::file_size(path, ec);
-  if (!ec) data.reserve(static_cast<size_t>(size));
-  char buf[1 << 16];
-  size_t got;
-  while ((got = std::fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, got);
-  const bool bad = std::ferror(f) != 0;
-  std::fclose(f);
-  if (bad) throw LpError(path + ": read error");
-  return data;
+  // Plain or gzip-compressed (detected by the magic bytes).
+  try {
+    return read_maybe_gzipped_file(path);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& e) {
+    throw LpError(e.what());
+  }
 }
 
 }  // namespace

@@ -231,8 +231,10 @@ TEST(memory_limit_drains_tree) {
     CHECK(d >= 1 + seeds);
   }
   {
+    // 3 rows: no zero-slack split, the proof needs a tree (with 24 columns and 2 rows the local-MIP
+    // heuristic finds a zero split at once and most runs end before the cap binds).
     std::mt19937 rng(3);
-    const int d = check_memory_case("msplit", random_msplit(rng, 24, 2), cap > 0 ? cap : 60000, seeds);
+    const int d = check_memory_case("msplit", random_msplit(rng, 20, 3), cap > 0 ? cap : 60000, seeds);
     CHECK(d >= 1 + seeds);
   }
 }

@@ -20,3 +20,6 @@ python/popso/*.dylib
 python/popso/*.dll
 python/build/
 python/*.egg-info/
+
+# benchmark result files (a few older ones are tracked on purpose)
+benchmarks/results/

@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 
+#include "milp/core/interrupt.hpp"
+
 namespace milp {
 
 namespace {
@@ -69,6 +71,7 @@ CutLoopStats root_cut_loop(const MipProblem& p, DualSimplex& lp, const SolverPar
   if (rcfix) opt.cutoff_fn = cutoff_fn;
   opt.stop = stop;
   opt.zerohalf = !sub_mip;
+  if (const char* v = std::getenv("MILP_MCF")) opt.mcf = *v != '0';
   opt.tol = params.tol;
   // Spend at most a fifth of the remaining time on cuts, not counting the initial LP solve
   // (needed anyway; on large models it can take most of that fifth).
@@ -126,6 +129,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   if (opt.cover) seps.push_back(make_cover_separator());
   if (opt.mir) seps.push_back(make_mir_separator());
   if (opt.mir && std::getenv("MILP_ROOT_TMIR")) seps.push_back(make_tableau_mir_separator());
+  if (opt.mcf) seps.push_back(make_mcf_separator());
   if (opt.clique) seps.push_back(make_clique_separator());
   if (opt.implied_bound && !std::getenv("MILP_NO_IMPLBD")) seps.push_back(make_implied_bound_separator());
   if (opt.zerohalf && !std::getenv("MILP_NO_ZEROHALF")) seps.push_back(make_zerohalf_separator());
@@ -176,6 +180,8 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   const long long max_cut_nnz = 2 * static_cast<long long>(p.A.index.size());
   std::vector<double> history{obj};
   const Index r0 = lp.num_rows();
+  // Rows the loop may remove (slack or useless cuts): from the first cut row, or only its own.
+  const Index first_removable = opt.keep_rows ? r0 : m0;
   std::vector<Cut> row_cuts;  // the cut in LP row r0 + k
   std::vector<Cut> dropped;   // cuts removed for slack, candidates for re-adding
   const size_t max_dropped = 20000;
@@ -254,7 +260,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   };
   for (int round = 1; round <= std::max(opt.max_rounds, opt.max_rounds_cheap); ++round) {
     if (timer.elapsed() >= opt.time_limit) break;
-    if (opt.stop && opt.stop->load()) break;
+    if ((opt.stop && opt.stop->load()) || interrupted()) break;
     if (round > opt.max_rounds && !cheap()) break;
     rc_fix();
     const double* x = lp.x();
@@ -275,7 +281,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
                     !(last_degenerate && obj - stats.bound_before <= 1e-9 * std::max(1.0, std::abs(obj)));
     CutPool pool(p, popt);
     std::vector<Cut> cand;
-    int found[8] = {0}, raw[8] = {0}, from_pool = 0;
+    int found[16] = {0}, raw[16] = {0}, from_pool = 0;
     for (size_t k = 0; k < dropped.size(); ++k) {
       const Cut& c = dropped[k];
       if (c.activity(x) - c.rhs <= popt.min_violation * std::max(1.0, std::abs(c.rhs))) continue;
@@ -385,7 +391,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     // Drop cuts that are no longer binding (basic logical with positive slack).
     std::vector<Index> slack_rows;
     std::vector<char> slack(lp.num_rows(), 0);
-    for (Index i = m0; i < lp.num_rows(); ++i) {
+    for (Index i = first_removable; i < lp.num_rows(); ++i) {
       if (!lp.row_is_basic(i)) continue;
       const double act = -lp.var_value(n + i), ub = -lp.var_lower(n + i);
       if (ub - act > 1e-6 * std::max(1.0, std::abs(ub))) slack_rows.push_back(i), slack[i] = 1;
@@ -409,7 +415,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     degenerate_rounds += dual_degenerate;
 
     if (log.verbosity() >= 2) {
-      char buf[200];
+      char buf[400];
       int len = 0;
       for (size_t s = 0; s < seps.size(); ++s) {
         len += std::snprintf(buf + len, sizeof(buf) - len, " %s %d", seps[s]->name(), found[s]);
@@ -457,7 +463,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     }
   }
   if (log.verbosity() >= 2 && stats.rounds > 0) {
-    char buf[200];
+    char buf[400];
     int len = 0;
     for (size_t s = 0; s < seps.size(); ++s) {
       len += std::snprintf(buf + len, sizeof(buf) - len, " %s %.2fs", seps[s]->name(), sep_time[s]);
@@ -480,10 +486,10 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     log.log(2, "  cut loop reduced-cost fixing: %d bound changes on %zu columns\n", rc_fixed_total, rc_saved.size());
   }
   // Cuts that did not move the bound only make node LPs larger: drop them all.
-  if (stats.rounds > 0 && lp.num_rows() > m0 &&
+  if (stats.rounds > 0 && lp.num_rows() > first_removable &&
       stats.bound_after - stats.bound_before <= 1e-6 * std::max(1.0, std::abs(stats.bound_before))) {
     std::vector<Index> rows;
-    for (Index i = m0; i < lp.num_rows(); ++i) rows.push_back(i);
+    for (Index i = first_removable; i < lp.num_rows(); ++i) rows.push_back(i);
     lp.remove_rows(rows);
     log.log(2, "  cuts did not improve the bound; removed\n");
   }

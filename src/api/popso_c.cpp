@@ -7,6 +7,7 @@
 #include "popso.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -30,6 +31,8 @@
 
 using milp::Index;
 
+static_assert(std::atomic<bool>::is_always_lock_free, "popso_interrupt needs a lock-free atomic flag");
+
 struct popso_model {
   milp::Model model;
   // Pending matrix entries (row, column, value) not yet in model.A.
@@ -39,6 +42,9 @@ struct popso_model {
   std::vector<double> start;  // empty: none; else NaN = not given (resized to the model on solve)
   milp::SolveResult result;
   bool solved = false;
+  std::atomic<bool> interrupt{false};  // popso_interrupt
+  popso_incumbent_callback callback = nullptr;
+  void* callback_data = nullptr;
   std::unordered_map<std::string, Index> name_index;  // lazily built by popso_find_var
   bool name_index_valid = false;
   std::string error;
@@ -273,6 +279,7 @@ popso_model* popso_create(void) {
   try {
     popso_model* m = new popso_model();
     m->params.verbosity = 0;
+    m->params.duals = 1;
     return m;
   } catch (...) {
     g_error = "out of memory";
@@ -727,11 +734,13 @@ int popso_set_param(popso_model* m, const char* name, double value) {
       p.racing = static_cast<int>(as_int(1, 4096));
     } else if (n == "lp_method") {
       p.lp_method = static_cast<milp::LpMethod>(as_int(0, 2));
+    } else if (n == "duals") {
+      p.duals = static_cast<int>(as_int(0, 2));
     } else {
       fail(POPSO_ERROR_INVALID_ARGUMENT,
            "unknown parameter '" + n +
                "' (known: time_limit, threads, mip_gap, mip_abs_gap, seed, deterministic, verbosity, mem_limit, "
-               "node_limit, presolve, racing, lp_method)");
+               "node_limit, presolve, racing, lp_method, duals)");
     }
   });
 }
@@ -753,6 +762,7 @@ int popso_get_param(const popso_model* m, const char* name, double* value) {
     else if (n == "presolve") *value = p.presolve ? 1.0 : 0.0;
     else if (n == "racing") *value = p.racing;
     else if (n == "lp_method") *value = static_cast<double>(static_cast<int>(p.lp_method));
+    else if (n == "duals") *value = p.duals;
     else fail(POPSO_ERROR_INVALID_ARGUMENT, "unknown parameter '" + n + "'");
   });
 }
@@ -807,8 +817,32 @@ int popso_solve(popso_model* m) {
     m->model.validate();
     std::vector<double> start = m->start;
     if (!start.empty()) start.resize(m->model.num_cols(), kNaN);  // variables added after set_start
-    m->result = milp::solve(m->model, m->params, start);
+    milp::SolverParams params = m->params;
+    m->interrupt.store(false);
+    params.interrupt = &m->interrupt;
+    if (m->callback) {
+      const popso_incumbent_callback cb = m->callback;
+      void* data = m->callback_data;
+      params.on_incumbent = [cb, data](const std::vector<double>& x, double objective, double bound) {
+        return cb(data, objective, bound, x.data(), static_cast<int>(x.size())) != 0;
+      };
+    }
+    m->result = milp::solve(m->model, params, start);
     m->solved = true;
+  });
+}
+
+int popso_interrupt(popso_model* m) {
+  // Async-signal-safe: no error message, no allocation, one lock-free atomic store.
+  if (!m) return POPSO_ERROR_INVALID_ARGUMENT;
+  m->interrupt.store(true);
+  return POPSO_OK;
+}
+
+int popso_set_incumbent_callback(popso_model* m, popso_incumbent_callback cb, void* user_data) {
+  return guarded(m, [&] {
+    m->callback = cb;
+    m->callback_data = cb ? user_data : nullptr;
   });
 }
 
@@ -878,13 +912,36 @@ int popso_get_solution(const popso_model* m, double* x, int size) {
   });
 }
 
-int popso_has_duals(const popso_model* m) { return m && m->solved && m->result.has_duals ? 1 : 0; }
+int popso_has_duals(const popso_model* m) {
+  if (!m || !m->solved || !m->result.has_duals) return 0;
+  return m->result.fixed_mip_duals ? 2 : 1;
+}
+
+int popso_has_basis(const popso_model* m) {
+  if (!m || !m->solved || !m->result.has_duals) return 0;
+  const milp::SolveResult& r = m->result;
+  const bool sized = r.col_basis.size() == r.reduced_cost.size() && r.row_basis.size() == r.row_dual.size();
+  return sized && !(r.col_basis.empty() && r.row_basis.empty()) ? 1 : 0;
+}
+
+int popso_get_basis(const popso_model* m, int* var_status, int* row_status) {
+  return guarded(m, [&] {
+    check_solved(m);
+    if (!popso_has_basis(m)) fail(POPSO_ERROR_NO_SOLUTION, "no basis (LPs and fixed-MIP duals only, see popso_has_duals)");
+    if (var_status) {
+      for (size_t j = 0; j < m->result.col_basis.size(); ++j) var_status[j] = m->result.col_basis[j];
+    }
+    if (row_status) {
+      for (size_t i = 0; i < m->result.row_basis.size(); ++i) row_status[i] = m->result.row_basis[i];
+    }
+  });
+}
 
 int popso_get_duals(const popso_model* m, double* y, int size) {
   return guarded(m, [&] {
     check_solved(m);
     if (!m->result.has_duals)
-      fail(POPSO_ERROR_NO_SOLUTION, "no dual values (available for continuous QPs solved to optimality)");
+      fail(POPSO_ERROR_NO_SOLUTION, "no dual values (LPs and continuous QPs solved to optimality; MILPs with the duals parameter 2)");
     const Index rows = m->model.num_rows();
     if (!y || size < rows) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_duals: buffer smaller than the number of rows");
     for (Index i = 0; i < rows; ++i) y[i] = m->result.row_dual[i];
@@ -895,7 +952,7 @@ int popso_get_reduced_costs(const popso_model* m, double* d, int size) {
   return guarded(m, [&] {
     check_solved(m);
     if (!m->result.has_duals)
-      fail(POPSO_ERROR_NO_SOLUTION, "no reduced costs (available for continuous QPs solved to optimality)");
+      fail(POPSO_ERROR_NO_SOLUTION, "no reduced costs (LPs and continuous QPs solved to optimality; MILPs with the duals parameter 2)");
     const Index n = m->model.num_cols();
     if (!d || size < n) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_reduced_costs: buffer smaller than the number of variables");
     for (Index j = 0; j < n; ++j) d[j] = m->result.reduced_cost[j];

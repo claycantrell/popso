@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 import time
 
 
@@ -70,11 +71,53 @@ def _rss_mb(pid):
         return 0.0
 
 
+_live = set()  # running children of run_capped (killed by kill_all on interruption)
+_live_lock = threading.Lock()
+
+
+def _kill_tree(p):
+    if os.name != "nt":  # no pgrep on Windows; the solver starts no child processes
+        try:
+            for k in subprocess.run(["pgrep", "-P", str(p.pid)], capture_output=True,
+                                    text=True).stdout.split():
+                os.kill(int(k), 9)
+        except (OSError, ValueError):
+            pass
+    try:
+        p.kill()
+    except OSError:
+        pass
+    p.wait()
+
+
+def kill_all():
+    """Kill every process started by run_capped that is still running (e.g. from other
+    threads when the runner is interrupted), so no solver outlives the runner."""
+    with _live_lock:
+        procs = list(_live)
+    for p in procs:
+        _kill_tree(p)
+
+
 def run_capped(cmd, timeout, mem_mb=None, stdout=None, stderr=None, poll=0.5):
     """Run cmd. Returns (returncode or None, reason, wall_seconds, peak_rss_mb)
-    where reason is None, 'timeout' or 'memlimit'."""
+    where reason is None, 'timeout' or 'memlimit'.  If the caller is interrupted
+    (KeyboardInterrupt, SIGTERM turned into an exception, ...) the child is killed."""
     t0 = time.perf_counter()
     p = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
+    with _live_lock:
+        _live.add(p)
+    try:
+        return _watch(p, t0, timeout, mem_mb, poll)
+    except BaseException:
+        _kill_tree(p)
+        raise
+    finally:
+        with _live_lock:
+            _live.discard(p)
+
+
+def _watch(p, t0, timeout, mem_mb, poll):
     reason = None
     peak = 0.0
     while True:
@@ -91,15 +134,7 @@ def run_capped(cmd, timeout, mem_mb=None, stdout=None, stderr=None, poll=0.5):
         if time.perf_counter() - t0 > timeout:
             reason = "timeout"
         if reason:
-            if os.name != "nt":  # no pgrep on Windows; the solver starts no child processes
-                try:
-                    for k in subprocess.run(["pgrep", "-P", str(p.pid)], capture_output=True,
-                                            text=True).stdout.split():
-                        os.kill(int(k), 9)
-                except (OSError, ValueError):
-                    pass
-            p.kill()
-            p.wait()
+            _kill_tree(p)
             rc = None
             break
     return rc, reason, time.perf_counter() - t0, peak

@@ -26,6 +26,7 @@ struct FjLimits {
 struct FjStats {
   long long effort = 0, moves = 0, restarts = 0;
   int solutions = 0;
+  long long first_effort = -1;  // effort at the first solution
   long long min_violated = -1;  // fewest violated rows seen
   std::vector<double> closest;  // without a solution: a point with the fewest violated rows
 };

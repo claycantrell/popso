@@ -1,6 +1,9 @@
 #pragma once
 // Public entry point of the solver.
 
+#include <atomic>
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -49,6 +52,21 @@ struct SolverParams {
   // Logical constraints (semi-continuous, SOS, indicators): largest big-M coefficient of their
   // reformulation; beyond it (or without finite bounds) they are enforced by branching. 0: always branching.
   double logic_big_m = 1e6;
+  // Dual values (SolveResult::row_dual etc.): 0 none, 1 for LPs, 2 also the fixed-MIP duals of a
+  // MILP (duals of an optimal basis of the LP with the integer columns fixed at the incumbent; after
+  // an early stop they need not be complementary to the incumbent's continuous part, which is left
+  // as it is). Duals failing the objective consistency check are dropped. Continuous QPs get
+  // their duals in any case (they come with the barrier's solution). See solver/duals.hpp.
+  int duals = 0;
+  // Interrupt flag (core/interrupt.hpp): once set (from any thread or a signal handler), the solve
+  // stops soon with Status::Interrupted and the best solution found so far. Neither reset nor set by
+  // solve() (a stop requested by on_incumbent uses an internal flag), so params can be reused.
+  std::atomic<bool>* interrupt = nullptr;
+  // Called for each new incumbent, in the model's columns: its objective and the current dual
+  // bound (both in the model's sense). Calls are serialized and the objectives strictly improve;
+  // in deterministic mode they come at deterministic points of the search. Returning true asks the
+  // solve to stop (as an interrupt: Status::Interrupted). Not for quadratic objectives.
+  std::function<bool(const std::vector<double>& x, double objective, double bound)> on_incumbent;
   Tolerances tol;
 };
 
@@ -66,13 +84,19 @@ struct SolveResult {
   double objective = kInf;   // in the model's original sense
   double bound = -kInf;      // best dual bound, original sense
   std::vector<double> x;     // primal solution (if has_solution)
-  // Duals (continuous QPs solved to optimality; empty otherwise): row duals y and reduced costs
+  // Duals (continuous QPs and, with SolverParams::duals, LPs solved to optimality and fixed-MIP
+  // duals of MILPs with a solution; empty otherwise): row duals y and reduced costs
   // d = grad f(x) - A^T y with f the model's objective (c + Q x). Minimization: y_i >= 0 at an
   // active row lower bound, <= 0 at an upper one, d_j >= 0 at a column lower bound, <= 0 at an
   // upper one, 0 in between; maximization: the opposite signs.
   std::vector<double> row_dual;
   std::vector<double> reduced_cost;
   bool has_duals = false;  // row_dual and reduced_cost are set (the model may have no rows)
+  // LPs and fixed-MIP duals (SolverParams::duals) also give the optimal basis they come from:
+  // 0 basic, 1 at lower bound, 2 at upper bound, 3 nonbasic free (zero); a row is at its lower
+  // bound when its activity is at row_lb. Empty otherwise (continuous QPs have no basis).
+  std::vector<int8_t> col_basis, row_basis;
+  bool fixed_mip_duals = false;  // the duals are those of the MILP with its integers fixed
   SolveStats stats;
 };
 

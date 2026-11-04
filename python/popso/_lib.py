@@ -66,6 +66,9 @@ _pi = ctypes.POINTER(ctypes.c_int)
 _pll = ctypes.POINTER(ctypes.c_longlong)
 _pcp = ctypes.POINTER(ctypes.c_char_p)
 
+# int (*)(void* user_data, double objective, double bound, const double* x, int num_vars)
+INCUMBENT_CALLBACK = ctypes.CFUNCTYPE(_c_int, _vp, _c_double, _c_double, _pd, _c_int)
+
 _PROTOTYPES = {
     "popso_version": (_c_char_p, []),
     "popso_status_string": (_c_char_p, [_c_int]),
@@ -125,6 +128,10 @@ _PROTOTYPES = {
     "popso_has_duals": (_c_int, [_vp]),
     "popso_get_duals": (_c_int, [_vp, _pd, _c_int]),
     "popso_get_reduced_costs": (_c_int, [_vp, _pd, _c_int]),
+    "popso_has_basis": (_c_int, [_vp]),
+    "popso_get_basis": (_c_int, [_vp, _pi, _pi]),
+    "popso_interrupt": (_c_int, [_vp]),
+    "popso_set_incumbent_callback": (_c_int, [_vp, INCUMBENT_CALLBACK, _vp]),
 }
 
 for _name, (_res, _args) in _PROTOTYPES.items():

@@ -7,6 +7,7 @@
 #include <random>
 #include <utility>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/log.hpp"
 #include "milp/core/timer.hpp"
 #include "milp/presolve/presolve.hpp"
@@ -153,7 +154,7 @@ bool rens(const MipProblem& p, const double* lp_x, double cutoff, const SubMipLi
     }
     SubMipLimits lim = base;  // the retries share the time limit
     lim.time_limit = limits.time_limit - timer.elapsed();
-    if (lim.time_limit <= 0.0) break;
+    if (lim.time_limit <= 0.0 || interrupted()) break;
     const long long nodes0 = local.nodes;
     if (solve_sub_mip(p, lb, ub, cutoff, lim, sol)) {
       merge_stats();
@@ -221,16 +222,252 @@ bool rens(const MipProblem& p, const double* lp_x, double cutoff, const SubMipLi
   return ok;
 }
 
+namespace {
+
+// Presolve (with light probing) proves p restricted to [lb, ub] infeasible: the LP check misses
+// this when the fixings are at the LP point's own values (puriri: every sub-MIP with the integral
+// LP values fixed was infeasible in presolve, its LP feasible).
+bool presolve_infeasible(const MipProblem& p, const std::vector<double>& lb, const std::vector<double>& ub) {
+  if (!p.implications.empty()) return false;
+  MipProblem q = p;
+  q.col_lb = lb;
+  q.col_ub = ub;
+  Presolver pre;
+  PresolveOptions po;
+  po.probing_effort = 0.2;
+  Logger log(0);
+  return pre.run(q, po, log) == PresolveStatus::Infeasible;
+}
+
+}  // namespace
+
+bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const SubMipLimits& limits,
+             std::vector<double>& sol, double target, int attempts, LpRensStats* out) {
+  static const bool debug = std::getenv("MILP_SUBMIP_DEBUG") != nullptr;
+  static const bool no_pcheck = std::getenv("MILP_LP_RENS_NO_PRESOLVE") != nullptr;
+  Timer timer;
+  const Index n = p.num_cols();
+  std::vector<Index> cols;  // integer columns free in the root LP
+  for (Index j = 0; j < n; ++j) {
+    if (p.is_int[j] && root.col_lower(j) < root.col_upper(j)) cols.push_back(j);
+  }
+  const Index ints = static_cast<Index>(cols.size());
+  LpRensStats local;
+  LpRensStats& st = out ? *out : local;
+  if (ints == 0 || attempts <= 0) return false;
+  DomainPropagator prop(p);
+  SubMipStats ss_total;
+  // Shared budget (time; deterministic: LP iterations incl. the dives) of all attempts.
+  auto used_iters = [&] { return st.dive_iterations + ss_total.lp_iterations; };
+  auto finish = [&](bool ok) {
+    if (limits.stats) {
+      SubMipStats& o = *limits.stats;
+      o.solves += ss_total.solves;
+      o.lp_iterations += ss_total.lp_iterations + st.dive_iterations;
+      o.nodes += ss_total.nodes;
+      o.exhausted = ss_total.exhausted;
+      o.fixed = ss_total.fixed;
+      o.ints = ss_total.ints;
+    }
+    return ok;
+  };
+  const double target0 = std::clamp(target, 0.05, 0.98);
+  double rate = target0;
+  // Fixing rates known too small (sub-MIP hit its limits without a solution) / too large (sub-MIP
+  // exhausted: infeasible or nothing better), with the dive's own fixings of those attempts.
+  double lo = 0.0, hi = 1.0;
+  std::vector<Index> lo_set, hi_set;
+  int narrowings = 0;
+  std::vector<char> banned(n, 0);  // fixings rejected (LP, presolve, or the culprit range of a narrowing)
+  std::vector<std::pair<double, Index>> cand;
+  std::vector<Index> seeds, tight, order;
+  constexpr int kMaxPresolveChecks = 40;  // per call (each copies and presolves the problem)
+  int pchecks = 0;
+  for (int a = 0; a < attempts; ++a) {
+    const int left = attempts - a;
+    if (limits.time_limit - timer.elapsed() <= 0.0 || interrupted() || (limits.stop && limits.stop->load())) break;
+    if (limits.iteration_limit >= 0 && used_iters() >= limits.iteration_limit) break;
+    DualSimplex lp = root;
+    std::vector<double> lb(n), ub(n);
+    for (Index j = 0; j < n; ++j) lb[j] = lp.col_lower(j), ub[j] = lp.col_upper(j);
+    struct Saved {
+      Index j;
+      double lb, ub;
+    };
+    std::vector<Saved> saved;
+    auto set = [&](Index j, double l, double u) {
+      saved.push_back({j, lb[j], ub[j]});
+      lb[j] = l, ub[j] = u;
+      lp.set_col_bounds(j, l, u);
+    };
+    auto undo = [&](size_t mark) {
+      for (; saved.size() > mark; saved.pop_back()) {
+        const Saved& s = saved.back();
+        lb[s.j] = s.lb, ub[s.j] = s.ub;
+        lp.set_col_bounds(s.j, s.lb, s.ub);
+      }
+    };
+    auto count_fixed = [&] {
+      Index k = 0;
+      for (Index j : cols) k += lb[j] == ub[j];
+      return k;
+    };
+    order.clear();  // the dive's own fixings, in order
+    const Index want = std::max<Index>(1, static_cast<Index>(rate * static_cast<double>(ints)));
+    const long long it_start = lp.iterations();
+    // The dive may use up to half of this attempt's share of the budget.
+    const long long dive_budget =
+        limits.iteration_limit >= 0 ? std::max<long long>(1000, (limits.iteration_limit - used_iters()) / (2 * left))
+                                    : -1;
+    const double dive_time = (limits.time_limit - timer.elapsed()) / (2.0 * left);
+    const double t_dive = timer.elapsed();
+    Index fixed = count_fixed();
+    Index batch = std::max<Index>(1, (want - fixed) / 8);
+    bool lp_ok = true;
+    while (lp_ok && fixed < want) {
+      const long long used = lp.iterations() - it_start;
+      if ((dive_budget >= 0 && used >= dive_budget) || timer.elapsed() - t_dive > dive_time || interrupted()) break;
+      const double* x = lp.x();
+      const std::vector<double> d = lp.reduced_costs();
+      cand.clear();
+      Index integral = 0;
+      for (Index j : cols) {
+        if (lb[j] == ub[j] || banned[j]) continue;
+        const double dist = std::abs(x[j] - std::round(x[j]));
+        if (dist <= 1e-6) {
+          // Most certain first: largest |reduced cost|, then the longest columns.
+          cand.emplace_back(-(std::abs(d[j]) + 1e-9 * static_cast<double>(p.A.end(j) - p.A.begin(j))), j);
+          ++integral;
+        } else {
+          cand.emplace_back(1.0 + dist, j);  // after every integral one: least fractional first
+        }
+      }
+      if (cand.empty()) break;
+      std::sort(cand.begin(), cand.end());
+      const Index k = integral > 0 ? std::min({batch, want - fixed, integral}) : 1;
+      const size_t mark = saved.size();
+      seeds.clear();
+      for (Index t = 0; t < k; ++t) {
+        const Index j = cand[t].second;
+        const double v = std::clamp(std::round(x[j]), lb[j], ub[j]);
+        set(j, v, v);
+        seeds.push_back(j);
+      }
+      tight.clear();
+      std::vector<double> plb = lb, pub = ub;
+      bool ok = prop.propagate(plb, pub, seeds, tight);
+      if (ok) {
+        for (Index t : tight) {
+          if (plb[t] != lb[t] || pub[t] != ub[t]) set(t, plb[t], pub[t]);
+        }
+        LpOptions opt;
+        opt.objective_cutoff = cutoff;
+        if (dive_budget >= 0) opt.iteration_limit = std::max<long long>(100, dive_budget - used);
+        opt.time_limit = std::max(0.0, dive_time - (timer.elapsed() - t_dive));
+        const LpStatus ls = lp.solve(opt);
+        ok = ls == LpStatus::Optimal && lp.objective() < cutoff;
+        if (!ok && ls != LpStatus::Infeasible && ls != LpStatus::CutoffReached) {
+          undo(mark);
+          LpOptions ropt;
+          if (dive_budget >= 0) ropt.iteration_limit = std::max<long long>(1000, dive_budget);
+          lp_ok = lp.solve(ropt) == LpStatus::Optimal;  // limits: restore an LP point, stop the dive
+          break;
+        }
+        // The LP accepts fixings at its own values without moving; presolve (light probing) on
+        // the restricted problem catches some of what it misses.
+        if (ok && !no_pcheck && ++pchecks <= kMaxPresolveChecks && presolve_infeasible(p, lb, ub)) {
+          ok = false;
+          ++st.presolve_rejects;
+        }
+      }
+      if (ok) {
+        for (Index t = 0; t < k; ++t) order.push_back(cand[t].second);
+        fixed = count_fixed();
+        batch = std::min<Index>(batch * 2, std::max<Index>(1, want / 8));
+        continue;
+      }
+      undo(mark);
+      if (k == 1) {
+        banned[cand[0].second] = 1;
+      } else {
+        batch = std::max<Index>(1, k / 2);
+      }
+      LpOptions opt;  // back to the LP point of the restored bounds
+      if (dive_budget >= 0) opt.iteration_limit = std::max<long long>(1000, dive_budget - (lp.iterations() - it_start));
+      lp_ok = lp.solve(opt) == LpStatus::Optimal;
+    }
+    st.dive_iterations += lp.iterations() - it_start;
+    fixed = count_fixed();
+    const double achieved = static_cast<double>(fixed) / static_cast<double>(ints);
+    if (fixed == 0 || fixed == ints) {
+      if (debug) std::fprintf(stderr, "LP-RENS attempt %d: fixed %d/%d, skipped\n", a, fixed, ints);
+      break;
+    }
+    SubMipLimits lim = limits;
+    SubMipStats ss;
+    lim.stats = &ss;
+    lim.min_fixed_fraction = 0.0;
+    lim.time_limit = (limits.time_limit - timer.elapsed()) / static_cast<double>(left);
+    if (limits.iteration_limit >= 0) {
+      lim.iteration_limit = std::max<long long>(1000, (limits.iteration_limit - used_iters()) / left);
+    }
+    const bool found = solve_sub_mip(p, lb, ub, cutoff, lim, sol);
+    ss_total.solves += ss.solves;
+    ss_total.lp_iterations += ss.lp_iterations;
+    ss_total.nodes += ss.nodes;
+    ss_total.exhausted = ss.exhausted;
+    ss_total.fixed = ss.fixed;
+    ss_total.ints = ss.ints;
+    ++st.attempts;
+    st.last_rate = achieved;
+    if (debug) {
+      std::fprintf(stderr,
+                   "LP-RENS attempt %d: target %.2f fixed %d/%d (%.2f), dive %lld iters, %d presolve rejects, sub-MIP %s "
+                   "%lld nodes, %.2fs\n",
+                   a, rate, fixed, ints, achieved, st.dive_iterations, st.presolve_rejects,
+                   found ? "found" : (ss.exhausted ? "exhausted" : "limit"), ss.nodes, timer.elapsed());
+    }
+    if (found) return finish(true);
+    // Bisection on the fixing rate between "too large" (exhausted) and "too small" (limits hit).
+    if (ss.exhausted) {
+      if (achieved < hi) hi = achieved, hi_set = order;
+    } else if (achieved > lo) {
+      lo = achieved, lo_set = order;
+    }
+    if (hi <= lo + 0.03) {
+      // The fixings between the two (the dive's order is nearly the same) make the sub-MIP
+      // infeasible: leave them free and fix others instead, from the original target again.
+      if (lo_set.empty() || hi_set.empty() || ++narrowings > 3) break;
+      std::vector<char> in_lo(n, 0);
+      for (Index j : lo_set) in_lo[j] = 1;
+      Index nb = 0;
+      for (Index j : hi_set) {
+        if (!in_lo[j]) banned[j] = 1, ++nb;
+      }
+      if (debug) std::fprintf(stderr, "LP-RENS: %d fixings between rates %.2f and %.2f left free\n", nb, lo, hi);
+      if (nb == 0) break;
+      hi = 1.0, hi_set.clear();
+      rate = std::max(target0, lo + 0.1);
+      continue;
+    }
+    rate = hi < 1.0 ? (lo > 0.0 ? 0.5 * (lo + hi) : 0.6 * hi) : lo + 0.5 * (1.0 - lo);
+  }
+  return finish(false);
+}
+
 bool rins(const MipProblem& p, const double* lp_x, const std::vector<double>& incumbent, double cutoff,
-          const SubMipLimits& limits, std::vector<double>& sol, double target_fixed) {
+          const SubMipLimits& limits, std::vector<double>& sol, double target_fixed, double max_fixed,
+          unsigned seed) {
   std::vector<double> lb = p.col_lb, ub = p.col_ub;
   Index ints = 0, fixed = 0;
   std::vector<std::pair<double, Index>> rest;  // (|lp - incumbent|, j) of the integers left free
+  std::vector<Index> agree;                    // fixed by agreement (not fixed in p)
   for (Index j = 0; j < p.num_cols(); ++j) {
     if (!p.is_int[j]) continue;
     ++ints;
     const double d = std::abs(lp_x[j] - incumbent[j]);
     if (d <= 1e-6 || lb[j] == ub[j]) {
+      if (lb[j] < ub[j]) agree.push_back(j);
       lb[j] = ub[j] = std::round(incumbent[j]);
       ++fixed;
     } else {
@@ -243,6 +480,15 @@ bool rins(const MipProblem& p, const double* lp_x, const std::vector<double>& in
     for (size_t k = 0; k < rest.size() && fixed < want; ++k, ++fixed) {
       const Index j = rest[k].second;
       lb[j] = ub[j] = std::round(incumbent[j]);
+    }
+  }
+  const Index cap = static_cast<Index>(max_fixed * static_cast<double>(ints));
+  if (max_fixed < 1.0 && fixed > cap && !agree.empty()) {
+    std::mt19937 rng(seed);
+    for (size_t k = 0; k < agree.size() && fixed > cap; ++k, --fixed) {  // partial Fisher-Yates shuffle
+      std::swap(agree[k], agree[k + rng() % (agree.size() - k)]);
+      const Index j = agree[k];
+      lb[j] = p.col_lb[j], ub[j] = p.col_ub[j];
     }
   }
   if (!enough_fixed(p, lb, ub, limits.min_fixed_fraction)) return false;

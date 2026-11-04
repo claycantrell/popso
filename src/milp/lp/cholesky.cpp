@@ -35,9 +35,12 @@ void permuted_rows(Index n, const std::vector<Index>& start, const std::vector<I
 // [r0, r1) with r >= (c rounded down to a multiple of 4): the lower part of X X^T (and a few entries
 // above the diagonal, which callers ignore). Blocks of 8 rows x 4 columns are accumulated in
 // registers.
-void syrk_lower(const double* X, size_t ld, Index kw, Index nc, Index r0, Index r1, double* T, size_t ldT,
-                const double* S) {
+// Returns false if it stopped part-way (interrupt or deadline, only when interruptible): the
+// factorization is then discarded.
+bool syrk_lower(const double* X, size_t ld, Index kw, Index nc, Index r0, Index r1, double* T, size_t ldT,
+                const double* S, bool interruptible) {
   for (Index c0 = 0; c0 < nc; c0 += 4) {
+    if (interruptible && (c0 & 63) == 0 && interrupted_or_expired()) return false;
     const Index cw = std::min<Index>(4, nc - c0);
     Index rb = std::max(r0, c0);
     if (cw == 4) {
@@ -67,6 +70,7 @@ void syrk_lower(const double* X, size_t ld, Index kw, Index nc, Index r0, Index 
       }
     }
   }
+  return true;
 }
 
 // Elimination tree from the row lists (Liu's algorithm with path compression).
@@ -96,22 +100,21 @@ SparseCholesky::~SparseCholesky() = default;
 SparseCholesky::SparseCholesky(SparseCholesky&&) noexcept = default;
 SparseCholesky& SparseCholesky::operator=(SparseCholesky&&) noexcept = default;
 
-void SparseCholesky::syrk_rows(const double* X, size_t ld, Index kw, Index nc, Index nr, double* T, size_t ldT,
+bool SparseCholesky::syrk_rows(const double* X, size_t ld, Index kw, Index nc, Index nr, double* T, size_t ldT,
                                const double* S) {
   const double work = static_cast<double>(kw) * nc * nr;
-  if (!pool_ || work < 4e5 || nr < 64) {
-    syrk_lower(X, ld, kw, nc, 0, nr, T, ldT, S);
-    return;
-  }
+  if (!pool_ || work < 4e5 || nr < 64) return syrk_lower(X, ld, kw, nc, 0, nr, T, ldT, S, interruptible);
   // Row chunks (multiples of 8 rows); the rows above the first columns cost less, so use more
   // chunks than threads.
   const Index chunks = std::min<Index>(4 * pool_->size(), nr / 32);
   const Index step = ((nr + chunks - 1) / chunks + 7) / 8 * 8;
   const int tasks = static_cast<int>((nr + step - 1) / step);
+  std::atomic<bool> complete{true};
   pool_->run(tasks, [&](int t) {
     const Index r0 = static_cast<Index>(t) * step, r1 = std::min(nr, r0 + step);
-    syrk_lower(X, ld, kw, nc, r0, r1, T, ldT, S);
+    if (!syrk_lower(X, ld, kw, nc, r0, r1, T, ldT, S, interruptible)) complete.store(false);
   });
+  return complete.load();
 }
 
 bool SparseCholesky::analyze(Index n, const std::vector<Index>& start, const std::vector<Index>& index,
@@ -349,8 +352,8 @@ bool SparseCholesky::factorize(const std::vector<double>& value) {
       link_next(static_cast<size_t>(ns), -1), kpos(static_cast<size_t>(ns), 0);
   std::vector<double> work;
   for (Index s = 0; s < ns; ++s) {
-    if (stop && (s & 63) == 0 && stop->load(std::memory_order_relaxed)) return false;
-    factor_supernode(s, relmap, work, link_head, link_next, kpos);
+    if (stop_requested()) return false;
+    if (!factor_supernode(s, relmap, work, link_head, link_next, kpos)) return false;
   }
   for (double v : lx_) {
     if (!std::isfinite(v)) return false;
@@ -358,7 +361,7 @@ bool SparseCholesky::factorize(const std::vector<double>& value) {
   return true;
 }
 
-void SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::vector<double>& work,
+bool SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::vector<double>& work,
                                       std::vector<Index>& link_head, std::vector<Index>& link_next,
                                       std::vector<Index>& kpos) {
   const Index fJ = sn_first_[J], eJ = sn_first_[J + 1];
@@ -372,6 +375,7 @@ void SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::
   Index K = link_head[J];
   link_head[J] = -1;
   while (K >= 0) {
+    if (stop_requested()) return false;
     const Index nextK = link_next[K];
     const Index* RK = sn_rows_.data() + sn_rstart_[K];
     const Index nrK = sn_rstart_[K + 1] - sn_rstart_[K];
@@ -383,8 +387,10 @@ void SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::
     const Index nc = q - p, nr = nrK - p;
     // T = LK[p:nrK, :] * LK[p:q, :]^T (nr x nc, lower part).
     work.resize(static_cast<size_t>(nr) * static_cast<size_t>(nc));
-    syrk_rows(LK + p, static_cast<size_t>(nrK), wK, nc, nr, work.data(), static_cast<size_t>(nr),
-              psign_.empty() ? nullptr : psign_.data() + sn_first_[K]);
+    if (!syrk_rows(LK + p, static_cast<size_t>(nrK), wK, nc, nr, work.data(), static_cast<size_t>(nr),
+                   psign_.empty() ? nullptr : psign_.data() + sn_first_[K])) {
+      return false;  // stopped part-way
+    }
     for (Index c = 0; c < nc; ++c) {
       double* dst = LJ + static_cast<size_t>(RK[p + c] - fJ) * nrJ;
       const double* T0 = work.data() + static_cast<size_t>(c) * nr;
@@ -404,10 +410,14 @@ void SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::
   constexpr Index kPanel = 32;
   for (Index j0 = 0; j0 < wJ; j0 += kPanel) {
     const Index j1 = std::min(wJ, j0 + kPanel), pw = j1 - j0, nr = nrJ - j0;
+    // Large dense supernodes take seconds: stop requests are checked per panel.
+    if (j0 > 0 && stop_requested()) return false;
     if (j0 > 0) {
       work.resize(static_cast<size_t>(nr) * static_cast<size_t>(pw));
-      syrk_rows(LJ + j0, static_cast<size_t>(nrJ), j0, pw, nr, work.data(), static_cast<size_t>(nr),
-                psign_.empty() ? nullptr : psign_.data() + fJ);
+      if (!syrk_rows(LJ + j0, static_cast<size_t>(nrJ), j0, pw, nr, work.data(), static_cast<size_t>(nr),
+                     psign_.empty() ? nullptr : psign_.data() + fJ)) {
+        return false;  // stopped part-way
+      }
       for (Index c = 0; c < pw; ++c) {
         double* dst = LJ + static_cast<size_t>(j0 + c) * nrJ + j0;
         const double* T0 = work.data() + static_cast<size_t>(c) * nr;
@@ -443,6 +453,7 @@ void SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::
     link_next[J] = link_head[S2];
     link_head[S2] = J;
   }
+  return true;
 }
 
 void SparseCholesky::solve(std::vector<double>& b) const { solve(b.data()); }

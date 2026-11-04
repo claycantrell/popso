@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/timer.hpp"
 
 namespace milp {
@@ -615,7 +616,7 @@ bool DualSimplex::limits_hit(const LpOptions& opt, LpStatus* st) const {
     *st = LpStatus::TimeLimit;
     return true;
   }
-  if (opt.stop && opt.stop->load(std::memory_order_relaxed)) {
+  if ((opt.stop && opt.stop->load(std::memory_order_relaxed)) || interrupted()) {
     *st = LpStatus::TimeLimit;
     return true;
   }

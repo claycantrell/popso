@@ -5,6 +5,7 @@
 #include <cstring>
 #include <tuple>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/timer.hpp"
 
 namespace milp {
@@ -262,7 +263,7 @@ uint64_t Detector::refine() {
     for (Index c : tc_) ctouch_[c] = 0;
     tv_.clear();
     tc_.clear();
-    if (work_ > work_limit_ || ((qh & 127) == 0 && timer_.elapsed() > o_.time_limit)) aborted_ = true;
+    if (work_ > work_limit_ || ((qh & 127) == 0 && (timer_.elapsed() > o_.time_limit || interrupted()))) aborted_ = true;
   }
   queue_.clear();
   return mix64(tr + static_cast<uint64_t>(cells_));

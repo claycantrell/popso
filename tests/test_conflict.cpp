@@ -12,6 +12,7 @@
 #include "milp/core/model.hpp"
 #include "milp/lp/simplex.hpp"
 #include "milp/search/conflict.hpp"
+#include "milp/search/genres.hpp"
 #include "milp/search/mip_problem.hpp"
 #include "milp/search/propagation.hpp"
 #include "milp/solver/solver.hpp"
@@ -519,4 +520,271 @@ TEST(points_at_lp_tolerance_are_polished) {
   }
   std::printf("  %d instances compared\n", compared);
   CHECK(compared > 8);
+}
+
+namespace {
+
+// Random dives as in conflict_propagation_clauses_valid_by_enumeration, analysed by cut-based
+// conflict analysis. Pure integer problems (nc = 0) are checked by enumeration, mixed ones by an LP
+// over the continuous columns per integer point; with an objective cutoff (at the optimum) only
+// the points with cost <= cutoff count, so every optimal solution must satisfy every learned
+// constraint. Learned constraints and clauses go into the pool and become reasons later.
+struct GenresStats {
+  int learned = 0, uip = 0, partial = 0, steps = 0, reduced = 0, mir = 0, bad = 0, calls = 0, nnz = 0;
+  int fails[9] = {};
+};
+
+void genres_dives(std::mt19937& rng, int trials, int nc_max, bool cutoff_on, GenresStats& st) {
+  for (int t = 0; t < trials; ++t) {
+    const int nc = nc_max > 0 ? 1 + static_cast<int>(rng() % static_cast<unsigned>(nc_max)) : 0;
+    Model m = random_mip(rng, 4 + rng() % 3, nc, 3 + rng() % 4);
+    MipProblem p;
+    if (!MipProblem::from_model(m, &p)) continue;
+    const Index n = p.num_cols();
+    // Integer points with a feasible continuous part, and the optimum.
+    std::vector<std::vector<double>> pts;
+    double opt = kInf;
+    Conflict negc;  // max of -cost x over the continuous part
+    for (Index j = 0; j < n; ++j) {
+      if (p.cost[j] != 0.0) negc.idx.push_back(j), negc.val.push_back(-p.cost[j]);
+    }
+    enumerate_ints(p, [&](const std::vector<double>& x) {
+      if (nc == 0) {
+        std::vector<double> act(p.num_rows(), 0.0);
+        for (Index j = 0; j < n; ++j) {
+          for (Index k = p.A.begin(j); k < p.A.end(j); ++k) act[p.A.index[k]] += p.A.value[k] * x[j];
+        }
+        for (Index i = 0; i < p.num_rows(); ++i) {
+          if (act[i] < p.row_lb[i] - 1e-9 || act[i] > p.row_ub[i] + 1e-9) return;
+        }
+        double obj = 0.0;
+        for (Index j = 0; j < n; ++j) obj += p.cost[j] * x[j];
+        opt = std::min(opt, obj);
+      } else {
+        const double v = max_lhs(p, x, negc, kInf);
+        if (v == -kInf) return;
+        opt = std::min(opt, -v);
+      }
+      pts.push_back(x);
+    });
+    if (pts.empty() || !is_finite(opt)) continue;
+    const double cutoff = cutoff_on ? opt + 1e-7 : kInf;
+    DomainPropagator prop(p);
+    prop.continuous = nc > 0;
+    if (cutoff_on) {
+      prop.enable_objective();
+      prop.set_objective_cutoff(cutoff);
+    }
+    BoundTrail trail;
+    trail.init(n, 10000);
+    ConflictPool pool(n, 200);
+    auto valid = [&](const Conflict& c) {
+      for (const auto& x : pts) {
+        if (nc == 0) {
+          double obj = 0.0;
+          for (Index j = 0; j < n; ++j) obj += p.cost[j] * x[j];
+          if (obj > cutoff) continue;
+          if (c.violated_by(x, 1e-9)) return false;
+        } else if (max_lhs(p, x, c, cutoff) > c.rhs + 1e-6 * (1.0 + std::abs(c.rhs))) {
+          return false;
+        }
+      }
+      return true;
+    };
+    for (int dive = 0; dive < 25; ++dive) {
+      std::vector<double> lb = p.col_lb, ub = p.col_ub;
+      trail.clear();
+      prop.trail = &trail;
+      bool ok = true;
+      auto propagate = [&](std::vector<Index> seeds) {
+        std::vector<Index> tight, ctight;
+        for (int pass = 0; pass < 4 && ok && !seeds.empty(); ++pass) {
+          tight.clear();
+          ok = prop.propagate(lb, ub, seeds, tight);
+          if (!ok) break;
+          seeds.insert(seeds.end(), tight.begin(), tight.end());
+          ctight.clear();
+          ok = pool.propagate(p.is_int, p.col_lb, p.col_ub, lb, ub, seeds, ctight, dive, &trail);
+          seeds = ctight;
+        }
+      };
+      const bool bulk = dive % 2 == 1;
+      std::vector<Index> decided;
+      for (int level = 0; level < 8 && ok; ++level) {
+        std::vector<Index> open;
+        for (Index j = 0; j < n; ++j) {
+          if (p.is_int[j] && lb[j] < ub[j]) open.push_back(j);
+        }
+        if (open.empty()) break;
+        const Index j = open[rng() % open.size()];
+        const double v = lb[j] + static_cast<int>(rng() % static_cast<unsigned>(ub[j] - lb[j] + 1));
+        ++trail.level;
+        if (rng() % 2) {
+          if (v == ub[j]) continue;
+          ub[j] = v;
+          trail.push(j, true, v, BoundTrail::kDecision);
+        } else {
+          if (v == lb[j]) continue;
+          lb[j] = v;
+          trail.push(j, false, v, BoundTrail::kDecision);
+        }
+        if (bulk) decided.push_back(j);
+        else propagate({j});
+      }
+      if (bulk && ok) propagate(decided);
+      prop.trail = nullptr;
+      if (ok) continue;
+      ++st.calls;
+      GenresOptions go;
+      go.max_nnz = 50;
+      GenresInfo info;
+      Conflict g;
+      const bool learned = analyze_genres(trail, prop.rows(), prop.row_lb(), prop.row_ub(), p.is_int, p.col_lb,
+                                          p.col_ub, go, g, &info);
+      st.steps += info.steps, st.reduced += info.reduced, st.mir += info.mir;
+      std::vector<Conflict> out;
+      analyze_propagation_conflict(trail, prop.rows(), prop.row_lb(), prop.row_ub(), p.is_int, p.col_lb, p.col_ub,
+                                   50, 1, out);
+      if (learned) {
+        ++st.learned;
+        st.nnz += static_cast<int>(g.idx.size());
+        if (info.outcome == GenresInfo::kUip) ++st.uip;
+        if (info.outcome == GenresInfo::kPartial) ++st.partial;
+        if (!valid(g)) ++st.bad;
+        // It must prove the node infeasible: minimal activity over the node's bounds above the rhs.
+        double act = 0.0;
+        for (size_t k = 0; k < g.idx.size(); ++k) act += g.val[k] * (g.val[k] > 0 ? lb[g.idx[k]] : ub[g.idx[k]]);
+        if (!(act > g.rhs)) ++st.bad;
+        pool.add(std::make_shared<Conflict>(std::move(g)), dive);
+      } else {
+        ++st.fails[std::min<int>(info.reason, 8)];
+      }
+      for (Conflict& c : out) pool.add(std::make_shared<Conflict>(std::move(c)), dive);
+    }
+  }
+}
+
+void print_genres(const char* what, const GenresStats& st) {
+  std::printf("  %s: %d calls, %d learned (%d UIP, %d partial, %.1f nnz), %d steps, %d reduced, %d MIR, %d invalid;"
+              " failures by reason",
+              what, st.calls, st.learned, st.uip, st.partial,
+              st.learned ? static_cast<double>(st.nnz) / st.learned : 0.0, st.steps, st.reduced, st.mir, st.bad);
+  for (int f : st.fails) std::printf(" %d", f);
+  std::printf("\n");
+}
+
+void set_env_value(const char* name, const char* value) {
+#ifdef _WIN32
+  _putenv_s(name, value ? value : "");
+#else
+  if (value) setenv(name, value, 1);
+  else unsetenv(name);
+#endif
+}
+
+}  // namespace
+
+TEST(genres_conflicts_valid_pure_integer) {
+  std::mt19937 rng(23);
+  GenresStats st;
+  genres_dives(rng, scaled(300), 0, false, st);
+  print_genres("pure integer", st);
+  CHECK(st.learned > 50);
+  CHECK(st.mir > 0);
+  CHECK_EQ(st.bad, 0);
+  GenresStats sc;
+  genres_dives(rng, scaled(200), 0, true, sc);
+  print_genres("pure integer, cutoff at the optimum", sc);
+  CHECK(sc.learned > 20);
+  CHECK_EQ(sc.bad, 0);
+}
+
+TEST(genres_conflicts_valid_mixed) {
+  std::mt19937 rng(29);
+  GenresStats st;
+  genres_dives(rng, scaled(120), 3, false, st);
+  print_genres("mixed", st);
+  CHECK(st.learned > 10);
+  CHECK_EQ(st.bad, 0);
+  GenresStats sc;
+  genres_dives(rng, scaled(80), 3, true, sc);
+  print_genres("mixed, cutoff at the optimum", sc);
+  CHECK_EQ(sc.bad, 0);
+}
+
+TEST(genres_hand_example) {
+  // x0 + x1 + x2 >= 2 (row 0), x0 + x1 + x3 <= 1 (row 1), binaries. The decision x2 <= 0 implies
+  // x0 >= 1 and x1 >= 1 by row 0, and row 1 fails. Resolution eliminates x1 and x0; the learned
+  // constraint must hold for every feasible point and fail under x2 <= 0.
+  ModelBuilder b;
+  for (int j = 0; j < 4; ++j) b.add_col("x" + std::to_string(j), 0.0, 0.0, 1.0, VarType::Binary);
+  const Index r0 = b.add_row("r0", 2.0, kInf);
+  for (int j : {0, 1, 2}) b.add_coef(r0, j, 1.0);
+  const Index r1 = b.add_row("r1", -kInf, 1.0);
+  for (int j : {0, 1, 3}) b.add_coef(r1, j, 1.0);
+  MipProblem p;
+  REQUIRE(MipProblem::from_model(b.build(), &p));
+  DomainPropagator prop(p);
+  BoundTrail trail;
+  trail.init(4, 100);
+  prop.trail = &trail;
+  std::vector<double> lb = p.col_lb, ub = p.col_ub;
+  ++trail.level;
+  ub[2] = 0.0;
+  trail.push(2, true, 0.0, BoundTrail::kDecision);
+  std::vector<Index> t;
+  CHECK(!prop.propagate(lb, ub, {2}, t));
+  GenresInfo info;
+  Conflict g;
+  REQUIRE(analyze_genres(trail, prop.rows(), prop.row_lb(), prop.row_ub(), p.is_int, p.col_lb, p.col_ub,
+                         GenresOptions(), g, &info));
+  CHECK(info.steps >= 1);
+  int feasible = 0;
+  for (int mask = 0; mask < 16; ++mask) {
+    std::vector<double> x(4);
+    for (int j = 0; j < 4; ++j) x[j] = (mask >> j) & 1;
+    if (x[0] + x[1] + x[2] < 2 || x[0] + x[1] + x[3] > 1) continue;
+    ++feasible;
+    CHECK(!g.violated_by(x, 1e-9));
+  }
+  CHECK(feasible > 0);
+  std::vector<double> l2 = p.col_lb, u2 = p.col_ub;
+  u2[2] = 0.0;
+  CHECK(!propagate_conflict(g, p.is_int, l2, u2, nullptr, nullptr));
+}
+
+TEST(genres_end_to_end_same_optimum) {
+  // Cut-based conflicts (with the clauses, and instead of them) must not change the optimum.
+  std::mt19937 rng(78);
+  SolverParams params;
+  params.verbosity = 0;
+  params.mip_rel_gap = 1e-9;
+  params.mip_abs_gap = 1e-9;
+  params.node_limit = 20000;
+  params.presolve = false;
+  int compared = 0;
+  for (int t = 0; t < scaled(30); ++t) {
+    Model m = random_mip(rng, 25 + rng() % 15, rng() % 6, 10 + rng() % 8);
+    params.threads = 1 + t % 2;
+    params.deterministic = t % 4 == 1;
+    set_env("MILP_NO_CONFLICT", true);
+    SolveResult r0 = solve(m, params);
+    set_env("MILP_NO_CONFLICT", false);
+    set_env_value("MILP_GENRES", "1");
+    SolveResult r1 = solve(m, params);
+    set_env_value("MILP_GENRES", "2");
+    SolveResult r2 = solve(m, params);
+    set_env_value("MILP_GENRES", nullptr);
+    if (r0.status == Status::Infeasible) {
+      CHECK(r1.status == Status::Infeasible);
+      CHECK(r2.status == Status::Infeasible);
+      continue;
+    }
+    if (r0.status != Status::Optimal || r1.status != Status::Optimal || r2.status != Status::Optimal) continue;
+    CHECK_NEAR(r1.objective, r0.objective, 1e-6 * std::max(1.0, std::abs(r0.objective)));
+    CHECK_NEAR(r2.objective, r0.objective, 1e-6 * std::max(1.0, std::abs(r0.objective)));
+    ++compared;
+  }
+  std::printf("  %d instances compared\n", compared);
+  CHECK(compared > 10);
 }

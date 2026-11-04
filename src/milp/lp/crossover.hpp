@@ -38,8 +38,10 @@ struct CrossoverStats {
   double time = 0.0;
 };
 
-// x: column values, y: row duals (d = c - A^T y). Returns a basis for DualSimplex::set_basis.
-// stop: abandons the push once set (the basis returned is then valid but not pushed).
+// x: column values, y: row duals (d = c - A^T y), or empty for a primal point without duals (then
+// no dual push). Returns a basis for DualSimplex::set_basis.
+// stop: abandons the push once set (the basis returned is then valid but not pushed); so do an
+// interrupt and the thread's deadline (core/interrupt.hpp).
 Basis crossover(const SparseMatrix& A, const std::vector<double>& cost, const std::vector<double>& col_lb,
                 const std::vector<double>& col_ub, const std::vector<double>& row_lb, const std::vector<double>& row_ub,
                 const std::vector<double>& x, const std::vector<double>& y, CrossoverStats* stats = nullptr,

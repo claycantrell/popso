@@ -1,6 +1,8 @@
 #include "milp/presolve/presolve.hpp"
 
+#include "milp/core/interrupt.hpp"
 #include "milp/presolve/clique_merge.hpp"
+#include "milp/presolve/implied_int.hpp"
 #include "milp/presolve/probing.hpp"
 
 #include <algorithm>
@@ -20,7 +22,7 @@ namespace {
 constexpr double kBig = 1e12;        // bounds beyond this count as infinite in activities
 constexpr double kMaxContBound = 1e9;  // never derive continuous bounds larger than this
 constexpr double kRedundantTol = 1e-9;
-constexpr Index kMaxSubstRow = 1000;      // longest equation used for substitution
+constexpr Index kMaxSubstRow = 1000;      // longest equation used for non-singleton substitution
 constexpr Index kMaxSubstCol = 8;         // most rows of a substituted non-singleton column
 constexpr long long kMaxSubstFill = 32;   // (row length - 1) * (column length - 1) limit
 
@@ -82,6 +84,7 @@ class PresolveWork {
     long long since_clique = 0;
     for (int round = 0; round < opt_.max_rounds + 10 && status_ == PresolveStatus::Reduced; ++round) {
       if (round >= opt_.max_rounds && probed) break;
+      if (interrupted()) break;  // the reductions so far are valid
       ++stats_.rounds;
       compact();
       long long ch = 0;
@@ -691,7 +694,7 @@ class PresolveWork {
       if (is_int_[j]) {
         v = std::ceil(v - 1e-9 * (1.0 + std::abs(v)));
       } else {
-        v += tol;
+        v = relax_up(v, tol);  // an integral value stays integral (csched008's makespan: 190, not 190 + 1.9e-7)
         if (std::isfinite(ub_[j]) && v > ub_[j] - 1e-3 * std::max(1.0, std::abs(ub_[j]))) return 0;
         if (std::abs(v) > kMaxContBound && v > lb_[j]) return 0;
       }
@@ -703,7 +706,7 @@ class PresolveWork {
       if (is_int_[j]) {
         v = std::floor(v + 1e-9 * (1.0 + std::abs(v)));
       } else {
-        v -= tol;
+        v = -relax_up(-v, tol);
         if (std::isfinite(lb_[j]) && v < lb_[j] + 1e-3 * std::max(1.0, std::abs(lb_[j]))) return 0;
         if (std::abs(v) > kMaxContBound && v < ub_[j]) return 0;
       }
@@ -1112,14 +1115,16 @@ class PresolveWork {
 
   // Equations sum_k a_k x_k = b: a column j is substituted out, x_j = (b - sum_{k != j} a_k x_k) / a_j. The row
   // stays as lb_j <= (b - sum_{k != j} a_k x_k) / a_j <= ub_j, without the sides the row already implies (it is
-  // removed if j is implied free). Column singletons cause no fill-in and are preferred; other columns are taken
-  // if the fill-in is small. Integer columns qualify only if the row keeps them integral (integer columns,
-  // a_k / a_j and b / a_j integral).
+  // removed if j is implied free). Column singletons cause no fill-in and are preferred (implied free ones
+  // first); they are taken from equations of any length: the work is O(row length) for the objective update
+  // (objective-defining rows z = c^T x with a free z). Other columns are tried only when no singleton
+  // qualifies, in rows of at most kMaxSubstRow entries, if the fill-in is small. Integer columns qualify only
+  // if the row keeps them integral (integer columns, a_k / a_j and b / a_j integral).
   long long substitute_equations() {
     long long ch = 0;
     std::vector<Entry> r, terms;
     for (Index i = 0; i < m_ && status_ == PresolveStatus::Reduced; ++i) {
-      if (!row_alive_[i] || rlb_[i] != rub_[i] || row_size_[i] < 2 || row_size_[i] > kMaxSubstRow) continue;
+      if (!row_alive_[i] || rlb_[i] != rub_[i] || row_size_[i] < 2) continue;
       const double b = rlb_[i];
       if (!(std::abs(b) < kBig)) continue;
       live_row(i, r);
@@ -1142,33 +1147,47 @@ class PresolveWork {
       int best = -1;
       long long best_score = 0;
       bool best_lo = false, best_hi = false;  // whether the row implies lb_j / ub_j
-      for (size_t t = 0; t < r.size(); ++t) {
-        const Index j = r[t].idx;
-        const double a = r[t].val;
-        if (is_int_[j] ? !(int_ok && std::abs(a) == amin) : std::abs(a) < 1e-2 * amax) continue;
-        const bool single = col_size_[j] == 1;
-        if (!single && (any_single || col_size_[j] > kMaxSubstCol)) continue;
-        if (static_cast<long long>(r.size() - 1) * (col_size_[j] - 1) > kMaxSubstFill) continue;
-        // Implied bounds of x_j from the row: a x_j = b - (activity of the others).
-        const double bl = a > 0 ? lb_[j] : ub_[j], bh = a > 0 ? ub_[j] : lb_[j];
-        const bool rmin_ok = nmin_inf - (small_bound(bl) ? 0 : 1) == 0;
-        const bool rmax_ok = nmax_inf - (small_bound(bh) ? 0 : 1) == 0;
-        const double rmin = minact - (small_bound(bl) ? a * bl : 0.0);
-        const double rmax = maxact - (small_bound(bh) ? a * bh : 0.0);
-        // a > 0: x_j >= (b - rmax) / a, x_j <= (b - rmin) / a; a < 0: the other way round.
-        double ilo = -kInf, ihi = kInf;
-        if (a > 0 ? rmax_ok : rmin_ok) ilo = (b - (a > 0 ? rmax : rmin)) / a;
-        if (a > 0 ? rmin_ok : rmax_ok) ihi = (b - (a > 0 ? rmin : rmax)) / a;
-        if (is_int_[j]) {
-          ilo = std::ceil(ilo - 1e-6);
-          ihi = std::floor(ihi + 1e-6);
+      const bool long_row = row_size_[i] > kMaxSubstRow;
+      if (long_row && !any_single) continue;
+      // Pass 0: column singletons; pass 1 (none qualified; short rows only): the other columns.
+      for (int pass = long_row ? 0 : (any_single ? 0 : 1); pass < (long_row ? 1 : 2) && best < 0; ++pass) {
+        for (size_t t = 0; t < r.size(); ++t) {
+          const Index j = r[t].idx;
+          const double a = r[t].val;
+          const bool single = col_size_[j] == 1;
+          if (single != (pass == 0)) continue;
+          // Continuous pivots need a coefficient within 1e-2 of the largest (stability of the rows they are
+          // substituted into), except implied free singletons (checked below): their substitution only moves
+          // their cost to the others and drops the row (blp-ic98's objective row: z with 1 vs 1973).
+          const bool small = !is_int_[j] && std::abs(a) < 1e-2 * amax;
+          if (is_int_[j] ? !(int_ok && std::abs(a) == amin) : (small && !single)) continue;
+          if (!single && col_size_[j] > kMaxSubstCol) continue;
+          if (static_cast<long long>(r.size() - 1) * (col_size_[j] - 1) > kMaxSubstFill) continue;
+          // Implied bounds of x_j from the row: a x_j = b - (activity of the others).
+          const double bl = a > 0 ? lb_[j] : ub_[j], bh = a > 0 ? ub_[j] : lb_[j];
+          const bool rmin_ok = nmin_inf - (small_bound(bl) ? 0 : 1) == 0;
+          const bool rmax_ok = nmax_inf - (small_bound(bh) ? 0 : 1) == 0;
+          const double rmin = minact - (small_bound(bl) ? a * bl : 0.0);
+          const double rmax = maxact - (small_bound(bh) ? a * bh : 0.0);
+          // a > 0: x_j >= (b - rmax) / a, x_j <= (b - rmin) / a; a < 0: the other way round.
+          double ilo = -kInf, ihi = kInf;
+          if (a > 0 ? rmax_ok : rmin_ok) ilo = (b - (a > 0 ? rmax : rmin)) / a;
+          if (a > 0 ? rmin_ok : rmax_ok) ihi = (b - (a > 0 ? rmin : rmax)) / a;
+          if (is_int_[j]) {
+            ilo = std::ceil(ilo - 1e-6);
+            ihi = std::floor(ihi + 1e-6);
+          }
+          const bool lo = !std::isfinite(lb_[j]) || ilo >= lb_[j] - 1e-9 * (1.0 + std::abs(lb_[j]));
+          const bool hi = !std::isfinite(ub_[j]) || ihi <= ub_[j] + 1e-9 * (1.0 + std::abs(ub_[j]));
+          if (small && !(lo && hi)) continue;
+          // Net change of nonzeros; a kept row must not grow the matrix.
+          const long long score =
+              single ? (lo && hi ? -static_cast<long long>(row_size_[i]) : -1)
+                     : new_entries(j, i, r) - col_size_[j] - (lo && hi ? row_size_[i] - 1 : 0);
+          if (!(lo && hi) && score > 0) continue;
+          if (!(lo && hi) && !single && !is_int_[j] && cost_[j] != 0.0 && !opt_.substitution_bounded) continue;
+          if (best < 0 || score < best_score) best = static_cast<int>(t), best_score = score, best_lo = lo, best_hi = hi;
         }
-        const bool lo = !std::isfinite(lb_[j]) || ilo >= lb_[j] - 1e-9 * (1.0 + std::abs(lb_[j]));
-        const bool hi = !std::isfinite(ub_[j]) || ihi <= ub_[j] + 1e-9 * (1.0 + std::abs(ub_[j]));
-        // Net change of nonzeros; a kept row must not grow the matrix.
-        const long long score = single ? -1 : new_entries(j, i, r) - col_size_[j] - (lo && hi ? row_size_[i] - 1 : 0);
-        if (!(lo && hi) && score > 0) continue;
-        if (best < 0 || score < best_score) best = static_cast<int>(t), best_score = score, best_lo = lo, best_hi = hi;
       }
       if (best < 0) continue;
       const Index j = r[best].idx;
@@ -1343,6 +1362,9 @@ class PresolveWork {
 PresolveOptions PresolveOptions::from_env() {
   PresolveOptions o;
   if (const char* e = std::getenv("MILP_PROBING_EFFORT")) o.probing_effort = std::atof(e);
+  if (const char* on = std::getenv("MILP_PRESOLVE_ON")) {
+    if ((std::string(",") + on + ",").find(",subst_bounded,") != std::string::npos) o.substitution_bounded = true;
+  }
   const char* env = std::getenv("MILP_PRESOLVE_OFF");
   if (!env) return o;
   const std::string s = std::string(",") + env + ",";
@@ -1360,6 +1382,8 @@ PresolveOptions PresolveOptions::from_env() {
   if (off("cliqueext")) o.clique_extension = false;
   if (off("substitution")) o.substitution = false;
   if (off("probing")) o.probing = false;
+  if (off("implint")) o.implied_int = false;
+  if (off("implint_dual")) o.implied_int_dual = false;
   return o;
 }
 
@@ -1383,6 +1407,31 @@ PresolveStatus Presolver::run(const MipProblem& in, const PresolveOptions& opt, 
       log.log(2, "Clique merging: %d set-packing rows replaced by %d clique rows\n", removed,
               reduced_.num_rows() - rows + removed);
     }
+  }
+  if (st == PresolveStatus::Reduced && opt.implied_int) {
+    // Flags of the input carry over to the kept columns (their values are those of the input's columns),
+    // except for columns that absorbed a merged parallel column.
+    if (!in.implied_int.empty()) {
+      std::vector<char> merged(static_cast<size_t>(orig_cols_), 0);
+      for (const Step& s : stack_) {
+        if (s.other >= 0) merged[s.other] = 1;
+      }
+      reduced_.implied_int.assign(col_map_.size(), 0);
+      for (size_t k = 0; k < col_map_.size(); ++k) {
+        reduced_.implied_int[k] = in.is_implied_int(col_map_[k]) && !merged[col_map_[k]] && !reduced_.is_int[k];
+      }
+    }
+    ImpliedIntStats is;
+    stats_.implied_int = mark_implied_integers(reduced_, opt.implied_int_dual, &is);
+    stats_.implied_primal = is.primal;
+    stats_.implied_dual = is.dual;
+    bool obj_int = true;
+    for (Index j = 0; j < reduced_.num_cols() && obj_int; ++j) {
+      const double c = reduced_.cost[j];
+      obj_int = c == 0.0 || ((reduced_.is_int[j] || reduced_.is_implied_int(j)) && c == std::round(c));
+    }
+    log.log(2, "Presolve implied integers: %lld columns (new: %lld primal, %lld dual rule); objective %s\n",
+            stats_.implied_int, stats_.implied_primal, stats_.implied_dual, obj_int ? "integral" : "not integral");
   }
   stats_.rows_after = reduced_.num_rows();
   stats_.cols_after = reduced_.num_cols();

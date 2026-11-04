@@ -4,12 +4,18 @@
 #include <cmath>
 #include <numeric>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/timer.hpp"
 #include "milp/lp/lu.hpp"
 
 namespace milp {
 
 namespace {
+
+// The stop flag, an interrupt of the solve or the thread's deadline (core/interrupt.hpp).
+bool stop_requested(const std::atomic<bool>* stop) {
+  return (stop && stop->load(std::memory_order_relaxed)) || interrupted_or_expired();
+}
 
 class Crossover {
  public:
@@ -112,9 +118,13 @@ void Crossover::compute_basic_values() {
   for (Index p = 0; p < m_; ++p) v_[basic_[p]] = rhs[p];
 }
 
-Basis Crossover::run(const std::vector<double>& x, const std::vector<double>& y, CrossoverStats* st,
+Basis Crossover::run(const std::vector<double>& x, const std::vector<double>& y_in, CrossoverStats* st,
                      const std::atomic<bool>* stop) {
   const Index N = n_ + m_;
+  // No duals given (a primal point only): rank by the costs, no dual push.
+  const bool have_y = !y_in.empty();
+  const std::vector<double> y_zero(have_y ? 0 : static_cast<size_t>(m_), 0.0);
+  const std::vector<double>& y = have_y ? y_in : y_zero;
   col_.resize(m_);
   v_.assign(static_cast<size_t>(N), 0.0);
   std::vector<double> d(static_cast<size_t>(N), 0.0);
@@ -167,7 +177,7 @@ Basis Crossover::run(const std::vector<double>& x, const std::vector<double>& y,
   // Dual push first: it exchanges basic variables at a bound with a nonzero reduced cost for
   // nonbasic ones without changing the primal point; the primal push after it keeps the reduced
   // costs (its entering variables have zero reduced costs), so the result is close to optimal.
-  {
+  if (have_y) {
     Index cand = 0;
     const long long dp = dual_push(y, stop, &cand);
     if (st) st->dual_pivots = dp, st->dual_candidates = cand;
@@ -197,7 +207,7 @@ Basis Crossover::run(const std::vector<double>& x, const std::vector<double>& y,
   };
   shift_basics();
   for (Index q : super) {
-    if (stop && (pushes & 63) == 0 && stop->load(std::memory_order_relaxed)) break;
+    if ((pushes & 63) == 0 && stop_requested(stop)) break;
     if (status_[q] != VarStatus::AtZero) continue;
     const double l = lo_[q], u = hi_[q];
     double target = 0.0;
@@ -347,7 +357,7 @@ long long Crossover::dual_push(std::vector<double> y, const std::atomic<bool>* s
   std::vector<char> mark(static_cast<size_t>(N), 0);
   long long pivots = 0, done = 0;
   for (const auto& c : cand) {
-    if (stop && (++done & 63) == 0 && stop->load(std::memory_order_relaxed)) break;
+    if ((++done & 63) == 0 && stop_requested(stop)) break;
     const Index j = c.second;
     const Index p = pos_of[j];
     if (p < 0 || basic_[p] != j || std::abs(d[j]) <= dtol) continue;
@@ -485,7 +495,7 @@ LpStatus barrier_solve(DualSimplex& lp, const SparseMatrix& A, const std::vector
     }
   }
   const Basis b = crossover(A, cost, col_lb, col_ub, row_lb, row_ub, s.ipm.x, s.ipm.y, &s.crossover, opt.stop);
-  if (opt.stop && opt.stop->load()) {
+  if ((opt.stop && opt.stop->load()) || interrupted()) {
     s.total_time = timer.elapsed();
     return LpStatus::TimeLimit;
   }

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <vector>
 
+#include "milp/lp/simplex.hpp"
 #include "milp/search/mip_problem.hpp"
 
 namespace milp {
@@ -39,11 +40,31 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
 bool rens(const MipProblem& p, const double* lp_x, double cutoff, const SubMipLimits& limits,
           std::vector<double>& sol, const std::vector<double>* redcost = nullptr);
 
+// Root-LP sub-MIP (RENS with LP-checked, relaxed fixing; as HiGHS' RENS): starting from the solved
+// LP `root` (its columns = p's), fix integer columns at their integral LP values in batches, most
+// certain first (largest |reduced cost|, then the longest columns), propagate, and re-solve the LP
+// after each batch; a batch that makes the LP infeasible (or reach the cutoff) is undone and split,
+// a single such column is left free. When no integral column is left, the least fractional one is
+// rounded (a dive). Stops at `target` of the free integer columns fixed, then solves the sub-MIP on
+// the remaining domain. Retries (up to `attempts` sub-MIPs, sharing the limits): fewer fixings when
+// the sub-MIP was infeasible (exhausted), more when it hit its limits without a solution.
+struct LpRensStats {
+  int attempts = 0;           // sub-MIPs solved
+  long long dive_iterations = 0;  // LP iterations of the fixing dives
+  double last_rate = 0.0;     // fixing rate of the last sub-MIP
+  int presolve_rejects = 0;   // fixing batches undone because presolve proved them infeasible
+};
+bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const SubMipLimits& limits,
+             std::vector<double>& sol, double target = 0.7, int attempts = 3, LpRensStats* out = nullptr);
+
 // RINS: fix integers on which the LP solution and the incumbent agree. If that fixes less
 // than `target_fixed` of the integers, more are fixed at their incumbent values, those
-// whose LP value is closest to the incumbent first.
+// whose LP value is closest to the incumbent first. If it fixes more than `max_fixed` of them
+// (the agreement alone leaves too small a neighbourhood: nexp-150-20-8-5 95%, every sub-MIP solved
+// in presolve), a random subset (`seed`) of the agreeing ones is left free down to that rate.
 bool rins(const MipProblem& p, const double* lp_x, const std::vector<double>& incumbent, double cutoff,
-          const SubMipLimits& limits, std::vector<double>& sol, double target_fixed = 0.0);
+          const SubMipLimits& limits, std::vector<double>& sol, double target_fixed = 0.0, double max_fixed = 1.0,
+          unsigned seed = 0);
 
 // Repair: fix the integers of an infeasible point x except those in its violated
 // rows and in rows sharing variables with them (at most about half of the integers stay free).

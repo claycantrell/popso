@@ -21,7 +21,9 @@
  *    read). Infinite bounds are given as +-POPSO_INFINITY or IEEE infinity
  *    (any |value| >= 1e30 counts as infinite); queries return IEEE infinity.
  *  - A handle may be used by one thread at a time; separate handles may be
- *    used from different threads concurrently. Note that the memory limit is
+ *    used from different threads concurrently. The exception is
+ *    popso_interrupt, which may be called from any thread (or a signal
+ *    handler) while another thread solves. Note that the memory limit is
  *    also checked against the resident size of the whole process.
  *  - Changing the model discards the last result.
  *  - The objective may have a quadratic part 1/2 x^T Q x (popso_set_q). It
@@ -35,6 +37,9 @@
  *    reformulated with auxiliary binaries internally; solutions and queries
  *    refer to the variables of the model only.
  *  - The library is silent by default (verbosity 0); the log goes to stdout.
+ *
+ *  - Model files may be gzip-compressed (detected by their content, e.g.
+ *    model.mps.gz).
  *
  * The header is C99 and C++ compatible. Link against the shared library
  * `popso` (libpopso.so, libpopso.dylib or popso.dll). Define POPSO_STATIC
@@ -85,6 +90,13 @@ extern "C" {
 #define POPSO_SOS1 1 /* at most one member nonzero */
 #define POPSO_SOS2 2 /* at most two members nonzero, adjacent in the order of their weights */
 
+/* Basis status of a variable or row (popso_get_basis). A row is "at lower"
+ * when its activity is at its lower bound. */
+#define POPSO_BASIS_BASIC 0
+#define POPSO_BASIS_LOWER 1
+#define POPSO_BASIS_UPPER 2
+#define POPSO_BASIS_ZERO 3 /* nonbasic free variable (or free row) at zero */
+
 /* Objective sense. */
 #define POPSO_MINIMIZE 1
 #define POPSO_MAXIMIZE -1
@@ -99,7 +111,7 @@ extern "C" {
 #define POPSO_STATUS_NODE_LIMIT 6
 #define POPSO_STATUS_MEMORY_LIMIT 7
 #define POPSO_STATUS_ITERATION_LIMIT 8
-#define POPSO_STATUS_INTERRUPTED 9
+#define POPSO_STATUS_INTERRUPTED 9 /* popso_interrupt or the incumbent callback stopped the solve */
 #define POPSO_STATUS_NUMERICAL_ERROR 10
 #define POPSO_STATUS_UNKNOWN 11
 #define POPSO_STATUS_NONCONVEX 12 /* the quadratic objective is not convex (concave when maximizing) */
@@ -124,9 +136,9 @@ POPSO_API const char* popso_last_error(const popso_model* m);
 POPSO_API popso_model* popso_create(void);
 POPSO_API void popso_free(popso_model* m); /* NULL is ignored */
 
-/* Replaces the model by the contents of an MPS file (free or fixed format).
- * Parameters and the start solution are kept; the start is cleared if the
- * number of variables changes. */
+/* Replaces the model by the contents of an MPS file (free or fixed format,
+ * optionally gzip-compressed). Parameters and the start solution are kept;
+ * the start is cleared if the number of variables changes. */
 POPSO_API int popso_read_mps(popso_model* m, const char* filename);
 /* Replaces the model by the contents of a CPLEX LP-format file (same rules
  * as popso_read_mps). */
@@ -231,7 +243,10 @@ POPSO_API int popso_find_var(popso_model* m, const char* name);
  *   presolve       1 = on (default), 0 = off
  *   racing         number of concurrently racing searches (default 1)
  *   lp_method      LP algorithm for pure LPs and the MIP root LP: 0 auto (default),
- *                  1 dual simplex, 2 barrier (interior point with crossover) */
+ *                  1 dual simplex, 2 barrier (interior point with crossover)
+ *   duals          dual values (popso_get_duals): 0 none, 1 for LPs (default),
+ *                  2 also fixed-MIP duals for MILPs (see popso_has_duals);
+ *                  continuous QPs always have them */
 POPSO_API int popso_set_param(popso_model* m, const char* name, double value);
 POPSO_API int popso_get_param(const popso_model* m, const char* name, double* value);
 
@@ -254,6 +269,29 @@ POPSO_API int popso_clear_start(popso_model* m);
  * status); an error code only if it could not run. */
 POPSO_API int popso_solve(popso_model* m);
 
+/* Asks a running popso_solve on m to stop soon (typically well within 0.1 s)
+ * with status POPSO_STATUS_INTERRUPTED and the best solution found so far.
+ * Thread-safe and async-signal-safe (a single atomic store): call it from
+ * another thread or from a signal handler. The request is cleared when
+ * popso_solve starts, so a call while no solve runs has no effect on later
+ * solves. Returns POPSO_ERROR_INVALID_ARGUMENT for a NULL handle (without
+ * setting the error message). */
+POPSO_API int popso_interrupt(popso_model* m);
+
+/* Incumbent callback: called for each new best solution during popso_solve
+ * with its objective, the current best bound (both in the model's sense) and
+ * the solution x (num_vars values, valid during the call only). Calls are
+ * serialized (one at a time, though not always from the same thread), each
+ * one with a strictly better objective; with the deterministic parameter they
+ * come at deterministic points of the search. Returning nonzero stops the
+ * solve (status POPSO_STATUS_INTERRUPTED). The callback must not call popso
+ * functions on m other than popso_interrupt. Not called for quadratic
+ * objectives. */
+typedef int (*popso_incumbent_callback)(void* user_data, double objective, double bound, const double* x,
+                                        int num_vars);
+/* Sets (or with cb == NULL removes) the incumbent callback. */
+POPSO_API int popso_set_incumbent_callback(popso_model* m, popso_incumbent_callback cb, void* user_data);
+
 POPSO_API int popso_get_status(const popso_model* m); /* POPSO_STATUS_*, NOT_SOLVED before a solve */
 POPSO_API int popso_has_solution(const popso_model* m); /* 1 if a feasible solution is known */
 /* Objective value of the best solution (POPSO_ERROR_NO_SOLUTION if none). */
@@ -271,16 +309,36 @@ POPSO_API int popso_get_solution(const popso_model* m, double* x, int size);
 /* Writes the result as a "name value" solution file (status and objective in
  * '#' comment lines; values only if a solution is known). */
 POPSO_API int popso_write_solution(const popso_model* m, const char* filename);
-/* Dual values, available for continuous QPs (quadratic objective, no integer
- * variables) solved to optimality; from the barrier's final iterate, so they
- * satisfy the KKT conditions to the solver's tolerance. Row duals y and reduced
- * costs d = c + Q x - A^T y; minimization: y_i >= 0 at an active row lower
- * bound, <= 0 at an upper one, d_j >= 0 at a variable's lower bound, <= 0 at
- * its upper one; maximization: the opposite signs. popso_has_duals returns 1 if
- * they are available; the getters fail with POPSO_ERROR_NO_SOLUTION otherwise. */
+/* Dual values: row duals y and reduced costs d = c + Q x - A^T y.
+ * Minimization: y_i >= 0 at an active row lower bound, <= 0 at an upper one,
+ * d_j >= 0 at a variable's lower bound, <= 0 at its upper one; maximization:
+ * the opposite signs.
+ *  - LPs solved to optimality (parameter duals >= 1, the default): the duals of
+ *    an optimal basis of the original (unpresolved) LP, found from the optimal
+ *    solution after the solve; complementary to the returned solution.
+ *  - MILPs with a solution (parameter duals = 2): "fixed-MIP duals", the duals
+ *    of an optimal basis of the LP with every integer variable fixed at its
+ *    value in the solution. popso_has_duals returns 2 for these. If the solve
+ *    stopped early (limit, interrupt), the solution's continuous part need not
+ *    be optimal for that fixed LP: the duals belong to the fixed LP's optimum
+ *    and need not be complementary to the returned continuous values (the
+ *    solution itself is not changed).
+ *  - Continuous QPs solved to optimality: from the barrier's final iterate (no
+ *    basis), satisfying the KKT conditions to the solver's tolerance.
+ * Recovered LP / fixed-MIP duals whose basis does not reproduce the solution's
+ * objective (relative tolerance 1e-6) are dropped, as are duals whose recovery
+ * was interrupted or ran out of time (at least 1 s is allowed).
+ * Not for MIQPs and models with SOS, indicator or semi-continuous variables.
+ * popso_has_duals returns 0 if none are available; the getters then fail with
+ * POPSO_ERROR_NO_SOLUTION. */
 POPSO_API int popso_has_duals(const popso_model* m);
 POPSO_API int popso_get_duals(const popso_model* m, double* y, int size);          /* size >= rows */
 POPSO_API int popso_get_reduced_costs(const popso_model* m, double* d, int size);  /* size >= vars */
+/* The optimal basis the LP or fixed-MIP duals come from (POPSO_BASIS_*), one
+ * entry per variable and per row; either array may be NULL. popso_has_basis
+ * returns 1 if there is one (not for QPs). */
+POPSO_API int popso_has_basis(const popso_model* m);
+POPSO_API int popso_get_basis(const popso_model* m, int* var_status, int* row_status);
 
 #ifdef __cplusplus
 } /* extern "C" */

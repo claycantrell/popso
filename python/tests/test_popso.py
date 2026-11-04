@@ -359,5 +359,206 @@ class TestQuadratic(unittest.TestCase):
             self.assertEqual(m3.solve(threads=1).status, "OPTIMAL")
 
 
+def hard_model():
+    path = os.path.join(INSTANCES, "cflp_hard_1.mps")
+    if not os.path.exists(path):
+        return None
+    m = popso.read_mps(path)
+    m.params.threads = 2
+    return m
+
+
+class TestDualsAndControl(unittest.TestCase):
+    def lp(self):
+        """min -x - 2y s.t. x + y <= 4 (c0), x - y >= -2 (c1), 0 <= x <= 3, y >= 0: optimum -7 at (1, 3)."""
+        m = popso.Model("lp")
+        x, y = m.add_var(ub=3, name="x"), m.add_var(name="y")
+        c0 = m.add_constr(x + y <= 4, name="c0")
+        c1 = m.add_constr(x - y >= -2, name="c1")
+        m.set_objective(-x - 2 * y)
+        return m, x, y, c0, c1
+
+    def test_lp_duals(self):
+        m, x, y, c0, c1 = self.lp()
+        for presolve in (True, False):
+            r = m.solve(presolve=presolve, threads=1)
+            self.assertEqual(r.status, "OPTIMAL")
+            self.assertAlmostEqual(r.objective, -7.0)
+            # Stationarity d = c - A^T y; c0 is active at its upper bound (dual <= 0 when minimizing),
+            # c1 at its lower bound (dual >= 0).
+            self.assertAlmostEqual(r.dual(c0), -1.5)
+            self.assertAlmostEqual(r.dual(c1), 0.5)
+            self.assertAlmostEqual(r.reduced_cost(x), 0.0)
+            self.assertAlmostEqual(r.reduced_cost("y"), 0.0)
+            self.assertFalse(r.fixed_mip_duals)
+            self.assertEqual(sorted(r.var_basis + r.constr_basis).count(popso.BASIC), 2)
+            self.assertEqual(r.constr_basis, [popso.AT_UPPER, popso.AT_LOWER])
+        # Maximization flips the signs.
+        m.set_objective(x + 2 * y, sense=popso.MAXIMIZE)
+        r = m.solve()
+        self.assertAlmostEqual(r.dual(c0), 1.5)
+        self.assertAlmostEqual(r.dual(c1), -0.5)
+        # duals=0: none.
+        self.assertIsNone(m.solve(duals=0).duals)
+
+    def test_fixed_mip_duals(self):
+        m, x, y, z = small_model()
+        self.assertIsNone(m.solve().duals)  # MILP: only with duals=2
+        r = m.solve(duals=2)
+        self.assertEqual(r.status, "OPTIMAL")
+        self.assertTrue(r.fixed_mip_duals)
+        # All variables are integers: every row dual is 0, the reduced costs are the objective.
+        self.assertEqual(r.duals, [0.0, 0.0, 0.0])
+        self.assertEqual(r.reduced_costs, [5.0, 4.0, 3.0])
+        # A continuous variable w: max ... + 2w, w <= 1 + x (with x fixed at 2: w <= 3).
+        w = m.add_var(name="w")
+        c = m.add_constr(w - x <= 1)
+        m.set_objective(5 * x + 4 * y + 3 * z + 2 * w, sense=popso.MAXIMIZE)
+        r = m.solve(duals=2)
+        self.assertTrue(r.fixed_mip_duals)
+        self.assertAlmostEqual(r.dual(c), 2.0)
+        self.assertAlmostEqual(r.reduced_cost(w), 0.0)
+        self.assertAlmostEqual(r.reduced_cost(x), 5.0 + 2.0)  # d = c - A^T y = 5 - (-1)(2)
+
+    def test_interrupt_from_thread(self):
+        m = hard_model()
+        if m is None:
+            self.skipTest("benchmark instances not available")
+        threading.Timer(0.5, m.interrupt).start()
+        r = m.solve()
+        self.assertEqual(r.status, "INTERRUPTED")
+        self.assertLess(r.time, 3.0)
+        # An interrupt while no solve runs does not affect the next solve.
+        m.interrupt()
+        r = m.solve(node_limit=1)
+        self.assertEqual(r.status, "NODE_LIMIT")
+
+    def test_keyboard_interrupt(self):
+        m = hard_model()
+        if m is None:
+            self.skipTest("benchmark instances not available")
+        import _thread
+        threading.Timer(0.5, _thread.interrupt_main).start()
+        r = m.solve()  # Ctrl-C stops the solve; no KeyboardInterrupt escapes
+        self.assertEqual(r.status, "INTERRUPTED")
+        self.assertLess(r.time, 3.0)
+
+    def test_error_while_waiting_stops_the_helper_thread(self):
+        # Something other than KeyboardInterrupt escaping the main thread's wait: the native solve
+        # is interrupted and its helper thread finished before solve() raises (else the model could
+        # be freed under the running solve).
+        m = hard_model()
+        if m is None:
+            self.skipTest("benchmark instances not available")
+        import popso.model as pm
+        events = []
+
+        class FailingEvent(threading.Event):
+            def __init__(self):
+                super().__init__()
+                events.append(self)
+                self.calls = 0
+
+            def wait(self, timeout=None):
+                done = super().wait(timeout)
+                self.calls += 1
+                if self.calls == 3:
+                    raise RuntimeError("injected")
+                return done
+
+        class Shim:
+            Event = FailingEvent
+
+            def __getattr__(self, name):
+                return getattr(threading, name)
+
+        saved = pm.threading
+        pm.threading = Shim()
+        try:
+            with self.assertRaises(RuntimeError):
+                m.solve(time_limit=60)
+        finally:
+            pm.threading = saved
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0].is_set())  # the helper thread's solve has returned
+        r = m.solve(node_limit=1)  # the model stays usable
+        self.assertEqual(r.status, "NODE_LIMIT")
+
+    def test_incumbent_callback(self):
+        m = hard_model()
+        if m is None:
+            self.skipTest("benchmark instances not available")
+        seen = []
+        m.set_incumbent_callback(lambda obj, bound, x: seen.append((obj, bound, list(x))) or len(seen) >= 2)
+        r = m.solve(deterministic=True)
+        self.assertEqual(r.status, "INTERRUPTED")
+        self.assertEqual(len(seen), 2)
+        self.assertLess(seen[1][0], seen[0][0])  # minimization: strictly improving
+        for obj, bound, x in seen:
+            self.assertLessEqual(bound, obj + 1e-6)
+            self.assertEqual(len(x), m.num_vars)
+        # The search may still improve the incumbent before it stops (not reported after the stop request).
+        self.assertLessEqual(r.objective, seen[-1][0] + 1e-6 * abs(seen[-1][0]))
+        # Deterministic mode: the same sequence again.
+        seen2 = list(seen)
+        seen.clear()
+        m.solve(deterministic=True)
+        self.assertEqual([s[0] for s in seen], [s[0] for s in seen2[:len(seen)]])
+
+        # An exception stops the solve and is re-raised; the model stays usable.
+        def boom(obj, bound, x):
+            raise RuntimeError("boom")
+
+        m.set_incumbent_callback(boom)
+        with self.assertRaises(RuntimeError):
+            m.solve()
+        m.set_incumbent_callback(None)
+        small, *_ = small_model()
+        calls = []
+        small.set_incumbent_callback(lambda obj, bound, x: calls.append(obj))
+        self.assertAlmostEqual(small.solve().objective, 13.0)
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertAlmostEqual(calls[-1], 13.0)
+        self.assertEqual(calls, sorted(calls))  # maximization: increasing
+
+    def test_incumbent_callback_removed_during_solve(self):
+        # Removing (or replacing) the callback from inside it must not free the ctypes object the
+        # running solve still calls (it crashed with a segmentation fault).
+        import gc
+        path = os.path.join(INSTANCES, "setcover_medium_1.mps")
+        if not os.path.exists(path):
+            self.skipTest("benchmark instances not available")
+        m = popso.read_mps(path)
+        calls = []
+
+        def cb(obj, bound, x):
+            calls.append(obj)
+            if len(calls) == 1:
+                m.set_incumbent_callback(None)
+                gc.collect()
+            return False
+
+        m.set_incumbent_callback(cb)
+        r = m.solve(threads=2, deterministic=True, time_limit=20)
+        self.assertEqual(r.status, "OPTIMAL")
+        self.assertGreater(len(calls), 1)  # the running solve keeps its callback
+        calls.clear()
+        m.solve(threads=2, deterministic=True, time_limit=20)
+        self.assertEqual(calls, [])  # removed for the next solve
+
+    def test_gzip_input(self):
+        import gzip
+        path = os.path.join(INSTANCES, "knapsack_small_1.mps")
+        if not os.path.exists(path):
+            self.skipTest("benchmark instances not available")
+        with tempfile.TemporaryDirectory() as d:
+            gz = os.path.join(d, "k.mps.gz")
+            with open(path, "rb") as f, gzip.open(gz, "wb") as g:
+                g.write(f.read())
+            a, b = popso.read_mps(path), popso.read_mps(gz)
+            self.assertEqual((a.num_vars, a.num_constrs), (b.num_vars, b.num_constrs))
+            self.assertAlmostEqual(a.solve(threads=1).objective, b.solve(threads=1).objective)
+
+
 if __name__ == "__main__":
     unittest.main()

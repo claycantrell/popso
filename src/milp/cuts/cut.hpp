@@ -92,6 +92,8 @@ std::unique_ptr<Separator> make_cover_separator();
 std::unique_ptr<Separator> make_mir_separator(bool flowcover = true);
 // c-MIR / lifted cover cuts from simplex tableau rows (globally valid, also at nodes).
 std::unique_ptr<Separator> make_tableau_mir_separator();
+// Network cut-set c-MIR cuts on detected multi-commodity flow structure (cuts/mcf.hpp; root only).
+std::unique_ptr<Separator> make_mcf_separator();
 std::unique_ptr<Separator> make_clique_separator();
 std::unique_ptr<Separator> make_implied_bound_separator();
 std::unique_ptr<Separator> make_zerohalf_separator();

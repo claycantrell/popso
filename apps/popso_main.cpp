@@ -2,8 +2,10 @@
 // optionally write a .sol file (common "name value" format).
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,14 +22,24 @@
 
 namespace {
 
+// Ctrl-C (SIGINT) stops the solve with the best solution so far; a second one ends the process.
+std::atomic<bool> g_interrupt{false};
+
+void on_sigint(int) {
+  g_interrupt.store(true);
+  std::signal(SIGINT, SIG_DFL);
+}
+
 void print_usage(std::FILE* out) {
   std::fprintf(out,
-               "usage: popso <model.mps|model.lp> [options]\n"
+               "usage: popso <model.mps|model.lp>[.gz] [options]\n"
                "options:\n"
                "  --sol <file>          write solution file (\"name value\" .sol format)\n"
                "  --start <file>        starting solution (same format; may be partial)\n"
-               "  --duals <file>        write row duals and reduced costs (\"row|col name value\"; continuous QPs)\n"
-               "  --format <mps|lp>     input format (default: from the file extension, .lp = LP, else MPS)\n"
+               "  --duals <file>        write row duals and reduced costs (\"row|col name value\"): LPs and QPs;\n"
+               "                        for a MILP those of the LP with the integers fixed at the solution\n"
+               "  --format <mps|lp>     input format (default: from the file extension, .lp = LP, else MPS;\n"
+               "                        gzipped files (.mps.gz, .lp.gz) are detected and decompressed)\n"
                "  --time-limit <sec>    wall-clock time limit (default: none)\n"
                "  --threads <n>         number of threads (0 = all cores, default)\n"
                "  --verbosity <n>       0 silent, 1 summary (default), 2 progress, 3 debug\n"
@@ -58,13 +70,13 @@ double parse_double_arg(const char* opt, const char* s) {
   return v;
 }
 
-// Input format from --format, else from the extension (.lp, case-insensitive).
+// Input format from --format, else from the extension (.lp or .lp.gz, case-insensitive).
 bool is_lp_format(const std::string& format, const std::string& file) {
   if (!format.empty()) return format == "lp";
-  if (file.size() < 3) return false;
-  std::string ext = file.substr(file.size() - 3);
-  for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return ext == ".lp";
+  std::string name = file;
+  for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (name.size() >= 3 && name.compare(name.size() - 3, 3, ".gz") == 0) name.resize(name.size() - 3);
+  return name.size() >= 3 && name.compare(name.size() - 3, 3, ".lp") == 0;
 }
 
 long long parse_int_arg(const char* opt, const char* s) {
@@ -95,6 +107,7 @@ int main(int argc, char** argv) {
       sol_path = value();
     } else if (!std::strcmp(a, "--duals")) {
       duals_path = value();
+      params.duals = 2;
     } else if (!std::strcmp(a, "--start")) {
       start_path = value();
     } else if (!std::strcmp(a, "--format")) {
@@ -178,12 +191,15 @@ int main(int argc, char** argv) {
   }
 
   milp::SolveResult result;
+  params.interrupt = &g_interrupt;
+  std::signal(SIGINT, on_sigint);
   try {
     result = milp::solve(model, params, start);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "milp: solver error: %s\n", e.what());
     return 1;
   }
+  std::signal(SIGINT, SIG_DFL);
 
   if (!quiet) {
     std::printf("Status: %s\n", milp::to_string(result.status));

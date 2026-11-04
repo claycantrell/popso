@@ -28,12 +28,14 @@
 // inflow x_a <= u y_a with demand d yields x_a <= d y_a + outflow.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
 
 #include "milp/cuts/cut.hpp"
+#include "milp/cuts/mcf.hpp"
 
 namespace milp {
 
@@ -68,15 +70,24 @@ struct IntTerm {
 
 class MirSeparator : public Separator {
  public:
-  explicit MirSeparator(bool tableau = false, bool flowcover = true) : tableau_(tableau), use_flowcover_(flowcover) {}
-  const char* name() const override { return tableau_ ? "tmir" : "mir"; }
+  explicit MirSeparator(bool tableau = false, bool flowcover = true, bool mcf = false)
+      : tableau_(tableau), use_flowcover_(flowcover), mcf_(mcf) {}
+  const char* name() const override { return mcf_ ? "mcf" : tableau_ ? "tmir" : "mir"; }
   void separate(const SepaContext& ctx, std::vector<Cut>& out) override;
 
  private:
   // Variables 0..n-1 are structurals, n + i is the logical of LP row i.
   double lower(Index j) const { return j < n_ ? ctx_->p.col_lb[j] : ctx_->lp.var_lower(j); }
   double upper(Index j) const { return j < n_ ? ctx_->p.col_ub[j] : ctx_->lp.var_upper(j); }
-  bool is_int(Index j) const { return j < n_ && ctx_->p.is_int[j]; }
+  // Integer columns, and implied integers (MipProblem::implied_int) with integral bounds: some optimal
+  // solution has them integral, so the c-MIR rounding may treat them as integers.
+  bool is_int(Index j) const {
+    if (j >= n_) return false;
+    const MipProblem& p = ctx_->p;
+    if (p.is_int[j]) return true;
+    return p.is_implied_int(j) && integral_bound(p.col_lb[j]) && integral_bound(p.col_ub[j]);
+  }
+  static bool integral_bound(double b) { return !is_finite(b) || b == std::round(b); }
 
   // Tries a c-MIR cut from the base inequality sum agg_j x_j <= b.
   bool try_cut(double b, Cut* cut);
@@ -114,7 +125,16 @@ class MirSeparator : public Separator {
   // of B^-1 [A I] is an exact identity over structurals and logicals, so with global bounds
   // the c-MIR / lifted cover cuts from it are globally valid even at a node.
   void separate_tableau(std::vector<Cut>& out);
-  bool tableau_ = false, use_flowcover_ = true;
+  // Network cut-sets (as SCIP's mcf separator): for node sets S of the detected multi-commodity flow
+  // network, the flow conservation rows of S (commodities with net demand into / supply out of S at the
+  // LP point) plus the capacity rows of the arcs whose flow they leave with a negative coefficient; c-MIR
+  // and the aggregated knapsack cover on that base. Sets: single nodes and the components formed while
+  // contracting arcs in the order of decreasing capacity slack, then increasing capacity dual (so that
+  // the cut arcs are the tight, expensive ones).
+  void separate_mcf(std::vector<Cut>& out);
+  bool tableau_ = false, use_flowcover_ = true, mcf_ = false;
+  McfNetwork net_;
+  bool net_built_ = false;
   std::vector<double> tab_;
   std::vector<Index> tnz_;
 
@@ -1054,11 +1074,140 @@ void MirSeparator::separate_tableau(std::vector<Cut>& out) {
   tnz_.clear();
 }
 
+void MirSeparator::separate_mcf(std::vector<Cut>& out) {
+  if (!net_built_) {
+    const auto t0 = std::chrono::steady_clock::now();
+    net_ = detect_mcf_network(ctx_->p);
+    net_built_ = true;
+    if (std::getenv("MILP_MCF_DEBUG")) {
+      const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      Index ncap = 0;
+      for (const auto& a : net_.arcs) ncap += a.cap_row >= 0;
+      std::fprintf(stderr, "MCF network: %d nodes, %d commodities, %zu flow rows, %zu arcs (%d capacitated), detection %.4fs\n",
+                   static_cast<int>(net_.num_nodes), static_cast<int>(net_.num_comms), net_.flow_rows.size(),
+                   net_.arcs.size(), static_cast<int>(ncap), secs);
+    }
+  }
+  if (net_.empty() || ctx_->round <= 0) return;
+  const McfNetwork& N = net_;
+  const Index V = N.num_nodes;
+  const double* x = ctx_->x;
+  DualSimplex& lp = ctx_->lp;
+  const long long nnz = static_cast<long long>(ctx_->p.A.index.size());
+  static const double work_per_nnz = [] { const char* v = std::getenv("MILP_MCF_WORK"); return v ? std::atof(v) : 200.0; }();
+  const long long budget = static_cast<long long>(work_per_nnz * static_cast<double>(std::max<long long>(nnz, 20000)));
+  // Contraction order of the arcs: uncapacitated first, then by decreasing relative slack of the capacity
+  // row, then by increasing |dual| of a tight capacity row.
+  std::vector<std::pair<double, Index>> order;
+  for (Index a = 0; a < static_cast<Index>(N.arcs.size()); ++a) {
+    const McfNetwork::Arc& arc = N.arcs[a];
+    if (arc.tail < 0 || arc.head < 0 || arc.tail == arc.head) continue;
+    double key;
+    if (arc.cap_row < 0) {
+      key = -1e30;
+    } else {
+      const Index c = arc.cap_row;
+      const double side = std::max(std::abs(ctx_->p.row_lb[c]) * is_finite(ctx_->p.row_lb[c]),
+                                   std::abs(ctx_->p.row_ub[c]) * is_finite(ctx_->p.row_ub[c]));
+      const double rel = row_dist_[c] / (1.0 + side);
+      key = rel > 1e-6 ? -1.0 - rel : std::abs(lp.reduced_cost(n_ + c));
+    }
+    order.emplace_back(key, a);
+  }
+  std::stable_sort(order.begin(), order.end());
+  // Node sets: singletons, then the components of the contraction (at most half of the nodes).
+  std::vector<Index> set_start{0}, set_nodes;
+  for (Index v = 0; v < V; ++v) set_nodes.push_back(v), set_start.push_back(static_cast<Index>(set_nodes.size()));
+  {
+    std::vector<Index> parent(V);
+    std::vector<std::vector<Index>> members(V);
+    for (Index v = 0; v < V; ++v) parent[v] = v, members[v].assign(1, v);
+    auto find = [&](Index a) {
+      while (parent[a] != a) a = parent[a] = parent[parent[a]];
+      return a;
+    };
+    const size_t max_listed = static_cast<size_t>(std::max<long long>(20 * nnz, 100000));
+    for (const auto& [key, a] : order) {
+      Index r1 = find(N.arcs[a].tail), r2 = find(N.arcs[a].head);
+      if (r1 == r2) continue;
+      if (members[r1].size() < members[r2].size()) std::swap(r1, r2);
+      parent[r2] = r1;
+      members[r1].insert(members[r1].end(), members[r2].begin(), members[r2].end());
+      std::vector<Index>().swap(members[r2]);
+      if (2 * members[r1].size() > static_cast<size_t>(V) || set_nodes.size() + members[r1].size() > max_listed) continue;
+      set_nodes.insert(set_nodes.end(), members[r1].begin(), members[r1].end());
+      set_start.push_back(static_cast<Index>(set_nodes.size()));
+    }
+  }
+  std::vector<double> supply(N.num_comms, 0.0);
+  std::vector<char> comm_listed(N.num_comms, 0);
+  std::vector<Index> comms;
+  std::vector<char> cap_added(N.arcs.size(), 0);
+  std::vector<Index> caps, cross;
+  const Index nsets = static_cast<Index>(set_start.size()) - 1;
+  for (Index s = 0; s < nsets && work_count_ < budget; ++s) {
+    // Net supply of each commodity in S at the LP point (flow row activity = -logical).
+    comms.clear();
+    for (Index t = set_start[s]; t < set_start[s + 1]; ++t) {
+      const Index v = set_nodes[t];
+      for (Index q = N.node_start[v]; q < N.node_start[v + 1]; ++q) {
+        const McfNetwork::FlowRow& fr = N.flow_rows[q];
+        if (!comm_listed[fr.comm]) comm_listed[fr.comm] = 1, comms.push_back(fr.comm);
+        supply[fr.comm] += fr.mult * -x[n_ + fr.row];
+      }
+      work_count_ += N.node_start[v + 1] - N.node_start[v];
+    }
+    for (double sigma : {1.0, -1.0}) {
+      // sigma = 1: sum_S (outflow - inflow) = supply; commodities with net demand (their inflow arcs need
+      // capacity). sigma = -1: the negation; commodities with net supply.
+      clear_agg();
+      bool any = false;
+      for (Index t = set_start[s]; t < set_start[s + 1]; ++t) {
+        const Index v = set_nodes[t];
+        for (Index q = N.node_start[v]; q < N.node_start[v + 1]; ++q) {
+          const McfNetwork::FlowRow& fr = N.flow_rows[q];
+          if (sigma * supply[fr.comm] > -1e-6) continue;
+          add_row(fr.row, sigma * fr.mult);
+          any = true;
+        }
+      }
+      if (!any) continue;
+      // Crossing flows with a negative coefficient: substitute their capacity rows.
+      cross.clear();
+      for (Index j : nz_) {
+        if (j < n_ && N.col_arc[j] >= 0 && agg_[j] < -1e-9) cross.push_back(j);
+      }
+      caps.clear();
+      for (Index j : cross) {
+        const Index a = N.col_arc[j];
+        const Index c = N.arcs[a].cap_row;
+        if (c < 0 || cap_added[a] || agg_[j] >= -1e-9 || std::abs(N.col_cap[j]) < 1e-6) continue;
+        cap_added[a] = 1, caps.push_back(a);
+        add_row(c, -agg_[j] / N.col_cap[j]);
+        agg_[j] = 0.0;
+      }
+      for (Index a : caps) cap_added[a] = 0;
+      if (caps.empty()) continue;
+      Cut cut;
+      if (try_cut(0.0, &cut)) {
+        cut.origin = "mcf";
+        out.push_back(std::move(cut));
+      }
+      if (knapsack_ && try_knapsack(&cut)) {
+        cut.origin = "mcf";
+        out.push_back(std::move(cut));
+      }
+    }
+    for (Index k : comms) supply[k] = 0.0, comm_listed[k] = 0;
+  }
+}
+
 void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   const MipProblem& p = ctx.p;
   DualSimplex& lp = ctx.lp;
   ctx_ = &ctx;
   n_ = p.num_cols();
+  if (mcf_ && (ctx.round <= 0 || (net_built_ && net_.empty()))) return;  // no network: skip the setup below
   {
     const char* v = std::getenv("MILP_NO_AGGCOVER");
     knapsack_ = !(v && *v && v[0] != '0');
@@ -1123,6 +1272,11 @@ void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     clear_agg();
     return;
   }
+  if (mcf_) {
+    separate_mcf(out);
+    clear_agg();
+    return;
+  }
   const long long nnz = static_cast<long long>(p.A.index.size());
   const long long budget = static_cast<long long>(kWorkPerNnz * static_cast<double>(std::max<long long>(nnz, 20000)));
   int_budget_ = static_cast<long long>(int_work_per_nnz_ * static_cast<double>(std::max<long long>(nnz, 20000)));
@@ -1178,5 +1332,6 @@ void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
 
 std::unique_ptr<Separator> make_mir_separator(bool flowcover) { return std::make_unique<MirSeparator>(false, flowcover); }
 std::unique_ptr<Separator> make_tableau_mir_separator() { return std::make_unique<MirSeparator>(true); }
+std::unique_ptr<Separator> make_mcf_separator() { return std::make_unique<MirSeparator>(false, false, true); }
 
 }  // namespace milp

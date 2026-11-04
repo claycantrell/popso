@@ -63,8 +63,10 @@ struct CutLoopOptions {
   double time_share = 0.0;       // > 0: also allow this share of the time left after the initial LP solve,
   double total_time_limit = kInf;  // up to this absolute time
   int max_cuts_per_round = -1;   // -1: chosen from the problem size
+  bool keep_rows = false;        // never remove the rows the LP had on entry (only the loop's own cuts)
   long long probe_work = -1;     // probing work limit (matrix entries; -1: from the problem size)
   bool gomory = true, cover = true, mir = true, clique = true, implied_bound = true, zerohalf = true;
+  bool mcf = true;  // network cut-sets (MILP_MCF=0: off)
   Tolerances tol;
   // Called with the LP after every optimal solve of the loop (the initial one and each round's):
   // the root search records reduced costs of all these LP optima for reduced-cost fixing.

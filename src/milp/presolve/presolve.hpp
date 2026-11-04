@@ -12,6 +12,7 @@
 //   - doubleton equations (aggregation; integer pairs when integrality is preserved)
 //   - substitution of (implied) free columns and column singletons out of equations
 //   - probing on binaries: fixings, bound tightening, equivalences x = y / x = 1 - y
+// Afterwards implied integers are detected and flagged in reduced().implied_int (their bounds rounded).
 
 #include <utility>
 #include <vector>
@@ -33,9 +34,18 @@ struct PresolveOptions {
   bool dominated_cols = true;
   bool aggregation = true;
   bool substitution = true;  // free column / column singleton substitution
+  // Also substitute non-singleton continuous columns with a nonzero objective coefficient whose bounds the
+  // equation does not imply (the bounds stay as the row's sides; MILP_PRESOLVE_ON=subst_bounded). Off: such a
+  // column keeps its bounds and variable bounds for the cut separators (tr12-30: the stock columns of the
+  // inventory balances, with holding costs, became row slacks and the c-MIR path aggregation lost the
+  // (l,S)-like cuts; root 127730 -> 130056 without the substitution). Zero-cost columns are still substituted
+  // (empirical: neos-3627168-kasai's stocks, cost 0, solve 2-3x faster substituted).
+  bool substitution_bounded = false;
   bool probing = true;
   bool clique_merging = true;
   bool clique_extension = true;  // extend set-packing rows by the conflict graph of all rows
+  bool implied_int = true;       // implied-integer detection on the reduced problem (presolve/implied_int.hpp)
+  bool implied_int_dual = true;  // ... including the dual rule
   double probing_effort = 1.0;  // scales the probing work limit
 
   // Defaults with switches from MILP_PRESOLVE_OFF, a comma-separated list of option names to disable
@@ -64,6 +74,7 @@ struct PresolveStats {
   long long substitutions = 0;
   long long probes = 0, probing_fixed = 0, probing_bounds = 0, probing_equivs = 0;
   long long clique_extended = 0, clique_dominated = 0, clique_fixed = 0;
+  long long implied_primal = 0, implied_dual = 0, implied_int = 0;  // new by rule; flagged in total
   int rounds = 0;
   double time = 0.0;
 };

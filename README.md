@@ -18,12 +18,12 @@ instances, and is faster overall, than the open-source solvers HiGHS and SCIP:
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| popso | 59/63 | 10.5 |
+| popso | 58/63 | 10.7 |
 | HiGHS 1.15 | 53/63 | 18.9 |
 | SCIP 10 | 50/63 | 21.3 |
 
 On the 43 harder instances of the same collection that no solver finishes in 2 minutes, with a
-10-minute limit, popso solves 9, HiGHS 12 and SCIP 6.
+10-minute limit, popso solves 15, HiGHS 12 and SCIP 6.
 
 These are single-machine numbers with caveats. See **[BENCHMARKS.md](BENCHMARKS.md)** for the
 setup, per-instance results, the hard instances, the generated benchmark families and popso's
@@ -59,7 +59,10 @@ semi-continuous and semi-integer variables, SOS1/SOS2 constraints and indicator
 constraints (MPS `SC`/`SI` bounds, `SOS` and `INDICATORS` sections; LP `Semi-Continuous` and
 `SOS` sections and `b = 1 -> ...` constraints). The objective may have a convex quadratic part
 (see [Quadratic objectives](#quadratic-objectives-qp-and-miqp) below). The format is chosen by the file extension (`.lp` is LP, anything else MPS,
-case-insensitive); `--format lp|mps` overrides it:
+case-insensitive); `--format lp|mps` overrides it. Gzip-compressed files (`model.mps.gz`, `model.lp.gz`, or any
+file starting with the gzip magic bytes) are decompressed while reading (at most 16 GiB of decompressed data,
+a guard against corrupt or malicious files; C++ `milp::set_gzip_max_output`), so MIPLIB's `.mps.gz` files can be
+used directly:
 
 ```
 Status: OPTIMAL
@@ -85,7 +88,7 @@ x1 1
 |---|---|
 | `--sol <file>` | write the solution file |
 | `--start <file>` | starting solution in the same `name value` format; may be partial (see below) |
-| `--duals <file>` | write row duals and reduced costs (`row <name> <value>` / `col <name> <value>` lines; continuous QPs) |
+| `--duals <file>` | write row duals and reduced costs (`row <name> <value>` / `col <name> <value>` lines) of an LP or continuous QP; for a MILP the fixed-MIP duals (see [Dual values](#dual-values)) |
 | `--format <mps\|lp>` | input format (default: from the file extension) |
 | `--time-limit <sec>` | wall-clock time limit (default: none) |
 | `--threads <n>` | number of threads (0 = all cores, the default) |
@@ -104,6 +107,38 @@ x1 1
 with `--sol`. A complete feasible start becomes the first incumbent. If only some values are given, or
 the start is infeasible, the given integer values are fixed and the rest is completed by a short
 sub-MIP. If that fails, the start is ignored and the log says so.
+
+**Interrupting.** Ctrl-C (SIGINT) stops the solve within a fraction of a second; popso prints the
+usual summary with the status `INTERRUPTED` and the best solution found so far (and writes `--sol` /
+`--duals` files as usual). A second Ctrl-C ends the process at once.
+
+### Dual values
+
+- **LPs** solved to optimality: row duals y and reduced costs d = c - A'y of an optimal basis. Presolve
+  maps only primal solutions back (several of its reductions, such as dual fixing, dominated and
+  parallel columns or substitutions, have no simple dual postsolve), so the duals are not carried
+  through it: after the solve, the postsolved optimal point is turned into an optimal basis of the
+  original LP (a crossover from the point, then a few simplex iterations, usually none or a handful;
+  about 1 s for the 5000 x 8000 `randlp_large`, whose solve takes 24 s). Duals of an optimal basis are
+  optimal, and every optimal primal-dual pair is complementary, so the duals fit the returned solution
+  whether presolve ran or not. The basis comes with them (C API `popso_get_basis`, Python
+  `Result.var_basis` / `Result.constr_basis`).
+- **MILPs**: the "fixed-MIP" duals, those of the LP with every integer variable fixed at its value in
+  the solution (with `--duals`, the C API parameter `duals` = 2 or Python `solve(duals=2)`), computed
+  after the solve. They are the duals of an *optimal* basis of that fixed LP. When the solve stopped
+  early (time or node limit, interrupt), the incumbent's continuous part need not be optimal for the
+  fixed LP; the duals then belong to the fixed LP's optimum and need not be complementary to the
+  returned solution's continuous values (the log says so: "the fixed LP's optimum ... is better than
+  the incumbent's"). The returned solution itself is never changed.
+- Recovered LP and fixed-MIP duals are checked against the solution: if their basis does not
+  reproduce the solution's objective (relative tolerance 1e-6; for fixed-MIP duals, if it is worse)
+  they are dropped ("Duals: dropped" in the log, no duals returned). An interrupt or the time limit
+  (at least 1 s is allowed for the recovery) also gives up on them.
+- **Continuous QPs**: from the barrier's final point (see below).
+- Signs, in the model's objective sense: when minimizing, y_i >= 0 at an active row lower bound and
+  <= 0 at an upper one, d_j >= 0 at a variable's lower bound and <= 0 at its upper one; the opposite
+  when maximizing.
+- Not for MIQPs and for models with semi-continuous variables, SOS or indicator constraints.
 
 ### Quadratic objectives (QP and MIQP)
 
@@ -181,11 +216,33 @@ if (popso_solve(m) == POPSO_OK && popso_has_solution(m)) {
 popso_free(m);
 ```
 
-Models can also be read with `popso_read_mps` or `popso_read_lp`. `popso_add_sos` and
+Models can also be read with `popso_read_mps` or `popso_read_lp` (plain or gzipped). `popso_add_sos` and
 `popso_add_indicator` add SOS1/SOS2 and indicator constraints, and the variable types
 `POPSO_SEMICONTINUOUS` and `POPSO_SEMIINTEGER` make a variable 0 or within its bounds. Functions return error codes, and
 `popso_last_error` describes the last failure. Separate models can be solved from different threads
 at the same time. The library prints nothing unless you set the `verbosity` parameter.
+
+Dual values (see [Dual values](#dual-values)) come from `popso_get_duals` / `popso_get_reduced_costs`
+and the basis from `popso_get_basis`; `popso_has_duals` returns 1 for LP and QP duals, 2 for fixed-MIP
+duals (parameter `duals`: 0 none, 1 LPs, the default, 2 also MILPs). A running solve can be stopped
+from another thread or a signal handler, and new incumbents can be followed with a callback:
+
+```c
+static int on_incumbent(void* data, double objective, double bound, const double* x, int n) {
+  printf("incumbent %g (bound %g)\n", objective, bound);
+  return 0;  /* nonzero stops the solve */
+}
+
+popso_set_incumbent_callback(m, on_incumbent, NULL);
+popso_solve(m);              /* another thread may call popso_interrupt(m) */
+```
+
+`popso_interrupt` is a single atomic store (async-signal-safe); the solve stops within a fraction of a
+second with status `POPSO_STATUS_INTERRUPTED` and the best solution so far. The request is cleared when
+`popso_solve` starts. Callback calls are serialized, have strictly improving objectives (in the
+model's sense) and come at deterministic points with the `deterministic` parameter; the solution is in
+the model's variables (presolve and reformulations undone). Returning nonzero stops the solve like
+`popso_interrupt`; after that there are no further calls.
 
 ### Python
 
@@ -205,7 +262,15 @@ m.set_start({x: 4})             # optional, may be partial
 r = m.solve(time_limit=10, threads=4)
 print(r.status, r.objective, r.bound, r[x], r["y"], r.nodes, r.time)
 
-m2 = popso.read_mps("model.mps")
+m2 = popso.read_mps("model.mps.gz")             # plain or gzipped
+
+# Dual values: LPs by default, fixed-MIP duals with duals=2
+r = m.solve(duals=2)
+print(r.duals, r.reduced_costs, r.fixed_mip_duals)
+
+# Following the incumbents; returning True stops the solve (status "INTERRUPTED")
+m.set_incumbent_callback(lambda objective, bound, x: print(objective, bound))
+r = m.solve()
 
 # Logical constraints
 b = m.add_var(vtype=popso.BINARY, name="b")
@@ -213,6 +278,11 @@ z = m.add_var(lb=2, ub=8, vtype=popso.SEMICONTINUOUS, name="z")   # z = 0 or 2 <
 m.add_indicator(b, 0, z <= 0)                                     # b = 0 -> z <= 0
 m.add_sos([x, y, z], weights=[1, 2, 3], type=popso.SOS1)          # at most one nonzero
 ```
+
+Ctrl-C during `solve()` stops the solve cleanly: `solve()` returns the result with status
+`"INTERRUPTED"` and the best solution so far instead of raising `KeyboardInterrupt` (the native solve
+runs on a helper thread while the main thread waits). `m.interrupt()` does the same from another
+thread. An exception raised in the incumbent callback stops the solve and is re-raised by `solve()`.
 
 To use it from a source checkout, add `python/` to `PYTHONPATH`. The library is then found in
 `build/`; you can also point `POPSO_LIBRARY` at it. To install the package, copy the library into the
@@ -272,17 +342,20 @@ pip install ./python
   objectives.
 - **Quadratic models:** a basic presolve only, no cutting planes, no parallel MIQP search; the
   node QP solver keeps a dense copy of the Hessian, so MIQPs with more than 3000 columns fall back
-  to the much slower barrier at every node. Dual
-  values only for continuous QPs (interior point, no basis). MIQP performance is far from the commercial solvers.
+  to the much slower barrier at every node. Dual values for continuous QPs come from the interior
+  point (no basis); none for MIQPs. The incumbent callback is not called for quadratic
+  objectives. MIQP performance is far from the commercial solvers.
 - **Model features:** semi-continuous variables, SOS constraints and indicator constraints
   are reformulated with binary variables (big-M rows where bounds allow). There is no
   specialized branching on SOS sets, and presolve is skipped for models with constraints
   that have no finite big-M. No other general constraints (abs, min/max, piecewise-linear
   objectives).
 - **Input and interfaces:**
-  - MPS and LP-format input only (no gzipped files).
-  - The C API and the Python bindings have no callbacks. They return no dual values or reduced
-    costs for LPs and MILPs (only for continuous QPs), and a running solve cannot be interrupted.
+  - MPS and LP-format input only (plain or gzipped; no bzip2 / xz).
+  - The only callback is the incumbent callback (no cut, branching or heuristic callbacks, no
+    progress callback). LP duals are recovered after the solve from the optimal point, which costs
+    a crossover and a few simplex iterations on the original LP. No dual values for models with
+    semi-continuous variables, SOS or indicator constraints, and no Farkas or unboundedness rays.
 - **LP algorithms:** the barrier solver is new and not tuned yet; its factorization is slower
   than in mature solvers. It has no homogeneous self-dual model: when it only suspects an
   infeasible or unbounded LP, the simplex confirms it. MIP root LPs use the dual simplex unless

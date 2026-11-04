@@ -7,6 +7,8 @@
 #include <random>
 #include <utility>
 
+#include "milp/core/interrupt.hpp"
+
 namespace milp {
 
 namespace {
@@ -72,7 +74,7 @@ class Fj {
     long long progress_effort = 0;  // effort at the last new solution / fewest violated rows
     while (effort_ < lim_.effort) {
       if ((++step & 1023) == 0) {
-        if (lim_.stop && lim_.stop->load(std::memory_order_relaxed)) break;
+        if ((lim_.stop && lim_.stop->load(std::memory_order_relaxed)) || interrupted()) break;
         if (lim_.checkpoint && !lim_.checkpoint(effort_)) break;
         const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (el > lim_.time_limit) break;
@@ -132,6 +134,7 @@ class Fj {
       stats->moves = moves_;
       stats->restarts = restarts_;
       stats->solutions = solutions_;
+      stats->first_effort = first_effort_;
       stats->min_violated = solutions_ > 0 ? 0 : min_viol_;
     }
     return solutions_ > 0;
@@ -254,7 +257,7 @@ class Fj {
     if (obj < best_obj_) {
       best_obj_ = obj;
       best_x_ = x_;
-      ++solutions_;
+      if (solutions_++ == 0) first_effort_ = effort_;
       on_solution(x_, obj);
     }
     if (!has_cost_) return false;
@@ -292,7 +295,7 @@ class Fj {
   std::vector<double> best_x_;
   double best_obj_ = kInf;
   bool obj_integral_ = false, has_cost_ = false;
-  long long effort_ = 0, moves_ = 0, restarts_ = 0, min_viol_ = 1LL << 60;
+  long long effort_ = 0, moves_ = 0, restarts_ = 0, min_viol_ = 1LL << 60, first_effort_ = -1;
   int solutions_ = 0;
 };
 

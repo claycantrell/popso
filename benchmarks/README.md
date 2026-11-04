@@ -15,10 +15,12 @@ benchmarks/
   reference.py            HiGHS / SCIP reference solves -> reference/solutions.json
   reference/
     solutions.json        reference status/objective/bound/times per instance (committed)
-    miplib_solu.json      MIPLIB subset: known optimal values + HiGHS times (committed)
-  miplib/download.py      downloads + decompresses the MIPLIB 2017 subset (dir is gitignored)
+    miplib_solu.json      MIPLIB benchmark set (240): official .solu status/values, .gz sizes,
+                          subset HiGHS times (committed)
+  miplib/download.py      downloads the MIPLIB 2017 instances (dir is gitignored)
+  sets/                   instance lists for run.py / reference.py / ab.py --set
   run.py                  benchmark runner for our solver (verifies every answer)
-  results/                run.py output: <timestamp>_<git-sha>.json/.csv
+  results/                run.py output: <timestamp>_<git-sha>.json/.csv (.jsonl while running)
   lib/                    shared helpers: MPS reader + verifier, modeler + MPS/LP writers, .sol I/O, solver wrappers
   tools/highs_cli.py      HiGHS-based stand-in implementing our CLI contract (harness tests)
   tools/lp_crosscheck.py  LP-reader check: every instance as LP must read to the same model as its MPS
@@ -225,6 +227,74 @@ proven (also when a reference solver timed out), and reference times from
 `solutions.json` (4 threads) in preference to the 1-thread selection-run
 times in `miplib_solu.json`; a reference solver whose optimum contradicts
 the .solu value counts as unsolved.
+
+### Full benchmark set (`sets/miplib_benchmark.txt`, 240 instances)
+
+The official MIPLIB 2017 benchmark set (list from
+<https://miplib.zib.de/downloads/benchmark-v2.test>; status/values from
+`miplib2017-v37.solu`: 232 optimal, 7 infeasible, 1 best known
+(supportcase22, 110)).  The files stay gzipped (popso and `lib/mps.py` read
+`.mps.gz`): **~640 MB** to download (largest: square47 82 MB, square41 41 MB,
+neos-3402454-bohle 40 MB; uncompressed it would be several GB).
+
+```sh
+# 1. download (skips files already present; re-run it after failures)
+.venv/bin/python benchmarks/miplib/download.py --benchmark
+# 2. the run (~7-8 h at 120 s: <= 240 x (120 s + grace) plus verification)
+.venv/bin/python benchmarks/run.py --solver build/popso --set miplib_benchmark \
+    -t 120 --threads 4 --mem-limit 4096 --tag benchmark
+# 2b. after an interruption (crash, Ctrl-C, reboot): the same command plus
+#     --resume benchmarks/results/<stamp>_<sha>_benchmark.jsonl   (printed at the start)
+# 3. reference solves for the instances not covered yet (overnight; see below)
+.venv/bin/python benchmarks/reference.py --set miplib_benchmark --resume \
+    --time-limit 120 --threads 4 --jobs 1 --mem-limit 4096
+```
+
+* **Download checks.** The site publishes no checksums.  `download.py
+  --benchmark` accepts a file when its byte count matches the HTTP
+  Content-Length and the size recorded in `miplib_solu.json` (`gz_bytes`,
+  taken with HEAD requests by `download.py --solu-only --benchmark`), and the
+  whole gzip stream decompresses with valid CRCs.  Present files are skipped
+  when their size matches (`--verify` re-checks their CRC too).  Names
+  after `--benchmark` download only those.
+* **Incremental results / resume.** `run.py` appends every finished instance
+  to `results/<stamp>_<sha>[_tag].jsonl` (fsync'ed), so a crash loses at
+  most the instance in progress; the `.jsonl` is replaced by the usual
+  `.json`/`.csv` at the end.  `--resume FILE` (a `.jsonl`, or a finished
+  `.json`) skips the instances recorded there, appends to it and writes the
+  final files under its name; time limit, threads, gap, memory limit and
+  tolerances must match the original run (else it refuses), a different
+  commit only warns, and `meta.resumed` records each continuation.  `--redo
+  error,memlimit` with `--resume` re-runs instances of those classes.  Ctrl-C
+  or SIGTERM kills the running solver and prints the resume command; after a
+  SIGKILL of the runner the solver child finishes on its own time limit.
+* **Memory.** The solver gets `--mem-limit` plus the RSS watchdog (125%).
+  The Python verifier (reads the MPS file: ~6x the uncompressed size, e.g.
+  440 MB for supportcase22's 74 MB) runs in its own process under an RSS
+  cap, `--verify-mem-limit` (default 4096 MB) / `--verify-timeout` (900 s);
+  if it is exceeded the instance is an `error` with a `verifier:` message
+  (re-run with `--resume ... --redo error --verify-mem-limit 8192`).  The
+  largest instances (square41/47) probably need that.
+* **Classification against MIPLIB values.** `infeasible` instances: a
+  verified feasible solution is `WRONG` (whatever status the solver claims),
+  `INFEASIBLE` is `ok`.  `best_known` (unproven) values: a verified objective
+  better than the best known one is fine (`noref` if claimed optimal,
+  `improves_best_known` in the record); claiming optimality with a *worse*
+  objective, or infeasibility, is `WRONG`.  Proven optima behave as before
+  (better verified solution or worse "optimal" claim = `WRONG`).  When
+  `solutions.json` has a time-limit reference for a best-known instance, the
+  better of its incumbent and the .solu value is used.
+* **References.** The 106 wide-set instances already have HiGHS/SCIP runs at
+  120 s / 4 threads; `reference.py --resume` skips every (instance, solver)
+  pair whose entry has a `ref_runs` record with the same `--time-limit` and
+  `--threads`, so the command above solves only the other 134 (x 2 solvers,
+  <= 120 s each plus reading: up to ~9 h with `--jobs 1`, ~4.5 h with `--jobs
+  2` = 8 threads).  `solutions.json` is rewritten atomically after every
+  finished instance (never run two writers on it at once); after an
+  interruption the same command continues.  Entries whose existing results
+  come from other settings are re-solved and their solver results replaced
+  (as with `--update`).  `--set` works with any list and combines with
+  positional paths.  Both reference solvers read `.mps.gz`.
 
 ## Running our solver
 

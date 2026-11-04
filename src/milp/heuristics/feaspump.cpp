@@ -7,6 +7,7 @@
 #include <random>
 #include <unordered_set>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/core/timer.hpp"
 
 namespace milp {
@@ -68,7 +69,7 @@ bool feasibility_pump(const MipProblem& p, const DualSimplex& root, const FeasPu
   int stall = 0;
   double stall_best = kInf;
   for (int round = 0; round < limits.max_rounds; ++round) {
-    if (timer.elapsed() > limits.time_limit || iters > limits.iteration_budget) break;
+    if (timer.elapsed() > limits.time_limit || iters > limits.iteration_budget || interrupted()) break;
     if (limits.stall_rounds > 0 && stall >= limits.stall_rounds) break;
     // Round the LP point.
     for (Index j = 0; j < n; ++j) {
@@ -122,15 +123,17 @@ bool feasibility_pump(const MipProblem& p, const DualSimplex& root, const FeasPu
     const long long it0 = lp.iterations();
     const LpStatus st = lp.solve(opt);
     iters += lp.iterations() - it0;
+    // lp.x() copies (and unscales) all n + m values: take it once per round.
+    const double* lx = lp.x();
     if (std::getenv("MILP_FP_DEBUG")) {
       double dist = 0.0;
-      for (Index j = 0; j < n; ++j) dist += p.is_int[j] ? std::abs(lp.x()[j] - xr[j]) : 0.0;
+      for (Index j = 0; j < n; ++j) dist += p.is_int[j] ? std::abs(lx[j] - xr[j]) : 0.0;
       std::fprintf(stderr, "FP round %d status %s dist %.4g viol(xr) %.3g iters %lld t %.2f\n", round, to_string(st),
                    dist, p.max_violation(xr), iters, timer.elapsed());
     }
     if (st != LpStatus::Optimal) break;
     double dist = 0.0;
-    for (Index j = 0; j < n; ++j) dist += p.is_int[j] ? std::abs(lp.x()[j] - xr[j]) : 0.0;
+    for (Index j = 0; j < n; ++j) dist += p.is_int[j] ? std::abs(lx[j] - xr[j]) : 0.0;
     // Improvement: at least 1% closer (tiny decreases while cycling do not count).
     if (dist < 0.99 * stall_best) {
       stall_best = dist;
@@ -141,11 +144,11 @@ bool feasibility_pump(const MipProblem& p, const DualSimplex& root, const FeasPu
     if (closest) {
       if (dist < best_dist) {
         best_dist = dist;
-        closest->assign(lp.x(), lp.x() + n);
+        closest->assign(lx, lx + n);
       }
     }
     basis = lp.get_basis();
-    for (Index j = 0; j < n; ++j) x[j] = lp.x()[j];
+    for (Index j = 0; j < n; ++j) x[j] = lx[j];
 
     bool integral = true;
     for (Index j = 0; j < n && integral; ++j) integral = !p.is_int[j] || std::abs(x[j] - std::round(x[j])) <= 1e-6;
