@@ -570,10 +570,11 @@ TEST(symmetry_end_to_end_same_optimum) {
   }
   set_env("MILP_NO_ZEROHALF", false);
   set_env("MILP_ROOT_SB", false);
+  std::printf("  %d instances checked, %lld branched\n", checked, branched);
   CHECK(checked > 30);
-  // The symmetric searches really branch (12-15 of the instances; the count moves with LP pivoting
-  // details, so the bound leaves some room).
-  CHECK(branched >= 10);
+  // The symmetric searches really branch (v0.6.0: 10 of the instances on macOS, 9 on Linux / GCC; 12-15
+  // before the v0.6 root changes; the count moves with LP pivoting details, so the bound leaves some room).
+  CHECK(branched >= 6);
 }
 
 TEST(orbitope_detected_on_coloring_and_bin_packing) {
