@@ -6,9 +6,10 @@
 //
 // Clique extension: a conflict graph on the binaries (x_u = x_v = 1 infeasible) is collected from every row
 // (for a side sum a_j x_j <= b: the binaries with the largest positive coefficients whose pairs exceed the
-// slack b - minact form a clique). Each set-packing row is extended greedily by binaries adjacent to all of
-// its members; packing rows contained in another (extended) one are dropped. A binary adjacent to every
-// member of a set-partitioning row (sum = 1) is fixed to 0. Rows and bounds only, no postsolve.
+// slack b - minact form a clique), plus conflicts given by the caller (probing). Each set-packing row is
+// extended greedily by binaries adjacent to all of its members; packing rows contained in another (extended)
+// one are dropped. A binary adjacent to every member of a set-partitioning row (sum = 1) is fixed to 0. Rows
+// and bounds only, no postsolve.
 
 #include <utility>
 #include <vector>
@@ -36,8 +37,10 @@ struct CliqueExtension {
   CliqueExtendStats stats;
 };
 
-// Finds the reductions without applying them.
-CliqueExtension find_clique_extensions(const MipProblem& p, long long work_limit);
+// Finds the reductions without applying them. edges: further conflicts x_u + x_v <= 1 (e.g. from probing),
+// used where both columns are binaries.
+CliqueExtension find_clique_extensions(const MipProblem& p, long long work_limit,
+                                       const std::vector<std::pair<Index, Index>>* edges = nullptr);
 
 // Applies find_clique_extensions to p. Returns false if nothing changed. work_limit: rough number of elementary operations.
 bool extend_cliques(MipProblem& p, long long work_limit, CliqueExtendStats* stats);

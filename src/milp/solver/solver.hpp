@@ -76,6 +76,7 @@ struct SolveStats {
   long long lp_iterations = 0;
   double root_bound = -kInf;
   long long barrier_iterations = 0;  // interior-point iterations (QP and MIQP relaxations)
+  int restarts = 0, tree_restarts = 0;  // root and in-tree restarts of the MILP search
 };
 
 struct SolveResult {

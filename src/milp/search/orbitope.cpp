@@ -171,9 +171,20 @@ std::vector<Orbitope> detect_packing_orbitopes(const MipProblem& p, const Symmet
   std::vector<Index> orb_id(n, -1), block(n), sigma(n);
   std::iota(sigma.begin(), sigma.end(), 0);
   std::vector<char> mark(n, 0);
+  // Work (row entries hashed) for inferring the swaps' images, over all components: per component it
+  // let bab2 (many components, 147k columns) spend minutes here, past any time limit.
+  long long work = 0;
+  static const long long max_work = [] {
+    const char* v = std::getenv("MILP_ORBITOPE_WORK");
+    return v ? std::atoll(v) : 400000000LL;
+  }();
   for (Index root = 0; root < n; ++root) {
     const std::vector<Index>& cols = comp_cols[root];
     if (cols.empty()) continue;
+    if (work > max_work) {
+      if (dbg) std::fprintf(stderr, "ORB work limit: components left unchecked\n");
+      break;
+    }
     // Orbits of the component (numbered by their smallest column) must all have the same size p.
     std::vector<std::vector<Index>> orbits;
     for (Index j : cols) {
@@ -298,8 +309,6 @@ std::vector<Orbitope> detect_packing_orbitopes(const MipProblem& p, const Symmet
       const Index fk = image ? sigma[k] : k;
       return mix64(static_cast<uint64_t>(fk) * 0x9e3779b97f4a7c15ULL ^ hash_double(a));
     };
-    long long work = 0;
-    const long long max_work = 400000000;
     auto col_hash = [&](Index j, bool image) {
       uint64_t h = 0;
       for (Index e = p.A.begin(j); e < p.A.end(j); ++e) {
@@ -336,10 +345,12 @@ std::vector<Orbitope> detect_packing_orbitopes(const MipProblem& p, const Symmet
         std::unordered_multimap<uint64_t, Index> by_h;
         for (Index j : big) {
           if (!unres[j]) continue;
+          if (work > max_work) break;  // one pass alone can exceed the budget
           hid[j] = col_hash(j, false);
           hsg[j] = col_hash(j, true);
           by_h.emplace(hid[j], j);
         }
+        if (work > max_work) continue;
         size_t progress = 0;
         for (Index j : big) {
           if (!unres[j]) continue;

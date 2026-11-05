@@ -1001,8 +1001,27 @@ void LuFactor::ftran_dense(double* const* v, bool spike) const {
     for (int k = 0; k < K; ++k) v[k][r_row_[e]] -= dot_gather(r_value_.data() + q0, r_index_.data() + q0, v[k], len);
   }
   if (spike && forrest_tomlin && !ft_off_) {
-    std::copy_n(v[0], m_, spike_.data());
-    spike_all_ = true;
+    // An exact copy of v[0], kept sparse: blocks of 8 rows with a nonzero are copied and listed in
+    // ascending order (zero elsewhere), so the update reads only those (same entries, same order as
+    // a scan of all m rows).
+    if (spike_all_) std::fill(spike_.begin(), spike_.end(), 0.0);
+    else for (Index i : spike_idx_) spike_[i] = 0.0;
+    spike_idx_.clear();
+    const double* s0 = v[0];
+    double* sp = spike_.data();
+    Index i = 0;
+    for (; i + 8 <= m_; i += 8) {
+      bool any = false;
+      for (int k = 0; k < 8; ++k) any |= s0[i + k] != 0.0;
+      if (!any) continue;
+      for (int k = 0; k < 8; ++k) sp[i + k] = s0[i + k], spike_idx_.push_back(i + k);
+    }
+    for (; i < m_; ++i) {
+      if (s0[i] == 0.0) continue;
+      sp[i] = s0[i];
+      spike_idx_.push_back(i);
+    }
+    spike_all_ = false;
     spike_ok_ = true;
   }
   // U back substitution in place. Forrest-Tomlin steps come last (column-wise),
@@ -1429,14 +1448,14 @@ void LuFactor::btran(std::vector<double>& v) const {
   btran_rows(v.data(), nullptr, count);
 }
 
-void LuFactor::ftran_multi(HVector* const* vs, const double* dens, int k) const {
+void LuFactor::ftran_multi(HVector* const* vs, const double* dens, int k, bool keep_spike) const {
   scratch().ensure(m_, dense_n_);
   double* dv[3];
   HVector* dh[3];
   int nd = 0;
   for (int i = 0; i < k; ++i) {
     if (use_hyper(vs[i]->count, dens[i])) {
-      ftran_hyper(*vs[i], i == 0);
+      ftran_hyper(*vs[i], keep_spike && i == 0);
       to_positions(*vs[i]);
     } else {
       dh[nd] = vs[i];
@@ -1444,7 +1463,7 @@ void LuFactor::ftran_multi(HVector* const* vs, const double* dens, int k) const 
     }
   }
   if (nd == 0) return;
-  const bool spike = dh[0] == vs[0];
+  const bool spike = keep_spike && dh[0] == vs[0];
   if (nd == 1) ftran_dense<1>(dv, spike);
   else if (nd == 2) ftran_dense<2>(dv, spike);
   else ftran_dense<3>(dv, spike);
@@ -1454,9 +1473,9 @@ void LuFactor::ftran_multi(HVector* const* vs, const double* dens, int k) const 
   }
 }
 
-void LuFactor::ftran(HVector& v, double density) const {
+void LuFactor::ftran(HVector& v, double density, bool spike) const {
   HVector* vs[1] = {&v};
-  ftran_multi(vs, &density, 1);
+  ftran_multi(vs, &density, 1, spike);
 }
 
 void LuFactor::ftran(HVector& a, HVector& b, double da, double db) const {
@@ -1670,7 +1689,17 @@ bool LuFactor::ft_update(Index p, double alpha_p) {
     ft_col_value_.push_back(v);
   };
   if (spike_all_) {
-    for (Index i = 0; i < m_; ++i) take(i);
+    // Dense spike (from a dense ftran): mostly zeros on sparse bases; blocks of 8 entries that are
+    // all below the drop tolerance are skipped with one vectorizable test (same entries, same order).
+    const double* sp = spike_.data();
+    Index i = 0;
+    for (; i + 8 <= m_; i += 8) {
+      bool any = false;
+      for (int k = 0; k < 8; ++k) any |= !(std::abs(sp[i + k]) < 1e-14);
+      if (!any) continue;
+      for (int k = 0; k < 8; ++k) take(i + k);
+    }
+    for (; i < m_; ++i) take(i);
   } else {
     for (Index i : spike_idx_) take(i);
   }

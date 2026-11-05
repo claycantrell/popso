@@ -135,6 +135,8 @@ def run_task(solver, path, time_limit, threads, mem_mb):
         return {"status": "error", "objective": None, "bound": None, "time": wall,
                 "error": (stderr or stdout)[-2000:]}
     r = json.loads(lines[-1])
+    if r.get("time") is None:  # the worker's MemoryError report has no solver time
+        r["time"] = wall
     r["peak_rss_mb"] = round(peak, 1)
     return r
 

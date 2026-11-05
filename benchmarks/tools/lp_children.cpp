@@ -7,7 +7,8 @@
 //   MILP_PRESOLVE_ONLY=1 MILP_PRESOLVE_DUMP=/tmp/m.mps build/popso <model.mps>     # our presolved model
 //   /tmp/lp_children /tmp/m.mps 10 10 /tmp/m.cands      # VERB=3: per-100-iteration shifts / zero steps / flips
 //   .venv/bin/python benchmarks/tools/lp_children_highs.py /tmp/m.mps /tmp/m.cands
-// Usage: lp_children <model.mps> <k candidates> <dive depth> [candidates file out]
+// Usage: lp_children <model.mps> <k candidates> <dive depth> [candidates file out]; SEED=k sets the LP seed
+// (perturbation factors; the solver's root LP uses --seed); BASIS_OUT / BASIS_IN save / reuse the root basis.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -35,13 +36,30 @@ int main(int argc, char** argv) {
   FILE* cf = argc > 4 ? std::fopen(argv[4], "w") : nullptr;
   DualSimplex lp;
   lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
-  lp.set_seed(0);
+  lp.set_seed(std::getenv("SEED") ? std::atoi(std::getenv("SEED")) : 0);
   LpOptions opt;
   opt.verbosity = std::getenv("VERB") ? std::atoi(std::getenv("VERB")) : 0;
+  // BASIS_IN=file starts the root from a basis saved with BASIS_OUT=file (one status per variable), so that
+  // LP settings can be compared on the same root vertex and the same children.
+  if (const char* in = std::getenv("BASIS_IN")) {
+    Basis b;
+    if (FILE* f = std::fopen(in, "r")) {
+      int s;
+      while (std::fscanf(f, "%d", &s) == 1) b.status.push_back(static_cast<VarStatus>(s));
+      std::fclose(f);
+    }
+    lp.set_basis(b);
+  }
   double t = now();
   LpStatus st = lp.solve(opt);
   std::printf("root: %s obj %.10g its %lld time %.2f (m %d n %d)\n", to_string(st), lp.objective() + p.offset,
               lp.iterations(), now() - t, p.num_rows(), p.num_cols());
+  if (const char* out = std::getenv("BASIS_OUT")) {
+    if (FILE* f = std::fopen(out, "w")) {
+      for (VarStatus s : lp.get_basis().status) std::fprintf(f, "%d\n", static_cast<int>(s));
+      std::fclose(f);
+    }
+  }
   DualSimplex::State root;
   lp.save_state(root);
   std::vector<double> x = lp.col_values();

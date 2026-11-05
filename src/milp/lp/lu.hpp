@@ -40,7 +40,9 @@ class LuFactor {
   // both the right-hand side and the prediction are sparse, the solve works hyper-sparsely (a
   // symbolic depth-first search over the factors finds the entries to touch, so its cost follows the
   // nonzeros instead of m), otherwise it runs the dense loops.
-  void ftran(HVector& v, double density = -1.0) const;
+  // spike = false: the result is not kept as the Forrest-Tomlin spike (a solve between the entering
+  // column's ftran and the update).
+  void ftran(HVector& v, double density = -1.0, bool spike = true) const;
   void btran(HVector& v, double density = -1.0) const;
   // Several ftrans; the dense ones share one pass over the factors.
   void ftran(HVector& a, HVector& b, double da = -1.0, double db = -1.0) const;
@@ -89,7 +91,7 @@ class LuFactor {
   bool btran_rows(double* x, Index* list, Index& count) const;
   bool use_hyper(Index count, double density) const;
   Index hyper_limit() const { return hyper_mode == 2 ? m_ : m_ / 5; }
-  void ftran_multi(HVector* const* vs, const double* dens, int k) const;
+  void ftran_multi(HVector* const* vs, const double* dens, int k, bool keep_spike = true) const;
   void to_positions(HVector& v) const;    // row space -> position space (no-op if identity)
   void from_positions(HVector& v) const;  // position space -> row space
   // Symbolic reach for the hyper-sparse solves: see lu.cpp.

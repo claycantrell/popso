@@ -161,8 +161,15 @@ class DualSimplex {
   Index count_dual_infeasibilities(bool flip_boxed);
   void perturb_costs(double mul);
   void boost_perturbation(double extra);
+  void perturb_rows(double b, bool add);  // nonbasic logicals by b (1 + rand) (MILP_LP_PERTURB_ROWS)
   long long boost_at_ = -1;  // cold solves: iteration at which the perturbation grows (-1: never)
   double boost_mul_ = 0.0;
+  // MILP_LP_COLD_STALL / MILP_LP_WARM_STALL: iterations without objective progress that bring the boost
+  // forward (-1: off), and where the current flat stretch started.
+  long long stall_window_ = -1, stall_ref_it_ = 0;
+  double stall_ref_obj_ = 0.0;
+  uint64_t pert_seed_ = 0;
+  std::vector<double> pert_col_;  // MILP_LP_PERTURB_COLSCALE: per-column magnitude factor (empty: 1)
   void compute_pert_scale();  // from the costs and bounds at load (row and bound changes keep it)
   void column(Index j, HVector& v) const;  // a_j scattered into v (row space)
   void unit_btran(Index r);                // rho_ = row r of B^{-1}

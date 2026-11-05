@@ -33,12 +33,13 @@ struct CutLoopStats {
 // `dropped` (optional): receives the cuts removed from the LP for slack (globally valid; seed of
 // the node cut pool).
 // `cutoff_fn` (optional): the current cutoff for reduced-cost fixing in the LP between rounds.
+// `max_rounds` >= 0: at most this many rounds (no cheap extra rounds; restarted roots).
 CutLoopStats root_cut_loop(const MipProblem& p, DualSimplex& lp, const SolverParams& params, const Logger& log,
                            const Timer& timer, double cutoff, CutData* data = nullptr, bool sub_mip = false,
                            std::vector<Cut>* dropped = nullptr,
                            const std::function<void(const DualSimplex&)>& on_lp = {},
                            const std::atomic<bool>* stop = nullptr,
-                           const std::function<double()>& cutoff_fn = {});
+                           const std::function<double()>& cutoff_fn = {}, int max_rounds = -1);
 
 struct CutLoopOptions {
   int max_rounds = 30;
@@ -48,6 +49,11 @@ struct CutLoopOptions {
   // > 0: the flat extra rounds also stop once the loop (after the initial solve) took this multiple of the
   // initial solve's time (at least 1 s). Wall clock, so the root cut loop sets it in opportunistic mode only.
   double flat_time_factor = 0.0;
+  // > 0: the same cap in work units instead of time, in both modes (flat_time_factor is then ignored): the
+  // loop's work after the initial solve (LP iterations x (rows + columns) plus an estimate of the
+  // separation, see cut_loop.cpp) up to max(flat_work_min, flat_work_factor x the initial solve's work).
+  double flat_work_factor = 0.0;
+  double flat_work_min = 2e8;
   // Cheap rounds: while the loop's LP iterations stay below max(cheap_work x the initial solve's, 20000),
   // up to max_rounds_cheap rounds as long as the bound moved >= cheap_rel (relative) over the last 20.
   // (and at least cheap_min_rounds: the bound often stays flat for a few rounds first).
@@ -64,6 +70,7 @@ struct CutLoopOptions {
   double total_time_limit = kInf;  // up to this absolute time
   int max_cuts_per_round = -1;   // -1: chosen from the problem size
   bool keep_rows = false;        // never remove the rows the LP had on entry (only the loop's own cuts)
+  int cut_age = 0;               // a slack cut row stays for this many further slack re-solves (cut_loop.cpp)
   long long probe_work = -1;     // probing work limit (matrix entries; -1: from the problem size)
   bool gomory = true, cover = true, mir = true, clique = true, implied_bound = true, zerohalf = true;
   bool mcf = true;  // network cut-sets (MILP_MCF=0: off)

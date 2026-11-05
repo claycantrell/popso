@@ -1278,8 +1278,9 @@ void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     return;
   }
   const long long nnz = static_cast<long long>(p.A.index.size());
-  const long long budget = static_cast<long long>(kWorkPerNnz * static_cast<double>(std::max<long long>(nnz, 20000)));
-  int_budget_ = static_cast<long long>(int_work_per_nnz_ * static_cast<double>(std::max<long long>(nnz, 20000)));
+  const double scale = ctx.work_scale * static_cast<double>(std::max<long long>(nnz, 20000));
+  const long long budget = static_cast<long long>(kWorkPerNnz * scale);
+  int_budget_ = static_cast<long long>(int_work_per_nnz_ * scale);
   {
     // Pure integer models only (neos-4738912-atrato, mixed: 2.3x the root cuts for the same bound, tree 70 s ->
     // TL); on mixed models paths through continuous columns already link the rows.

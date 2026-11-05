@@ -42,6 +42,8 @@ def run_side(solver, extra, seed, args, label, env_extra=""):
             cmd += ["--" + opt.replace("_", "-"), v]
     if args.miplib:
         cmd.append("--miplib")
+    if args.keep_logs:
+        cmd.append("--keep-sols")
     for st in args.set:
         cmd += ["--set", st]
     cmd += args.instances
@@ -86,6 +88,7 @@ def main():
     ap.add_argument("--miplib", action="store_true")
     ap.add_argument("--set", action="append", default=[], help="instance list (see run.py --set)")
     ap.add_argument("--out", help="write the comparison as JSON here")
+    ap.add_argument("--keep-logs", action="store_true", help="keep the solver logs (run.py --keep-sols)")
     ap.add_argument("instances", nargs="*")
     args = ap.parse_args()
     seeds = [int(s) for s in args.seeds.split(",")]

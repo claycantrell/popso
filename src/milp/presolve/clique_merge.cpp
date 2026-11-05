@@ -11,6 +11,7 @@ namespace milp {
 namespace {
 
 bool binary(const MipProblem& p, Index j) { return p.is_int[j] && p.col_lb[j] == 0.0 && p.col_ub[j] == 1.0; }
+bool fixed_zero(const MipProblem& p, Index j) { return p.col_lb[j] == 0.0 && p.col_ub[j] == 0.0; }
 
 uint64_t edge_key(Index a, Index b) {
   if (a > b) std::swap(a, b);
@@ -110,7 +111,8 @@ Index merge_cliques(MipProblem& p, Index max_new_rows) {
 
 namespace milp {
 
-CliqueExtension find_clique_extensions(const MipProblem& p, long long work_limit) {
+CliqueExtension find_clique_extensions(const MipProblem& p, long long work_limit,
+                                       const std::vector<std::pair<Index, Index>>* edges) {
   CliqueExtension res;
   CliqueExtendStats& st = res.stats;
   const Index n = p.num_cols(), m = p.num_rows();
@@ -124,9 +126,16 @@ CliqueExtension find_clique_extensions(const MipProblem& p, long long work_limit
     const Index rb = R.begin(i), re = R.end(i);
     if (re - rb < 2) continue;
     work += re - rb;
+    // Columns fixed at 0 do not count (probing fixes them before the rows are cleaned up: a packing row
+    // left with a single free member is still extended into a clique).
     bool unit = p.row_ub[i] == 1.0;
-    for (Index k = rb; k < re && unit; ++k) unit = R.value[k] == 1.0 && binary(p, R.index[k]);
-    if (unit) kind[i] = p.row_lb[i] >= 1.0 ? 2 : (p.row_lb[i] <= 0.0 ? 1 : 0);
+    Index free = 0;
+    for (Index k = rb; k < re && unit; ++k) {
+      if (fixed_zero(p, R.index[k])) continue;
+      unit = R.value[k] == 1.0 && binary(p, R.index[k]);
+      ++free;
+    }
+    if (unit && free > 0) kind[i] = p.row_lb[i] >= 1.0 ? 2 : (p.row_lb[i] <= 0.0 ? 1 : 0);
     for (int side = 0; side < 2; ++side) {
       const double s = side == 0 ? 1.0 : -1.0;
       const double b = side == 0 ? p.row_ub[i] : -p.row_lb[i];
@@ -156,6 +165,15 @@ CliqueExtension find_clique_extensions(const MipProblem& p, long long work_limit
       cstart.push_back(static_cast<Index>(cidx.size()));
       work += static_cast<long long>(pos.size()) * 4;
     }
+  }
+  if (edges) {
+    for (const auto& [u, v] : *edges) {
+      if (u == v || !binary(p, u) || !binary(p, v)) continue;
+      cidx.push_back(std::min(u, v));
+      cidx.push_back(std::max(u, v));
+      cstart.push_back(static_cast<Index>(cidx.size()));
+    }
+    work += static_cast<long long>(edges->size());
   }
   const Index nq = static_cast<Index>(cstart.size()) - 1;
   st.cliques = nq;
@@ -194,7 +212,9 @@ CliqueExtension find_clique_extensions(const MipProblem& p, long long work_limit
   for (Index i = 0; i < m && work < work_limit; ++i) {
     if (!kind[i]) continue;
     members.clear();
-    for (Index k = R.begin(i); k < R.end(i); ++k) members.push_back(R.index[k]);
+    for (Index k = R.begin(i); k < R.end(i); ++k) {
+      if (!fixed_zero(p, R.index[k])) members.push_back(R.index[k]);
+    }
     long long cost = 0;
     Index k0 = members[0];
     long long best = -1;

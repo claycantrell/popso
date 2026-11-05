@@ -25,6 +25,9 @@ constexpr double kRedundantTol = 1e-9;
 constexpr Index kMaxSubstRow = 1000;      // longest equation used for non-singleton substitution
 constexpr Index kMaxSubstCol = 8;         // most rows of a substituted non-singleton column
 constexpr long long kMaxSubstFill = 32;   // (row length - 1) * (column length - 1) limit
+constexpr Index kMaxSparsifyRow = 50;     // longest equation added to other rows by sparsify
+constexpr double kMaxSparsifyScale = 1e3;  // largest |lambda| in r += lambda e
+constexpr double kMaxSparsifyRange = 1e6;  // a row's coefficient range may not grow beyond this
 
 struct Entry {
   Index idx;
@@ -54,6 +57,7 @@ class PresolveWork {
     }
     row_alive_.assign(m_, 1);
     col_alive_.assign(n_, 1);
+    merged_.assign(n_, 0);
     row_size_.resize(m_);
     col_size_.resize(n_);
     for (Index i = 0; i < m_; ++i) row_size_[i] = static_cast<Index>(rows_[i].size());
@@ -79,18 +83,27 @@ class PresolveWork {
     for (Index i = 0; i < m_; ++i) {
       if (rlb_[i] > rub_[i]) return PresolveStatus::Infeasible;
     }
-    bool probed = !opt_.probing;
+    const int max_passes = opt_.probing ? std::max(1, opt_.probing_passes) : 0;
+    bool probe_pending = max_passes > 0;  // another probing pass is due
+    keep_binaries_ = probe_pending && opt_.probing_keep_binaries;
     int clique_runs = 0;
     long long since_clique = 0;
-    for (int round = 0; round < opt_.max_rounds + 10 && status_ == PresolveStatus::Reduced; ++round) {
-      if (round >= opt_.max_rounds && probed) break;
-      if (interrupted()) break;  // the reductions so far are valid
+    // Sparsify whenever the other reductions are exhausted and something changed since its last run, at most
+    // kSparsifyRuns times; up to 10 more rounds after a run that changed something (also beyond max_rounds).
+    constexpr int kSparsifyRuns = 3;
+    long long since_sparsify = 0;
+    int sparsify_until = 0;
+    for (int round = 0;
+         round < opt_.max_rounds + 10 * std::max(1, max_passes) + 10 * kSparsifyRuns && status_ == PresolveStatus::Reduced;
+         ++round) {
+      if (round >= opt_.max_rounds && !probe_pending && round >= sparsify_until) break;
+      if (halted()) break;  // the reductions so far are valid
       ++stats_.rounds;
       compact();
       long long ch = 0;
       // Each step is timed (verbosity 3 prints the totals).
       auto step = [&](int k, bool on, auto&& f) {
-        if (!on || status_ != PresolveStatus::Reduced) return;
+        if (!on || status_ != PresolveStatus::Reduced || halted()) return;
         Timer t;
         ch += f();
         step_time_[k] += t.elapsed();
@@ -107,36 +120,67 @@ class PresolveWork {
       step(8, opt_.aggregation, [&] { return aggregate(); });
       step(9, opt_.substitution, [&] { return substitute_equations(); });
       log_.log(3, "Presolve round %d: %lld changes\n", round + 1, ch);
+      if (halted()) break;
       since_clique += ch;
+      since_sparsify += ch;
       const bool last = round + 1 >= opt_.max_rounds;
+      if ((ch == 0 || last) && opt_.sparsify && stats_.sparsify_runs < kSparsifyRuns &&
+          (stats_.sparsify_runs == 0 || since_sparsify > 0) && status_ == PresolveStatus::Reduced) {
+        // Before the clique extension and probing: probing on the sparser rows finds more (app1-1: 1.2% -> 9.4% of
+        // the root gap closed, 5.5% when sparsify runs after probing). The rounds after it remove the singleton and
+        // doubleton rows it creates.
+        since_sparsify = 0;
+        compact();
+        Timer ts;
+        ch = sparsify();
+        step_time_[12] += ts.elapsed();
+        if (ch > 0) {
+          sparsify_until = round + 11;
+          continue;
+        }
+      }
       if ((ch == 0 || last) && opt_.clique_extension && status_ == PresolveStatus::Reduced && clique_runs < 4 &&
-          (clique_runs == 0 || since_clique > 0)) {
+          (clique_runs == 0 || since_clique > 0) && (stats_.probing_passes <= 1 || opt_.probing_cliques)) {
         // Clique extension whenever the other reductions are exhausted (and something changed since its last run):
-        // its fixings and dominated rows feed further rounds.
+        // its fixings and dominated rows feed further rounds. Before probing and after its first pass, not after the
+        // later ones (the few changes they cause would rerun it each time: cod105 after the root restart 4 runs,
+        // 1.2 s, for 0.5 s of probing).
         ++clique_runs;
         since_clique = 0;
         compact();
         Timer tc;
         ch = clique_extension();
         step_time_[11] += tc.elapsed();
+        since_sparsify += ch;
         if (ch > 0 && !last) continue;
       }
-      if ((ch == 0 || last) && !probed && status_ == PresolveStatus::Reduced) {
-        // Probing once the cheap reductions are (nearly) exhausted, then a few more rounds.
-        probed = true;
+      if ((ch == 0 || last) && probe_pending && status_ == PresolveStatus::Reduced) {
+        // Probing once the cheap reductions are (nearly) exhausted, then a few more rounds; again while a pass
+        // fixes, substitutes or lifts something, with half the previous work limit and at most the work the
+        // previous pass used (puriri: pass 2 would use 2.5x the work of pass 1).
+        const int pass = ++stats_.probing_passes;
+        keep_binaries_ = false;
         compact();
         Timer tp;
-        ch = probing();
+        long long useful = 0;
+        ch = probing(opt_.probing_effort * std::ldexp(1.0, 1 - pass), &useful);
+        // Substitutions of binaries deferred until now: at least one more round.
+        if (deferred_ > 0 && status_ == PresolveStatus::Reduced) ch += 1, deferred_ = 0;
         step_time_[10] += tp.elapsed();
-        log_.log(3, "Presolve probing: %lld changes\n", ch);
+        probe_pending = pass < max_passes && useful > 0;
+        // With new conflicts in its graph (opt-in) the clique extension runs again.
+        if (opt_.probing_cliques) since_clique += new_conflicts_;
+        log_.log(3, "Presolve probing pass %d: %lld changes (%lld fixings / equivalences / liftings), work %lld / %lld, %.3fs\n",
+                 pass, ch, useful, last_probe_work_, last_probe_limit_, tp.elapsed());
+        since_sparsify += ch;
       }
       if (ch == 0) break;
     }
     if (log_.verbosity() >= 3) {
       static const char* names[] = {"columns", "rows", "propagate", "coef", "dual", "dominated", "parallel_rows",
-                                    "parallel_cols", "aggregate", "substitute", "probing", "cliqueext"};
+                                    "parallel_cols", "aggregate", "substitute", "probing", "cliqueext", "sparsify"};
       std::string line = "Presolve step times:";
-      for (int k = 0; k < 12; ++k) line += " " + std::string(names[k]) + " " + std::to_string(step_time_[k]).substr(0, 5);
+      for (int k = 0; k < 13; ++k) line += " " + std::string(names[k]) + " " + std::to_string(step_time_[k]).substr(0, 5);
       log_.log(3, "%s\n", line.c_str());
     }
     if (status_ == PresolveStatus::Reduced) column_pass();
@@ -148,6 +192,12 @@ class PresolveWork {
   }
 
  private:
+  // Sub-MIP presolves stop early (PresolveOptions::stop / time_limit), all of them on an interrupt.
+  bool halted() const {
+    return interrupted() || (opt_.stop && opt_.stop->load(std::memory_order_relaxed)) ||
+           (opt_.time_limit < kInf && run_timer_.elapsed() > opt_.time_limit);
+  }
+
   // ---- structural helpers -------------------------------------------------
 
   void compact() {
@@ -506,13 +556,15 @@ class PresolveWork {
       if (g <= 1) continue;
       const double gd = static_cast<double>(g);
       bool changed = false;
+      // Also a multiple within feas_tol beyond a side replaces it: a side just short of one by round-off of earlier
+      // steps (14.9999999999972 for 15) would otherwise stay while the other is rounded past it (lb 15 > ub).
       if (has_ub && std::abs(rub_[i]) < 1e12) {
         const double v = gd * std::floor((rub_[i] + opt_.feas_tol) / gd);
-        if (v < rub_[i] - 1e-9) rub_[i] = v, changed = true;
+        if (v != rub_[i]) rub_[i] = v, changed = true;
       }
       if (has_lb && std::abs(rlb_[i]) < 1e12) {
         const double v = gd * std::ceil((rlb_[i] - opt_.feas_tol) / gd);
-        if (v > rlb_[i] + 1e-9) rlb_[i] = v, changed = true;
+        if (v != rlb_[i]) rlb_[i] = v, changed = true;
       }
       if (rlb_[i] > rub_[i]) {
         status_ = PresolveStatus::Infeasible;
@@ -952,9 +1004,14 @@ class PresolveWork {
         const Index k = t.idx;
         const double cur = get_coef(r, k);
         double nv = cur - f * t.val;
-        // Near-cancellation leaves numerical noise: drop it, relaxing the row by its largest effect.
+        // Near-cancellation leaves numerical noise: drop it, relaxing the row by its largest effect. The round-off of
+        // an exact cancellation (a few ulps) goes without relaxing, also for unbounded columns: kept, it could become
+        // a pivot (0.1 - 0.1 = 1.4e-17 for a free integer column, whose "integral" ratios then substituted it).
         const double kmax = std::max(std::abs(lb_[k]), std::abs(ub_[k]));
-        if (std::abs(nv) <= 1e-9 * std::max(std::abs(cur), std::abs(f * t.val)) && kmax < kBig) {
+        const double big = std::max(std::abs(cur), std::abs(f * t.val));
+        if (std::abs(nv) <= 1e-14 * big) {
+          nv = 0.0;
+        } else if (std::abs(nv) <= 1e-9 * big && kmax < kBig) {
           if (std::isfinite(rlb_[r])) rlb_[r] -= std::abs(nv) * kmax;
           if (std::isfinite(rub_[r])) rub_[r] += std::abs(nv) * kmax;
           nv = 0.0;
@@ -1048,6 +1105,7 @@ class PresolveWork {
           if (log_.verbosity() >= 4) log_.log(4, "  parallel cols: col %d += %g col %d\n", k, s, j);
           lb_[k] = yl;
           ub_[k] = yu;
+          merged_[k] = 1;
           col_alive_[j] = 0;
           for (const Entry& e : cols_[j]) {
             if (row_alive_[e.idx]) --row_size_[e.idx];
@@ -1156,6 +1214,10 @@ class PresolveWork {
           const double a = r[t].val;
           const bool single = col_size_[j] == 1;
           if (single != (pass == 0)) continue;
+          if (keep_binaries_ && is_int_[j] && lb_[j] == 0.0 && ub_[j] == 1.0) {
+            ++deferred_;
+            continue;
+          }
           // Continuous pivots need a coefficient within 1e-2 of the largest (stability of the rows they are
           // substituted into), except implied free singletons (checked below): their substitution only moves
           // their cost to the others and drops the row (blp-ic98's objective row: z with 1 vs 1973).
@@ -1212,14 +1274,254 @@ class PresolveWork {
     return ch;
   }
 
-  // Probing on the binaries of the current problem; applies fixings, bounds and equivalences.
-  long long probing() {
+  // Sparsification (Achterberg et al. 2020, two-row nonzero cancellation; HiGHS HPresolve::sparsify): an equation e
+  // of at most kMaxSparsifyRow entries is added to a row r that shares columns with it, r += lambda e, when lambda
+  // cancels more entries of r than the columns of e missing in r add. The candidates are the rows of e's shortest
+  // column (of at least two rows), as in HiGHS: the rows of e's ceil(len / 2) shortest columns (every row that can
+  // gain) found more combinations, but they coupled rows probing relies on (neos-3216931-puriri: 12.3% -> 1.0% of
+  // the root gap closed by the presolved LP; mzzv11 35.8% -> 33.1%). lambda is the ratio -a_rk / a_ek shared by the
+  // most entries (ties: the smallest |lambda|), at most kMaxSparsifyScale in magnitude; r's coefficient range may not
+  // grow beyond kMaxSparsifyRange, and a row of integer columns with integral coefficients stays one (GCD
+  // tightening, knapsack cuts). Clique structure is kept: all-binary set partitioning equations are not used, and set
+  // packing / covering / partitioning rows (binaries, equal |a|) are not changed (puriri: x1 + .. + x5 - y + z = 1
+  // would turn x1 + .. + x5 <= 1 into y - z <= 0, and probing then closes 1.7% of the root gap instead of 12.3%).
+  // Shortest equations first. Rows only: the feasible set is the same, no postsolve (duals come from the original
+  // problem, solver/duals.cpp). Cancelled entries are those within 1e-13 relative of zero (round-off) and are dropped.
+  // Only the row storage changes during the pass: the candidates come from the column storage as it was at the start
+  // (an entry may stand for a row that has lost the column; rows that gained it are missed), rebuilt at the end.
+  long long sparsify() {
+    Timer timer;
+    std::vector<Index> src;
+    long long nnz = 0;
+    for (Index i = 0; i < m_; ++i) {
+      if (!row_alive_[i]) continue;
+      nnz += row_size_[i];
+      if (rlb_[i] == rub_[i] && row_size_[i] >= 2 && row_size_[i] <= kMaxSparsifyRow) src.push_back(i);
+    }
+    std::stable_sort(src.begin(), src.end(), [&](Index a, Index b) { return row_size_[a] < row_size_[b]; });
+    const long long limit = 20 * nnz + 1000000;
+    long long work = 0, combos = 0, removed = 0, protected_eqs = 0;
+    // Continuous columns with a variable bound: in an inequality with integer columns whose continuous coefficients
+    // all have one sign and the integer ones the other (x <= u y; sum of flows <= 7 y1 + 31 y2 + 255 y3). Equations
+    // with such a column are not used (sparsify_protect): the cut separators aggregate through these columns
+    // (c-MIR paths over flow balances, flow covers), and combined rows hide them (sp150x300d: root bound 69 -> 65,
+    // aggregated covers 50 -> 34, MIR 76 -> 40; n5-3: the arc capacity rows lost their flows to z = sum of flows).
+    std::vector<char> vb;
+    if (opt_.sparsify_protect) {
+      vb.assign(n_, 0);
+      for (Index i = 0; i < m_; ++i) {
+        if (!row_alive_[i] || rlb_[i] == rub_[i] || row_size_[i] < 2) continue;
+        int cs = 0, is = 0;
+        bool ok = true;
+        for (const Entry& x : rows_[i]) {
+          int& sg = is_int_[x.idx] ? is : cs;
+          const int v = x.val > 0 ? 1 : -1;
+          if (sg == 0) sg = v;
+          ok = ok && sg == v;
+        }
+        if (!ok || cs == 0 || is == 0 || cs == is) continue;
+        for (const Entry& x : rows_[i]) {
+          if (!is_int_[x.idx]) vb[x.idx] = 1;
+        }
+      }
+    }
+    std::vector<Index> emark(n_, -1), epos(n_, 0), seen(m_, -1);
+    std::vector<Entry> er;
+    std::vector<double> rv, nv;
+    std::vector<char> shared;
+    std::vector<std::pair<double, Index>> ratios;
+    // r += lambda e if that pays (e: er, right-hand side b; emark / epos: its columns).
+    auto combine = [&](Index e, double b, Index r) {
+      const Index len = static_cast<Index>(er.size());
+      std::vector<Entry>& row = rows_[r];
+      work += static_cast<long long>(row.size()) + len;
+      // r's entries in the columns of e (rv), its integrality, clique form and coefficient range (all entries; the
+      // others).
+      rv.assign(len, 0.0);
+      shared.assign(len, 0);
+      Index nshared = 0;
+      bool r_int = true, r_clique = true;
+      double omin = kInf, omax = 0.0, kmin = kInf, kmax = 0.0;
+      for (const Entry& x : row) {
+        const double a = std::abs(x.val);
+        omin = std::min(omin, a);
+        omax = std::max(omax, a);
+        r_int = r_int && is_int_[x.idx] && x.val == std::round(x.val);
+        r_clique = r_clique && is_int_[x.idx] && lb_[x.idx] == 0.0 && ub_[x.idx] == 1.0 && a == std::abs(row[0].val);
+        if (emark[x.idx] == e) {
+          rv[epos[x.idx]] = x.val;
+          shared[epos[x.idx]] = 1;
+          ++nshared;
+        } else {
+          kmin = std::min(kmin, a);
+          kmax = std::max(kmax, a);
+        }
+      }
+      const Index misses = len - nshared;
+      if (nshared < 2 || nshared <= misses || r_clique) return;
+      ratios.clear();
+      for (Index t = 0; t < len; ++t) {
+        if (shared[t]) ratios.push_back({-rv[t] / er[t].val, t});
+      }
+      std::sort(ratios.begin(), ratios.end());
+      double lambda = 0.0;
+      Index best = 0;
+      for (size_t s = 0; s < ratios.size();) {
+        size_t u = s + 1;
+        while (u < ratios.size() && ratios[u].first - ratios[s].first <= 1e-13 * std::abs(ratios[s].first)) ++u;
+        double lam = ratios[s].first;
+        if (std::abs(lam - std::round(lam)) <= 1e-13 * std::abs(lam)) lam = std::round(lam);
+        const Index cnt = static_cast<Index>(u - s);
+        if (std::abs(lam) <= kMaxSparsifyScale && (!r_int || lam == std::round(lam)) &&
+            (cnt > best || (cnt == best && std::abs(lam) < std::abs(lambda)))) {
+          lambda = lam;
+          best = cnt;
+        }
+        s = u;
+      }
+      if (best <= misses) return;
+      // The combined row: cancellations, integrality, coefficient range.
+      nv.assign(len, 0.0);
+      Index cancel = 0;
+      bool ok = true;
+      double nmin = kmin, nmax = kmax;
+      for (Index t = 0; t < len && ok; ++t) {
+        const double ae = lambda * er[t].val;
+        double v = rv[t] + ae;
+        if (std::abs(v) <= 1e-13 * std::max(std::abs(rv[t]), std::abs(ae))) v = 0.0;
+        if (r_int && v != 0.0) {
+          ok = is_int_[er[t].idx] && integral(v) && std::abs(v) <= 1e9;
+          v = std::round(v);
+        }
+        if (v == 0.0) {
+          cancel += shared[t];
+        } else {
+          nmin = std::min(nmin, std::abs(v));
+          nmax = std::max(nmax, std::abs(v));
+        }
+        nv[t] = v;
+      }
+      if (!ok || cancel <= misses) return;
+      if (nmax > kMaxSparsifyRange * nmin && nmax * omin > omax * nmin) return;
+      double db = lambda * b;
+      if (r_int) {
+        if (!integral(db)) return;
+        db = std::round(db);
+      }
+      if (log_.verbosity() >= 4) {
+        log_.log(4, "  sparsify: row %d += %.12g row %d (%d cancelled, %d new)\n", r, lambda, e, cancel, misses);
+      }
+      Index added = 0;
+      for (Entry& x : row) {
+        if (emark[x.idx] == e) x.val = nv[epos[x.idx]];
+        if (x.val == 0.0) --col_size_[x.idx];
+      }
+      row.erase(std::remove_if(row.begin(), row.end(), [](const Entry& x) { return x.val == 0.0; }), row.end());
+      for (Index t = 0; t < len; ++t) {
+        if (shared[t] || nv[t] == 0.0) continue;
+        row.push_back({er[t].idx, nv[t]});
+        ++col_size_[er[t].idx];
+        ++added;
+      }
+      row_size_[r] = static_cast<Index>(row.size());
+      if (std::isfinite(rlb_[r])) rlb_[r] += db;
+      if (std::isfinite(rub_[r])) rub_[r] += db;
+      ++combos;
+      removed += cancel - added;
+    };
+    for (const Index e : src) {
+      if (work >= limit || interrupted()) break;
+      if (!row_alive_[e] || rlb_[e] != rub_[e]) continue;
+      const double b = rlb_[e];
+      if (!small_bound(b)) continue;
+      live_row(e, er);
+      const Index len = static_cast<Index>(er.size());
+      if (len < 2 || len > kMaxSparsifyRow) continue;
+      bool part = b == er[0].val;
+      for (const Entry& x : er) {
+        part = part && x.val == er[0].val && is_int_[x.idx] && lb_[x.idx] == 0.0 && ub_[x.idx] == 1.0;
+      }
+      if (part) continue;
+      if (!vb.empty() && std::any_of(er.begin(), er.end(), [&](const Entry& x) { return vb[x.idx] != 0; })) {
+        ++protected_eqs;
+        continue;
+      }
+      Index c = -1;
+      for (Index t = 0; t < len; ++t) {
+        const Index j = er[t].idx;
+        emark[j] = e;
+        epos[j] = t;
+        if (col_size_[j] >= 2 && (c < 0 || col_size_[j] < col_size_[c])) c = j;
+      }
+      work += len;
+      if (c < 0) continue;
+      for (const Entry& ce : cols_[c]) {
+        if (work >= limit) break;
+        const Index r = ce.idx;
+        if (r == e || !row_alive_[r] || seen[r] == e) continue;
+        seen[r] = e;
+        combine(e, b, r);
+      }
+    }
+    if (combos > 0) {
+      for (Index j = 0; j < n_; ++j) cols_[j].clear();
+      for (Index i = 0; i < m_; ++i) {
+        if (!row_alive_[i]) continue;
+        for (const Entry& x : rows_[i]) cols_[x.idx].push_back({i, x.val});
+      }
+      for (Index j = 0; j < n_; ++j) {
+        if (col_alive_[j]) col_size_[j] = static_cast<Index>(cols_[j].size());
+      }
+    }
+    ++stats_.sparsify_runs;
+    stats_.sparsify_rows += combos;
+    stats_.sparsify_removed += removed;
+    stats_.sparsify_protected += protected_eqs;
+    log_.log(3, "Presolve sparsify: %lld rows combined, %lld nonzeros removed, %zu equations (%lld skipped for "
+             "variable-bound columns), work %lld / %lld, %.3fs\n", combos, removed, src.size(), protected_eqs, work, limit,
+             timer.elapsed());
+    return combos;
+  }
+
+  // Probing on the binaries of the current problem; applies fixings, bounds, liftings and equivalences.
+  // *useful: fixings + equivalences + liftings.
+  long long probing(double effort, long long* useful) {
     MipProblem q;
     std::vector<Index> cols;
     assemble(q, cols);
-    const long long limit = static_cast<long long>(opt_.probing_effort * std::min(5e8, 5e7 + 2000.0 * q.A.nnz()));
-    const ProbingResult pr = probe_binaries(q, limit);
+    long long limit = static_cast<long long>(effort * std::min(5e8, 5e7 + 2000.0 * q.A.nnz()));
+    if (stats_.probing_passes > 1) limit = std::min(limit, last_probe_work_);
+    ProbingOptions po;
+    po.lift = opt_.probing_lift;
+    // Implications between binaries (conflicting literal pairs), kept over the passes: at most 8 per nonzero
+    // (3e6 pairs, ~50 MB with the prober's adjacency lists; mzzv42z: 1.2e6). The previous passes' ones seed the
+    // propagation (live, unmerged columns still binary).
+    std::vector<std::pair<Index, Index>> seeds;
+    if (opt_.probing_implications) {
+      po.max_conflicts = std::min<size_t>(3000000, 8 * static_cast<size_t>(q.A.nnz()) + 100000);
+      std::vector<Index> inv(n_, -1);
+      for (size_t t = 0; t < cols.size(); ++t) inv[cols[t]] = static_cast<Index>(t);
+      for (const auto& [a, b] : probe_lits_) {
+        const Index u = inv[a >> 1], v = inv[b >> 1];
+        if (u >= 0 && v >= 0 && !merged_[a >> 1] && !merged_[b >> 1]) seeds.push_back({2 * u + (a & 1), 2 * v + (b & 1)});
+      }
+      po.seeds = &seeds;
+    }
+    const ProbingResult pr = probe_binaries(q, limit, po);
     stats_.probes += pr.probes;
+    last_probe_work_ = pr.work;
+    last_probe_limit_ = limit;
+    new_conflicts_ = 0;
+    if (!pr.conflicts.empty()) {
+      for (const auto& [a, b] : pr.conflicts) {
+        const Index u = 2 * cols[a >> 1] + (a & 1), v = 2 * cols[b >> 1] + (b & 1);
+        probe_lits_.push_back({std::min(u, v), std::max(u, v)});
+        new_conflicts_ += (a & 1) && (b & 1);
+      }
+      std::sort(probe_lits_.begin(), probe_lits_.end());
+      probe_lits_.erase(std::unique(probe_lits_.begin(), probe_lits_.end()), probe_lits_.end());
+      stats_.probing_conflicts = static_cast<long long>(probe_lits_.size());
+    }
     if (pr.infeasible) {
       status_ = PresolveStatus::Infeasible;
       log_.log(3, "Presolve: probing proved infeasibility\n");
@@ -1231,9 +1533,14 @@ class PresolveWork {
       if (pr.lb[t] <= lb_[j] && pr.ub[t] >= ub_[j]) continue;
       const int c = tighten(j, pr.lb[t], pr.ub[t], 0.0);
       ch += c;
-      if (lb_[j] == ub_[j]) ++stats_.probing_fixed; else stats_.probing_bounds += c;
+      if (lb_[j] == ub_[j]) ++stats_.probing_fixed, ++*useful; else stats_.probing_bounds += c;
     }
     if (status_ != PresolveStatus::Reduced) return ch;
+    // Liftings before the equivalences (they refer to the rows as probed; a substitution afterwards rewrites the
+    // lifted rows like any other).
+    const long long lifted = apply_lifts(pr, q.A.nnz(), cols);
+    ch += lifted;
+    *useful += lifted;
     // y = v0 + (v1 - v0) x; x may have been replaced by an equivalent binary: rep_of[c] = (column, negated).
     std::unordered_map<Index, std::pair<Index, bool>> rep_of;
     auto find = [&](Index c) {
@@ -1259,6 +1566,76 @@ class PresolveWork {
       if (is_int_[y] && std::min(e.v0, e.v1) == 0.0 && std::max(e.v0, e.v1) == 1.0) rep_of[y] = {x, c1 < 0};
       ++stats_.probing_equivs;
       ++ch;
+      ++*useful;
+    }
+    if (new_conflicts_ > 0 && opt_.probing_cliques && opt_.clique_extension && status_ == PresolveStatus::Reduced) {
+      // Clique extension with the new conflicts before the fixed columns leave the rows: a packing row whose
+      // members probing fixed at 0 but one is extended into a clique of that one (instead of being dropped as a
+      // singleton row). Its time counts as probing time.
+      ch += clique_extension();
+    }
+    return ch;
+  }
+
+  // Applies the liftings of a probing pass (probing.hpp; at most one per row; rows of the probed problem are the
+  // live rows in order). New entries are capped at 10% of the nonzeros per pass, best (largest delta / max |a|)
+  // first. Rows only: no postsolve.
+  long long apply_lifts(const ProbingResult& pr, long long nnz, const std::vector<Index>& cols) {
+    if (pr.lifts.empty()) return 0;
+    std::vector<Index> rows;
+    for (Index i = 0; i < m_; ++i) {
+      if (row_alive_[i]) rows.push_back(i);
+    }
+    std::vector<size_t> order(pr.lifts.size());
+    for (size_t t = 0; t < order.size(); ++t) order[t] = t;
+    std::stable_sort(order.begin(), order.end(), [&](size_t u, size_t v) {
+      const ProbingResult::Lift &a = pr.lifts[u], &b = pr.lifts[v];
+      return a.fill != b.fill ? !a.fill : (a.fill && a.score > b.score);
+    });
+    long long fill_left = nnz / 10;
+    long long ch = 0;
+    for (size_t t : order) {
+      const ProbingResult::Lift& l = pr.lifts[t];
+      if (l.fill && fill_left <= 0) break;  // the new entries come last
+      const Index i = rows[l.row], j = cols[l.col];
+      if (!row_alive_[i] || !col_alive_[j]) continue;
+      // The row is still as probed (one-sided; tighten() changes no row).
+      if (!std::isfinite(l.upper ? rub_[i] : rlb_[i]) || std::isfinite(l.upper ? rlb_[i] : rub_[i])) continue;
+      const double s = l.upper ? 1.0 : -1.0;
+      double a = 0.0, amax = 0.0;
+      bool present = false;
+      for (const Entry& e : rows_[i]) {
+        if (e.idx == j) present = true;
+        if (!col_alive_[e.idx]) continue;
+        if (e.idx == j) a = e.val;
+        amax = std::max(amax, std::abs(e.val));
+      }
+      // In <= form: c x + ... <= b.
+      double c = s * a + (l.one ? l.delta : -l.delta);
+      double b = s * (l.upper ? rub_[i] : rlb_[i]) - (l.one ? 0.0 : l.delta);
+      if (std::abs(c) <= 1e-9 * amax) {
+        if (c < 0.0) b -= c;  // dropping c x (x <= 1) relaxes the row by at most |c|
+        c = 0.0;
+      }
+      if (log_.verbosity() >= 4) {
+        log_.log(4, "  probing: lift row %d col %d (x = %d): coef %.12g -> %.12g, side %.12g -> %.12g\n", i, j,
+                 l.one ? 1 : 0, a, s * c, l.upper ? rub_[i] : rlb_[i], s * b);
+      }
+      if (present || c == 0.0) {
+        set_coef(i, j, s * c);
+      } else {
+        // A new entry (known absent from the row scan): appended without set_coef's search of column j,
+        // which the lifts of one probed column fill quadratically (ns1760995: ~200k new entries per pass,
+        // 15 s per pass).
+        rows_[i].push_back({j, s * c});
+        cols_[j].push_back({i, s * c});
+        ++row_size_[i];
+        ++col_size_[j];
+      }
+      if (l.upper) rub_[i] = b; else rlb_[i] = -b;
+      if (l.fill && c != 0.0) --fill_left, ++stats_.probing_lift_fill;
+      ++stats_.probing_lifts;
+      ++ch;
     }
     return ch;
   }
@@ -1277,7 +1654,18 @@ class PresolveWork {
     }();
     const long long limit = static_cast<long long>(scale * (1.2e8 + 400.0 * q.A.nnz()));
     Timer timer;
-    const CliqueExtension ce = find_clique_extensions(q, limit);
+    // Probing conflicts x_u + x_v <= 1 between live, unmerged columns (a merged parallel column stands for a sum).
+    std::vector<std::pair<Index, Index>> edges;
+    if (!probe_lits_.empty() && opt_.probing_cliques) {
+      std::vector<Index> inv(n_, -1);
+      for (size_t t = 0; t < cols.size(); ++t) inv[cols[t]] = static_cast<Index>(t);
+      for (const auto& [a, b] : probe_lits_) {
+        if (!(a & 1) || !(b & 1)) continue;
+        const Index u = a >> 1, v = b >> 1;
+        if (inv[u] >= 0 && inv[v] >= 0 && !merged_[u] && !merged_[v]) edges.push_back({inv[u], inv[v]});
+      }
+    }
+    const CliqueExtension ce = find_clique_extensions(q, limit, &edges);
     const CliqueExtendStats& cs = ce.stats;
     stats_.clique_extended += cs.extended;
     stats_.clique_dominated += cs.dominated;
@@ -1343,6 +1731,7 @@ class PresolveWork {
 
   const PresolveOptions& opt_;
   const Logger& log_;
+  Timer run_timer_;  // from construction (run() follows at once): PresolveOptions::time_limit
   Presolver& out_;
   PresolveStats& stats_;
   PresolveStatus status_ = PresolveStatus::Reduced;
@@ -1354,7 +1743,18 @@ class PresolveWork {
   std::vector<char> is_int_;
   std::vector<Index> mark_;  // scratch (new_entries)
   double offset_ = 0.0, display_sense_ = 1.0;
-  double step_time_[12] = {};
+  double step_time_[13] = {};
+  // Implications between binaries found by probing, as conflicting literal pairs a < b (2 j + v: x_j = v; columns of
+  // this problem): seeds of later passes; the pairs of two literals x_j = 1 extend the cliques. Columns that
+  // absorbed a parallel column (merged_) no longer stand for themselves.
+  std::vector<std::pair<Index, Index>> probe_lits_;
+  long long new_conflicts_ = 0;  // x_u + x_v <= 1 pairs added by the last probing pass
+  long long last_probe_work_ = 0, last_probe_limit_ = 0;
+  // Binaries stay until the first probing pass (no substitution): probing may fix them, e.g. y = sum x_k with
+  // y = 0 infeasible gives sum x_k = 1, while y substituted out leaves only 0 <= sum x_k <= 1 (puriri).
+  bool keep_binaries_ = false;
+  long long deferred_ = 0;  // substitutions skipped for that
+  std::vector<char> merged_;
   std::vector<double> minact_, maxact_;  // row activity snapshot (dual_fixing)
   std::vector<int> nmin_inf_, nmax_inf_;
 };
@@ -1362,8 +1762,12 @@ class PresolveWork {
 PresolveOptions PresolveOptions::from_env() {
   PresolveOptions o;
   if (const char* e = std::getenv("MILP_PROBING_EFFORT")) o.probing_effort = std::atof(e);
+  if (const char* e = std::getenv("MILP_PROBING_PASSES")) o.probing_passes = std::atoi(e);
   if (const char* on = std::getenv("MILP_PRESOLVE_ON")) {
     if ((std::string(",") + on + ",").find(",subst_bounded,") != std::string::npos) o.substitution_bounded = true;
+    if ((std::string(",") + on + ",").find(",probing_cliques,") != std::string::npos) o.probing_cliques = true;
+    if ((std::string(",") + on + ",").find(",sparsify,") != std::string::npos) o.sparsify = true;
+    if ((std::string(",") + on + ",").find(",sparsify_protect,") != std::string::npos) o.sparsify_protect = true;
   }
   const char* env = std::getenv("MILP_PRESOLVE_OFF");
   if (!env) return o;
@@ -1382,6 +1786,12 @@ PresolveOptions PresolveOptions::from_env() {
   if (off("cliqueext")) o.clique_extension = false;
   if (off("substitution")) o.substitution = false;
   if (off("probing")) o.probing = false;
+  if (off("probing_lift")) o.probing_lift = false;
+  if (off("probing_passes")) o.probing_passes = 1;
+  if (off("probing_implications")) o.probing_implications = false;
+  if (off("probing_keep")) o.probing_keep_binaries = false;
+  if (off("sparsify")) o.sparsify = false;
+  if (off("sparsify_protect")) o.sparsify_protect = false;
   if (off("implint")) o.implied_int = false;
   if (off("implint_dual")) o.implied_int_dual = false;
   return o;
@@ -1444,13 +1854,20 @@ PresolveStatus Presolver::run(const MipProblem& in, const PresolveOptions& opt, 
           stats_.rounds, stats_.fixed_cols, stats_.removed_rows, stats_.bound_changes, stats_.coef_changes,
           stats_.parallel_rows, stats_.parallel_cols, stats_.dominated, stats_.dual_bounds, stats_.aggregations,
           stats_.substitutions);
+  if (opt.sparsify) {
+    log.log(2, "Presolve sparsify: %lld rows combined, %lld nonzeros removed, %d runs, %lld equations skipped for "
+            "variable-bound columns (summed over the runs)\n", stats_.sparsify_rows, stats_.sparsify_removed,
+            stats_.sparsify_runs, stats_.sparsify_protected);
+  }
   if (opt.clique_extension) {
     log.log(2, "Presolve cliques: %lld rows extended, %lld dominated rows, %lld fixed\n", stats_.clique_extended,
             stats_.clique_dominated, stats_.clique_fixed);
   }
   if (opt.probing) {
-    log.log(2, "Presolve probing: %lld probes, %lld fixed, %lld bounds, %lld equivalences\n", stats_.probes,
-            stats_.probing_fixed, stats_.probing_bounds, stats_.probing_equivs);
+    log.log(2, "Presolve probing: %lld probes, %lld fixed, %lld bounds, %lld equivalences, %lld lifted rows (%lld new "
+            "entries), %lld conflicts, %d passes\n", stats_.probes, stats_.probing_fixed, stats_.probing_bounds,
+            stats_.probing_equivs, stats_.probing_lifts, stats_.probing_lift_fill, stats_.probing_conflicts,
+            stats_.probing_passes);
   }
   return st;
 }

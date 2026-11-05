@@ -18,16 +18,17 @@ instances, and is faster overall, than the open-source solvers HiGHS and SCIP:
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| popso | 58/63 | 10.7 |
+| popso | 59/63 | 9.0 |
 | HiGHS 1.15 | 53/63 | 18.9 |
 | SCIP 10 | 50/63 | 21.3 |
 
 On the 43 harder instances of the same collection that no solver finishes in 2 minutes, with a
-10-minute limit, popso solves 15, HiGHS 12 and SCIP 6.
+10-minute limit, popso solves 18, HiGHS 12 and SCIP 6. On the full 240-instance MIPLIB 2017
+benchmark set (2 minutes, another machine) it solves 75, HiGHS 63 and SCIP 53.
 
-These are single-machine numbers with caveats. See **[BENCHMARKS.md](BENCHMARKS.md)** for the
-setup, per-instance results, the hard instances, the generated benchmark families and popso's
-progress across versions, and
+These numbers come from single runs and have caveats. See **[BENCHMARKS.md](BENCHMARKS.md)** for
+the setup, per-instance results, the hard instances, the full benchmark set, the generated benchmark
+families and popso's progress across versions, and
 **[CHANGELOG.md](CHANGELOG.md)** for what each version can do.
 
 ## Build

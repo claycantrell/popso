@@ -16,6 +16,8 @@
 #include <random>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "milp/cuts/cut.hpp"
 #include "milp/core/memory.hpp"
@@ -32,11 +34,13 @@
 #include "milp/lp/crossover.hpp"
 #include "milp/lp/simplex.hpp"
 #include "milp/presolve/implied_int.hpp"
+#include "milp/search/branch_score.hpp"
 #include "milp/search/conflict.hpp"
 #include "milp/search/orbitope.hpp"
 #include "milp/search/propagation.hpp"
 #include "milp/search/symmetry.hpp"
 #include "milp/search/genres.hpp"
+#include "milp/search/node_store.hpp"
 
 namespace milp {
 
@@ -48,557 +52,20 @@ double knob(const char* name, double def) {
   return v ? std::atof(v) : def;
 }
 
-struct BoundChange {
-  Index col;
-  double lb, ub;
-};
-
-// Bound changes from the root are a persistent list of segments shared between a node and its
-// descendants, so each node costs O(1) memory, not O(depth). A segment holds the changes one
-// branching added (the branching bound, the parent's reduced-cost fixings, orbital fixings),
-// compactly: per change a 32-bit word (column, flags) and the bounds it sets, each as int32 when
-// integral and small, else as double. A side that equals the column's original bound is left out
-// (applying it changed nothing: bounds are intersected with the global bounds, which lie within).
-// Memory accounting: every segment adds its allocation size to *acct while it lives.
-class PathSeg {
- public:
-  // New segment with one reference (the caller's); it holds a reference on parent.
-  static PathSeg* make(const PathSeg* parent, const std::vector<uint8_t>& data, std::atomic<long long>* acct) {
-    const size_t bytes = sizeof(PathSeg) + data.size();
-    void* mem = ::operator new(bytes);
-    PathSeg* s = new (mem) PathSeg();
-    s->refs_.store(1, std::memory_order_relaxed);
-    s->nbytes_ = static_cast<uint32_t>(data.size());
-    s->parent_ = parent;
-    s->acct_ = acct;
-    if (parent) parent->retain();
-    if (!data.empty()) std::memcpy(s->data(), data.data(), data.size());
-    if (acct) acct->fetch_add(static_cast<long long>(alloc_size(bytes)), std::memory_order_relaxed);
-    return s;
-  }
-  void retain() const { refs_.fetch_add(1, std::memory_order_relaxed); }
-  // Drops a reference; frees the segment (and, iteratively, ancestors losing their last reference).
-  static void release(const PathSeg* s) {
-    while (s && s->refs_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-      const PathSeg* parent = s->parent_;
-      if (s->acct_) s->acct_->fetch_sub(static_cast<long long>(alloc_size(sizeof(PathSeg) + s->nbytes_)), std::memory_order_relaxed);
-      s->~PathSeg();
-      ::operator delete(const_cast<PathSeg*>(s));
-      s = parent;
-    }
-  }
-  const PathSeg* parent() const { return parent_; }
-  size_t bytes() const { return alloc_size(sizeof(PathSeg) + nbytes_); }
-  // Calls f(const BoundChange&) for the changes of this segment in the order they were added.
-  template <class F>
-  void for_each(F&& f) const {
-    const uint8_t* q = data();
-    const uint8_t* end = q + nbytes_;
-    while (q < end) {
-      uint32_t w;
-      std::memcpy(&w, q, 4);
-      q += 4;
-      BoundChange c{static_cast<Index>(w & kColMask), -kInf, kInf};
-      if (w & kHasLb) c.lb = read_value(q, (w & kLbInt) != 0);
-      if (w & kHasUb) c.ub = read_value(q, (w & kUbInt) != 0);
-      f(c);
-    }
-  }
-  // Appends the encoding of c to out (orig_lb / orig_ub: the column's original bounds).
-  static void encode(const BoundChange& c, double orig_lb, double orig_ub, std::vector<uint8_t>& out) {
-    uint32_t w = static_cast<uint32_t>(c.col);
-    const bool has_lb = c.lb != orig_lb && c.lb > -kInf, has_ub = c.ub != orig_ub && c.ub < kInf;
-    const bool lb_int = has_lb && fits_int(c.lb), ub_int = has_ub && fits_int(c.ub);
-    if (has_lb) w |= kHasLb | (lb_int ? kLbInt : 0u);
-    if (has_ub) w |= kHasUb | (ub_int ? kUbInt : 0u);
-    const size_t pos = out.size();
-    out.resize(pos + 4);
-    std::memcpy(out.data() + pos, &w, 4);
-    if (has_lb) write_value(c.lb, lb_int, out);
-    if (has_ub) write_value(c.ub, ub_int, out);
-  }
-
- private:
-  static constexpr uint32_t kColMask = (1u << 28) - 1, kHasLb = 1u << 28, kLbInt = 1u << 29, kHasUb = 1u << 30,
-                            kUbInt = 1u << 31;
-  static size_t alloc_size(size_t b) { return (b + 15) & ~size_t(15); }
-  static bool fits_int(double v) { return v == std::floor(v) && std::abs(v) < 2e9; }
-  static void write_value(double v, bool as_int, std::vector<uint8_t>& out) {
-    const size_t pos = out.size();
-    if (as_int) {
-      const int32_t i = static_cast<int32_t>(v);
-      out.resize(pos + 4);
-      std::memcpy(out.data() + pos, &i, 4);
-    } else {
-      out.resize(pos + 8);
-      std::memcpy(out.data() + pos, &v, 8);
-    }
-  }
-  static double read_value(const uint8_t*& q, bool as_int) {
-    if (as_int) {
-      int32_t i;
-      std::memcpy(&i, q, 4);
-      q += 4;
-      return static_cast<double>(i);
-    }
-    double v;
-    std::memcpy(&v, q, 8);
-    q += 8;
-    return v;
-  }
-  uint8_t* data() { return reinterpret_cast<uint8_t*>(this + 1); }
-  const uint8_t* data() const { return reinterpret_cast<const uint8_t*>(this + 1); }
-  mutable std::atomic<int32_t> refs_{0};
-  uint32_t nbytes_ = 0;
-  const PathSeg* parent_ = nullptr;
-  std::atomic<long long>* acct_ = nullptr;
-};
-static_assert(sizeof(PathSeg) % 8 == 0, "segment data must stay aligned");
-
-// Owning handle of a path segment (reference counted).
-class PathRef {
- public:
-  PathRef() = default;
-  explicit PathRef(PathSeg* adopt) : p_(adopt) {}
-  PathRef(const PathRef& o) : p_(o.p_) {
-    if (p_) p_->retain();
-  }
-  PathRef(PathRef&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
-  PathRef& operator=(const PathRef& o) {
-    if (o.p_) o.p_->retain();
-    PathSeg::release(p_);
-    p_ = o.p_;
-    return *this;
-  }
-  PathRef& operator=(PathRef&& o) noexcept {
-    if (this != &o) {
-      PathSeg::release(p_);
-      p_ = o.p_;
-      o.p_ = nullptr;
-    }
-    return *this;
-  }
-  ~PathRef() { PathSeg::release(p_); }
-  const PathSeg* get() const { return p_; }
-  explicit operator bool() const { return p_ != nullptr; }
-
- private:
-  const PathSeg* p_ = nullptr;
-};
-
-// Little-endian base-128 varints (basis encodings).
-inline void put_varint(uint64_t v, std::vector<uint8_t>& out) {
-  while (v >= 0x80) {
-    out.push_back(static_cast<uint8_t>(v | 0x80));
-    v >>= 7;
-  }
-  out.push_back(static_cast<uint8_t>(v));
-}
-inline uint64_t get_varint(const uint8_t*& q) {
-  uint64_t v = 0;
-  for (int sh = 0;; sh += 7) {
-    const uint8_t b = *q++;
-    v |= static_cast<uint64_t>(b & 0x7f) << sh;
-    if (!(b & 0x80)) return v;
-  }
+long long now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// Warm-start basis stored with queued nodes. The first `size` statuses (columns and base rows) are
-// kept either packed at 2 bits each or, when shorter, as the positions where they differ from a
-// reference basis (the first basis stored in the search; beyond its length the reference is Basic),
-// varint-encoded as (gap << 2 | status). With the dynamic cut pool, pool cut rows are identified by
-// pool id and only the nonbasic ones are kept (rows with a basic logical can be dropped or added
-// without losing dual feasibility), as ascending ids, varint (id gap << 2 | status). A cut deleted
-// from the pool meanwhile stays alive while a stored basis refers to it (Search::pool_hold), so the
-// node can still be warm started.
-struct PackedBasis {
-  using Ref = std::shared_ptr<const std::vector<VarStatus>>;
-  Index size = 0;
-  bool sparse = false;
-  int npool = 0;              // nonbasic pool rows
-  std::vector<uint8_t> bits;  // dense statuses or the sparse difference stream
-  std::vector<uint8_t> pool;  // nonbasic pool rows
-  Ref ref;                    // reference basis of the sparse form
-
-  PackedBasis(const Basis& b, Index size_in, Ref ref_in) : size(size_in >= 0 ? size_in : static_cast<Index>(b.status.size())) {
-    // Sparse form first (abandoned once it reaches the dense size).
-    const size_t dense = (static_cast<size_t>(size) + 3) / 4;
-    if (ref_in) {
-      const std::vector<VarStatus>& r = *ref_in;
-      Index last = -1;
-      for (Index j = 0; j < size && bits.size() < dense; ++j) {
-        const VarStatus rj = j < static_cast<Index>(r.size()) ? r[j] : VarStatus::Basic;
-        if (b.status[j] == rj) continue;
-        put_varint((static_cast<uint64_t>(j - last - 1) << 2) | static_cast<uint8_t>(b.status[j]), bits);
-        last = j;
-      }
-      if (bits.size() < dense) {
-        sparse = true;
-        ref = std::move(ref_in);
-        bits.shrink_to_fit();
-        return;
-      }
-      bits.clear();
-    }
-    bits.assign(dense, 0);
-    bits.shrink_to_fit();
-    for (Index j = 0; j < size; ++j) bits[j >> 2] |= static_cast<uint8_t>(static_cast<uint8_t>(b.status[j]) << ((j & 3) * 2));
-  }
-  // nb: (pool id, status), ids ascending.
-  void set_pool(const std::vector<std::pair<int, VarStatus>>& nb) {
-    int last = -1;
-    for (const auto& [id, st] : nb) {
-      put_varint((static_cast<uint64_t>(id - last - 1) << 2) | static_cast<uint8_t>(st), pool);
-      last = id;
-    }
-    npool = static_cast<int>(nb.size());
-    pool.shrink_to_fit();
-  }
-  template <class F>
-  void for_each_pool(F&& f) const {
-    const uint8_t* q = pool.data();
-    int id = -1;
-    for (int k = 0; k < npool; ++k) {
-      const uint64_t v = get_varint(q);
-      id += static_cast<int>(v >> 2) + 1;
-      f(id, static_cast<VarStatus>(v & 3));
-    }
-  }
-  void unpack(Basis& b) const {
-    b.status.resize(size);
-    if (!sparse) {
-      for (Index j = 0; j < size; ++j) b.status[j] = static_cast<VarStatus>((bits[j >> 2] >> ((j & 3) * 2)) & 3);
-      return;
-    }
-    const std::vector<VarStatus>& r = *ref;
-    const Index nr = std::min<Index>(size, static_cast<Index>(r.size()));
-    std::copy(r.begin(), r.begin() + nr, b.status.begin());
-    std::fill(b.status.begin() + nr, b.status.end(), VarStatus::Basic);
-    const uint8_t* q = bits.data();
-    const uint8_t* end = q + bits.size();
-    Index j = -1;
-    while (q < end) {
-      const uint64_t v = get_varint(q);
-      j += static_cast<Index>(v >> 2) + 1;
-      b.status[j] = static_cast<VarStatus>(v & 3);
-    }
-  }
-  // Heap bytes (object, shared_ptr control block with deleter, the two arrays).
-  long long bytes() const {
-    return static_cast<long long>(sizeof(PackedBasis) + 48 + ((bits.capacity() + 15) & ~size_t(15)) +
-                                  ((pool.capacity() + 15) & ~size_t(15)));
-  }
-};
-
-struct Node {
-  double bound = -kInf;  // lower bound on the LP objective (without offset)
-  double estimate = -kInf;  // estimated best solution value in the subtree (pseudocosts)
-  int depth = 0;
-  PathRef path;  // bound changes from the root (newest segment first)
-  std::shared_ptr<const PackedBasis> basis;  // warm start; dropped under memory pressure
-  long long mem = 0;                       // estimated bytes owned while queued
-  long long id = 0, parent = -1;
-  Index branch_var = -1;
-  int branch_dir = 0;        // -1 down, +1 up
-  double branch_dist = 0.0;  // how far the branching moved the variable
-  double parent_obj = -kInf;  // bound before MILP_SB_BOUNDS raised it (pseudocost updates)
-  // Symmetry: a group stabilizing this node's branching constraints; null if trivial.
-  std::shared_ptr<const PermGroup> sym;
-};
-
-// Open nodes, selectable by best bound, by best estimate or (drain mode, under memory pressure)
-// deepest first. Nodes live in slots; the heaps hold keys into them and skip stale keys lazily.
-class NodePool {
- public:
-  explicit NodePool(int workers) : wbound_(workers, kInf) {}
-  // Deterministic mode: one bound slot per virtual worker (nodes they keep between rounds).
-  void resize_workers(int workers) {
-    std::lock_guard<std::mutex> lk(mu_);
-    wbound_.assign(std::max<size_t>(wbound_.size(), static_cast<size_t>(workers)), kInf);
-  }
-
-  void push(Node&& n) {
-    {
-      std::lock_guard<std::mutex> lk(mu_);
-      bytes_ += n.mem;
-      int s;
-      if (!free_.empty()) {
-        s = free_.back();
-        free_.pop_back();
-      } else {
-        s = static_cast<int>(slots_.size());
-        slots_.emplace_back();
-      }
-      // Drain mode keeps a depth heap instead of the estimate heap (rebuilt when it ends).
-      const Key kb{n.bound, n.id, n.depth, s};
-      if (drain_) push_key(dheap_, depth_key(n, s));
-      else push_key(eheap_, est_key(n, s));
-      slots_[s] = std::move(n);
-      ++count_;
-      push_key(bheap_, kb);
-      update_heap_bytes();
-    }
-    cv_.notify_one();
-  }
-
-  // Blocks until a node is available (returns true, worker marked active) or
-  // the search is over (returns false). by_estimate: take the best-estimate node.
-  bool pop(int w, const std::atomic<double>& cutoff, const std::atomic<bool>& stop, Node* out, bool by_estimate) {
-    std::unique_lock<std::mutex> lk(mu_);
-    for (;;) {
-      if (stop.load()) return false;
-      if (count_ > 0 && min_bound() >= cutoff.load()) clear();
-      if (count_ > 0) {
-        take(by_estimate, out);
-        ++active_;
-        wbound_[w] = out->bound;
-        return true;
-      }
-      if (active_ == 0) {
-        cv_.notify_all();
-        return false;
-      }
-      cv_.wait_for(lk, std::chrono::milliseconds(20));
-    }
-  }
-
-  // Deterministic mode: non-blocking pop without active-worker accounting.
-  bool try_pop(double cutoff, Node* out, bool by_estimate) {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (count_ > 0 && min_bound() >= cutoff) clear();
-    if (count_ == 0) return false;
-    take(by_estimate, out);
-    return true;
-  }
-
-  void set_worker_bound(int w, double b) {
-    std::lock_guard<std::mutex> lk(mu_);
-    wbound_[w] = b;
-  }
-
-  void done(int w) {
-    std::lock_guard<std::mutex> lk(mu_);
-    --active_;
-    wbound_[w] = kInf;
-    if (active_ == 0 && count_ == 0) cv_.notify_all();
-  }
-
-  double lower_bound() {
-    std::lock_guard<std::mutex> lk(mu_);
-    double lb = count_ == 0 ? kInf : min_bound();
-    for (double b : wbound_) lb = std::min(lb, b);
-    return lb;
-  }
-
-  size_t size() {
-    std::lock_guard<std::mutex> lk(mu_);
-    return count_;
-  }
-
-  // Drain mode: pops take the deepest node (ties: lowest bound), so the tree is worked off depth
-  // first and the number of open nodes stops growing.
-  void set_drain(bool on) {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (on == drain_) return;
-    drain_ = on;
-    std::vector<Key>().swap(on ? eheap_ : dheap_);
-    std::vector<Key>& h = on ? dheap_ : eheap_;
-    h.clear();
-    for (size_t s = 0; s < slots_.size(); ++s) {
-      if (slots_[s].depth >= 0) h.push_back(on ? depth_key(slots_[s], static_cast<int>(s)) : est_key(slots_[s], static_cast<int>(s)));
-    }
-    heapify(h);
-    update_heap_bytes();
-  }
-  bool drain() const { return drain_; }
-
-  // Drops warm-start bases of queued nodes, shallowest (in drain mode: processed last) and then
-  // worst-bound first, until done() says enough memory was freed. Returns the number dropped.
-  template <class Done>
-  long long strip_bases(Done&& done) {
-    std::lock_guard<std::mutex> lk(mu_);
-    std::vector<std::tuple<int, double, int>> order;  // (depth, -bound, slot)
-    for (size_t s = 0; s < slots_.size(); ++s) {
-      if (slots_[s].depth >= 0 && slots_[s].basis) order.emplace_back(slots_[s].depth, -slots_[s].bound, static_cast<int>(s));
-    }
-    std::sort(order.begin(), order.end());
-    long long dropped = 0;
-    for (const auto& [d, nb, s] : order) {
-      if (done()) break;
-      slots_[s].basis.reset();
-      ++dropped;
-    }
-    return dropped;
-  }
-
-  // Diagnostics (verbosity 2 memory report): what the queued nodes hold, in one pass over the
-  // slots (bases shared by queued siblings and the bound paths are accounted by the search).
-  struct Breakdown {
-    size_t nodes = 0;
-    long long with_basis = 0, sparse_bases = 0, pool_rows = 0;  // queued nodes with a basis, sparse ones, their pool rows
-    long long groups = 0, group_bytes = 0;  // symmetry groups (Node::mem)
-    double depth = 0.0;                     // mean depth
-  };
-  Breakdown breakdown() {
-    Breakdown b;
-    std::lock_guard<std::mutex> lk(mu_);
-    for (const Node& n : slots_) {
-      if (n.depth < 0) continue;
-      ++b.nodes;
-      b.depth += n.depth;
-      if (n.basis) {
-        ++b.with_basis;
-        b.sparse_bases += n.basis->sparse ? 1 : 0;
-        b.pool_rows += n.basis->npool;
-      }
-      if (n.sym) ++b.groups;
-    }
-    b.group_bytes = bytes_.load();
-    if (b.nodes > 0) b.depth /= static_cast<double>(b.nodes);
-    return b;
-  }
-
- private:
-  struct Key {
-    double key;
-    long long id;
-    int depth;
-    int slot;
-  };
-  // Min-heap on the key; among equal keys prefer deeper nodes.
-  struct KeyWorse {
-    bool operator()(const Key& a, const Key& b) const {
-      if (a.key != b.key) return a.key > b.key;
-      if (a.depth != b.depth) return a.depth < b.depth;
-      return a.id > b.id;
-    }
-  };
-  // Drain order: deepest first, then lowest bound.
-  struct DepthWorse {
-    bool operator()(const Key& a, const Key& b) const {
-      if (a.depth != b.depth) return a.depth < b.depth;
-      if (a.key != b.key) return a.key > b.key;
-      return a.id > b.id;
-    }
-  };
-  static Key depth_key(const Node& n, int s) { return Key{n.bound, n.id, n.depth, s}; }
-  // The "estimate" order is a hybrid: halfway between the node's bound and its pseudocost estimate
-  // (MILP_NODE_EST_W, 1 = pure estimate). Pure estimates sent eil33-2's alternate pops into subtrees
-  // whose bound was far from the global one (optimum found at 51-95 s instead of 34-67 s).
-  static Key est_key(const Node& n, int s) {
-    static const double est_w = knob("MILP_NODE_EST_W", 0.5);
-    const double ek = is_finite(n.estimate) ? n.bound + est_w * (n.estimate - n.bound) : n.bound;
-    return Key{ek, n.id, n.depth, s};
-  }
-  void heapify(std::vector<Key>& h) {
-    if (&h == &dheap_) std::make_heap(h.begin(), h.end(), DepthWorse{});
-    else std::make_heap(h.begin(), h.end(), KeyWorse{});
-  }
-  void pop_key(std::vector<Key>& h) {
-    if (&h == &dheap_) std::pop_heap(h.begin(), h.end(), DepthWorse{});
-    else std::pop_heap(h.begin(), h.end(), KeyWorse{});
-    h.pop_back();
-  }
-  void push_key(std::vector<Key>& h, const Key& k) {
-    h.push_back(k);
-    if (&h == &dheap_) std::push_heap(h.begin(), h.end(), DepthWorse{});
-    else std::push_heap(h.begin(), h.end(), KeyWorse{});
-  }
-  void update_heap_bytes() {
-    heap_bytes_ = static_cast<long long>(slots_.size() * sizeof(Node) +
-                                         (bheap_.capacity() + eheap_.capacity() + dheap_.capacity()) * sizeof(Key) +
-                                         free_.capacity() * sizeof(int));
-  }
-  bool live(const Key& k) const { return slots_[k.slot].id == k.id && slots_[k.slot].depth >= 0; }
-  void drop_stale(std::vector<Key>& h) {
-    while (!h.empty() && !live(h.front())) pop_key(h);
-  }
-  double min_bound() {
-    drop_stale(bheap_);
-    return bheap_.front().key;
-  }
-  void take(bool by_estimate, Node* out) {
-    std::vector<Key>& h = drain_ ? dheap_ : by_estimate ? eheap_ : bheap_;
-    drop_stale(h);
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"  // false positive through the inlined heap code
-#endif
-    const int s = h.front().slot;
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
-    pop_key(h);
-    *out = std::move(slots_[s]);
-    slots_[s] = Node{};
-    slots_[s].depth = -1;  // free
-    free_.push_back(s);
-    --count_;
-    bytes_ -= out->mem;
-    // Rebuild a heap that is mostly stale keys.
-    for (std::vector<Key>* o : {&bheap_, &eheap_, &dheap_}) {
-      if (o == (drain_ ? &eheap_ : &dheap_)) continue;
-      if (o->size() > count_ + count_ / 4 + 64) {
-        o->erase(std::remove_if(o->begin(), o->end(), [&](const Key& k) { return !live(k); }), o->end());
-        heapify(*o);
-      }
-    }
-    // Give memory back once the queue has shrunk to a small part of its arrays (slots in use
-    // stay where they are: keys refer to them).
-    if (slots_.size() > 4096 && count_ < slots_.size() / 8) compact();
-  }
-  // Moves the live nodes to the front of the slot array and rebuilds the heaps.
-  void compact() {
-    std::deque<Node> live_nodes;
-    for (Node& n : slots_) {
-      if (n.depth >= 0) live_nodes.push_back(std::move(n));
-    }
-    slots_.swap(live_nodes);
-    std::deque<Node>().swap(live_nodes);
-    std::vector<int>().swap(free_);
-    for (std::vector<Key>* o : {&bheap_, &eheap_, &dheap_}) {
-      std::vector<Key> fresh;
-      o->swap(fresh);
-    }
-    for (size_t s = 0; s < slots_.size(); ++s) {
-      const Node& n = slots_[s];
-      const int si = static_cast<int>(s);
-      bheap_.push_back(Key{n.bound, n.id, n.depth, si});
-      if (drain_) dheap_.push_back(depth_key(n, si));
-      else eheap_.push_back(est_key(n, si));
-    }
-    for (std::vector<Key>* o : {&bheap_, &eheap_, &dheap_}) heapify(*o);
-    update_heap_bytes();
-  }
-  void clear() {
-    std::deque<Node>().swap(slots_);
-    std::vector<int>().swap(free_);
-    std::vector<Key>().swap(bheap_);
-    std::vector<Key>().swap(eheap_);
-    std::vector<Key>().swap(dheap_);
-    count_ = 0;
-    bytes_ = 0;
-    update_heap_bytes();
-  }
-
-  std::mutex mu_;
-  std::condition_variable cv_;
-  std::deque<Node> slots_;  // a deque: growing never copies (or transiently doubles) the slots
-  std::vector<int> free_;
-  std::vector<Key> bheap_, eheap_, dheap_;
-  bool drain_ = false;
-  size_t count_ = 0;
-  std::vector<double> wbound_;
-  std::atomic<long long> bytes_{0}, heap_bytes_{0};
-
- public:
-  // Memory of the queue itself: slot and heap arrays plus what nodes declared in Node::mem
-  // (symmetry groups). Bases and bound paths are accounted where they are allocated.
-  long long bytes() const { return bytes_.load() + heap_bytes_.load(); }
-
- private:
-  int active_ = 0;
-};
+// Open-node storage (bound paths, stored bases, Node, NodePool): search/node_store.hpp.
+using bnb::BasisOwner;
+using bnb::BasisRef;
+using bnb::BoundChange;
+using bnb::Node;
+using bnb::NodePool;
+using bnb::PackedBasis;
+using bnb::PathRef;
+using bnb::PathSeg;
+using bnb::TreeWeight;
 
 class Pseudocosts {
  public:
@@ -628,8 +95,8 @@ class Pseudocosts {
   void unit_costs(Index j, double* pd, double* pu) {
     std::lock_guard<std::mutex> lk(mu_);
     const size_t k = 2 * static_cast<size_t>(j);
-    *pd = cnt_[k] ? sum_[k] / cnt_[k] : (tot_cnt_[0] ? tot_sum_[0] / tot_cnt_[0] : 1.0);
-    *pu = cnt_[k + 1] ? sum_[k + 1] / cnt_[k + 1] : (tot_cnt_[1] ? tot_sum_[1] / tot_cnt_[1] : 1.0);
+    *pd = unit(k, avg(0));
+    *pu = unit(k + 1, avg(1));
   }
   void inference(Index j, double* id, double* iu) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -668,6 +135,49 @@ class Pseudocosts {
     cut_tot_sum_ += cut ? 1.0 : 0.0;
     ++cut_tot_cnt_;
   }
+  // Ancestral pseudocosts (SCIP 10, MILP_APS = discount factor gamma, 0 off): the objective gain of a
+  // grandchild over its parent per unit of the grandparent's branching distance, credited to the
+  // grandparent's branching variable and direction (PS_1). Candidates score with PS_0 + gamma PS_1
+  // at nodes where every candidate is reliable in both.
+  void update_anc(Index j, int dir, double gain_per_unit) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (anc_sum_.empty()) anc_sum_.assign(cnt_.size(), 0.0), anc_cnt_.assign(cnt_.size(), 0);
+    const size_t k = 2 * static_cast<size_t>(j) + (dir > 0);
+    anc_sum_[k] += gain_per_unit;
+    ++anc_cnt_[k];
+  }
+  static double aps_gamma() {
+    static const double g = knob("MILP_APS", 0.0);
+    return g;
+  }
+  // Leaves by the direction of their last branching (Shah-Dey last-assignment asymmetry, MILP_SD bit
+  // 4): pruned as infeasible or integral (inf) or in any way.
+  void update_leaf(int dir, bool inf) {
+    std::lock_guard<std::mutex> lk(mu_);
+    leaf_[2 + (dir > 0)] += 1.0;
+    if (inf) leaf_[dir > 0] += 1.0;
+  }
+  // Score rule of a node with primal-dual gap `gap` (cutoff - LP objective; kInf without incumbent).
+  // MILP_SD bits: 1 gains capped at the gap, 2 q_min^0.3 q_max^0.7, 4 last-assignment asymmetry.
+  static int sd_mode() {
+    static const int mode = static_cast<int>(knob("MILP_SD", 0));
+    return mode;
+  }
+  BranchScoreRule score_rule(double gap) {
+    BranchScoreRule r;
+    const int mode = sd_mode();
+    if (mode == 0) return r;
+    r.cap = (mode & 1) != 0;
+    r.minmax = (mode & 2) != 0;
+    r.gap = gap;
+    if (mode & 4) {
+      static const double eta = knob("MILP_SD_ETA", 0.15), min_leaves = knob("MILP_SD_LEAVES", 10);
+      std::lock_guard<std::mutex> lk(mu_);
+      asymmetry_exponents(leaf_[0], leaf_[1], leaf_[2], leaf_[3], eta, min_leaves, &r.a_dn, &r.a_up);
+    }
+    return r;
+  }
+
   // Pseudocost product scores for all candidates (index, fractional part).
   // est_sum: sum over the candidates of the smaller child increase (for best-estimate search).
   // ps_scale: average product score when a hybrid score is used (score = ps_part(product, ps_scale) + bonus),
@@ -675,10 +185,10 @@ class Pseudocosts {
   // degen: SCIP's degeneracy factor (>= 1): with a hybrid score the pseudocost part is divided by it and
   // the other parts are multiplied by it.
   void scores(const std::vector<std::pair<Index, double>>& cands, int reliability, std::vector<Scored>& out,
-              double* est_sum, double* ps_scale, double degen = 1.0) {
+              double* est_sum, double* ps_scale, double degen = 1.0, const BranchScoreRule& rule = {},
+              bool* used_aps = nullptr) {
     std::lock_guard<std::mutex> lk(mu_);
-    const double avg_dn = tot_cnt_[0] ? tot_sum_[0] / tot_cnt_[0] : 1.0;
-    const double avg_up = tot_cnt_[1] ? tot_sum_[1] / tot_cnt_[1] : 1.0;
+    const double avg_dn = avg(0), avg_up = avg(1);
     const double avg_inf = inf_tot_cnt_ ? inf_tot_sum_ / inf_tot_cnt_ : 1.0;
     out.clear();
     double ps_total = 0.0, inf_total = 0.0, conf_total = 0.0, cut_total = 0.0;
@@ -688,11 +198,19 @@ class Pseudocosts {
     *est_sum = 0.0;
     *ps_scale = 0.0;  // 0: no hybrid score (raw products)
     inf_scratch_.clear();
+    const double gamma = aps_gamma();
+    bool aps = gamma > 0.0 && !anc_sum_.empty();
+    for (size_t c = 0; c < cands.size() && aps; ++c) {
+      const size_t k = 2 * static_cast<size_t>(cands[c].first);
+      aps = std::min({cnt_[k], cnt_[k + 1], anc_cnt_[k], anc_cnt_[k + 1]}) >= reliability;
+    }
+    if (used_aps) *used_aps = aps;
     for (auto [j, f] : cands) {
       const size_t k = 2 * static_cast<size_t>(j);
-      const double pd = cnt_[k] ? sum_[k] / cnt_[k] : avg_dn;
-      const double pu = cnt_[k + 1] ? sum_[k + 1] / cnt_[k + 1] : avg_up;
-      const double score = std::max(pd * f, 1e-6) * std::max(pu * (1.0 - f), 1e-6);
+      const double pd = unit(k, avg_dn), pu = unit(k + 1, avg_up);
+      const double score = aps ? branch_score((pd + gamma * anc_sum_[k] / anc_cnt_[k]) * f,
+                                              (pu + gamma * anc_sum_[k + 1] / anc_cnt_[k + 1]) * (1.0 - f), rule)
+                               : branch_score(pd * f, pu * (1.0 - f), rule);
       const double id = inf_cnt_[k] ? inf_sum_[k] / inf_cnt_[k] : avg_inf;
       const double iu = inf_cnt_[k + 1] ? inf_sum_[k + 1] / inf_cnt_[k + 1] : avg_inf;
       const double inf = std::max(id, 0.1) * std::max(iu, 0.1);
@@ -764,19 +282,57 @@ class Pseudocosts {
     cut_cnt_ = o.cut_cnt_;
     cut_tot_sum_ = o.cut_tot_sum_;
     cut_tot_cnt_ = o.cut_tot_cnt_;
+    std::copy(o.leaf_, o.leaf_ + 4, leaf_);
+    anc_sum_ = o.anc_sum_;
+    anc_cnt_ = o.anc_cnt_;
+    prior_ = o.prior_;
+    prior_avg_[0] = o.prior_avg_[0], prior_avg_[1] = o.prior_avg_[1];
+  }
+
+  // Restarts: the per-column history as a snapshot, and a snapshot (same number of columns) as the
+  // initial state of a new search's pseudocosts; the totals (averages for columns without history)
+  // are those of the loaded entries.
+  PseudocostSnapshot snapshot() {
+    std::lock_guard<std::mutex> lk(mu_);
+    PseudocostSnapshot s;
+    s.sum = sum_, s.cnt = cnt_, s.inf_sum = inf_sum_, s.inf_cnt = inf_cnt_;
+    return s;
+  }
+  // prior_only: the snapshot's averages serve as the estimates of columns (and the default for columns)
+  // without observations of this search, and count for nothing else (reliability, totals); else its
+  // entries are this search's history.
+  void load(const PseudocostSnapshot& s, bool prior_only) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const size_t n = cnt_.size();
+    if (s.cnt.size() != n || s.sum.size() != n || s.inf_cnt.size() != n || s.inf_sum.size() != n) return;
+    inf_sum_ = s.inf_sum, inf_cnt_ = s.inf_cnt;
+    inf_tot_sum_ = 0.0;
+    inf_tot_cnt_ = 0;
+    for (size_t k = 0; k < n; ++k) inf_tot_sum_ += inf_sum_[k], inf_tot_cnt_ += inf_cnt_[k];
+    double tsum[2] = {0.0, 0.0};
+    long long tcnt[2] = {0, 0};
+    for (size_t k = 0; k < n; ++k) tsum[k & 1] += s.sum[k], tcnt[k & 1] += s.cnt[k];
+    if (prior_only) {
+      prior_.assign(n, -1.0);
+      for (size_t k = 0; k < n; ++k) {
+        if (s.cnt[k] > 0) prior_[k] = s.sum[k] / s.cnt[k];
+      }
+      for (int d = 0; d < 2; ++d) prior_avg_[d] = tcnt[d] ? tsum[d] / static_cast<double>(tcnt[d]) : -1.0;
+      return;
+    }
+    sum_ = s.sum, cnt_ = s.cnt;
+    for (int d = 0; d < 2; ++d) tot_sum_[d] = tsum[d], tot_cnt_[d] = tcnt[d];
   }
 
   // Picks the candidate (index, fractional part) with the best product score.
   Index select(const std::vector<std::pair<Index, double>>& cands) {
     std::lock_guard<std::mutex> lk(mu_);
-    const double avg_dn = tot_cnt_[0] ? tot_sum_[0] / tot_cnt_[0] : 1.0;
-    const double avg_up = tot_cnt_[1] ? tot_sum_[1] / tot_cnt_[1] : 1.0;
+    const double avg_dn = avg(0), avg_up = avg(1);
     Index best = -1;
     double best_score = -1.0;
     for (auto [j, f] : cands) {
       const size_t k = 2 * static_cast<size_t>(j);
-      const double pd = cnt_[k] ? sum_[k] / cnt_[k] : avg_dn;
-      const double pu = cnt_[k + 1] ? sum_[k + 1] / cnt_[k + 1] : avg_up;
+      const double pd = unit(k, avg_dn), pu = unit(k + 1, avg_up);
       const double score = std::max(pd * f, 1e-6) * std::max(pu * (1.0 - f), 1e-6);
       if (score > best_score) best_score = score, best = j;
     }
@@ -801,6 +357,23 @@ class Pseudocosts {
   std::vector<int> cut_cnt_;
   double cut_tot_sum_ = 0.0;
   long long cut_tot_cnt_ = 0;
+  double leaf_[4] = {0.0, 0.0, 0.0, 0.0};  // infeasible / integral leaves down, up; all leaves down, up
+  std::vector<double> anc_sum_;  // ancestral pseudocosts (MILP_APS), per (column, direction)
+  std::vector<int> anc_cnt_;
+  // Restart priors (load with prior_only): average gain per (column, direction), -1 none; the
+  // average over all of them per direction (-1 none).
+  std::vector<double> prior_;
+  double prior_avg_[2] = {-1.0, -1.0};
+  // Unit gain estimate of key k (mu_ held): own history, else the restart prior, else `fallback`.
+  double unit(size_t k, double fallback) const {
+    if (cnt_[k]) return sum_[k] / cnt_[k];
+    if (!prior_.empty() && prior_[k] >= 0.0) return prior_[k];
+    return fallback;
+  }
+  double avg(int d) const {
+    if (tot_cnt_[d]) return tot_sum_[d] / static_cast<double>(tot_cnt_[d]);
+    return prior_avg_[d] >= 0.0 ? prior_avg_[d] : 1.0;
+  }
 };
 
 // Sub-MIP (large neighbourhood) heuristics chosen adaptively by success.
@@ -850,7 +423,7 @@ struct SubMipJob {
   double seconds = 0.0;  // statistics only
 };
 
-class Search {
+class Search : public BasisOwner {
  public:
   Search(const MipProblem& p, const SolverParams& params, const Logger& log, const Timer& timer,
          const SearchOptions& opts)
@@ -922,6 +495,7 @@ class Search {
     DualSimplex::State state;  // node LP state for cheap returns after probes/dives
     int nodes_since_dive = 0;
     int next_rule = 0;
+    TreeDiveHistory dives;  // this worker's tree dives (MILP_DIVE_ADAPT)
     // Shared-state views. In deterministic mode a worker sees a snapshot taken
     // at the start of each round plus its own findings; results are merged at
     // the round barrier in worker order.
@@ -945,6 +519,9 @@ class Search {
     std::vector<std::tuple<Index, int, double>> pc_log;
     std::vector<std::tuple<Index, int, double>> inf_log;
     std::vector<std::tuple<Index, int, bool>> cut_log;
+    std::vector<std::pair<int, bool>> leaf_log;  // deterministic mode: update_leaf calls of this round
+    std::vector<std::tuple<Index, int, double>> anc_log;  // deterministic mode: update_anc calls
+    LookaheadSample la;                          // probabilistic lookahead: gains probed at this node
     int node_depth = 0;  // depth of the node being branched on (select_branch)
     std::vector<std::vector<Index>> conf_bumps;
     std::vector<Node> pushed;
@@ -956,11 +533,15 @@ class Search {
     // after aging). pool is this worker's view of the global pool (append-only, by id).
     Index m_base = -1;
     std::vector<int> prow, prow_age;  // per pool row of the LP: pool id, rounds inactive
+    std::vector<char> prow_bind;      // per pool row: binding after some node LP since it was added (statistics)
     std::vector<int> pool_pos;        // per pool id: its pool row index, or -1
     std::vector<std::shared_ptr<const Cut>> pool;
     std::vector<double> pool_norm;
     std::vector<char> pool_need;
     std::vector<std::pair<double, int>> pool_cand;
+    std::vector<std::vector<std::pair<int, double>>> par_occ;  // pool_separate's parallelism filter
+    std::vector<Index> par_cols;
+    std::vector<double> par_dot;
     long long pool_iters = 0, node_iters = 0, pool_scan = 0;  // budget: LP iterations, pool nonzeros scanned
     std::vector<int> pool_used;  // ids added to the LP since the last flush
     size_t pool_del_seen = 0;    // position in the global deletion log
@@ -1022,6 +603,7 @@ class Search {
   void root_heuristics(Worker& w);
   bool root_lns_ran_ = false, root_lns_improved_ = false;  // root LNS rounds (reported for restarts)
   double t_start_ = 0.0;                                   // timer at the start of run()
+  double inc_start_ = kInf;  // objective (without offset) of the start point (MipResult::improved)
   void run_sub_mips(Worker& w);
   void run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<std::mutex>* lk);
   bool async_jobs_ = false;  // deterministic mode: sub-MIPs run as jobs beside the tree search
@@ -1074,11 +656,24 @@ class Search {
   long long root_sb_base_ = 0;     // root LP iterations (initial solve + cut loop) before the first pass
   int root_sb_passes_ = 0;
   long long root_sb_fixed_ = 0, root_sb_probes_ = 0, root_sb_iters_ = 0;
+  int root_sb_aborted_ = 0;  // passes ended by MILP_ROOT_SB_ABORT
   double root_sb_bound_ = -kInf;  // max over probed candidates of the smaller child bound (valid globally)
   Index root_sb_var_ = -1;        // branching candidate of the last pass (and its exact child gains)
   double root_sb_dn_ = -kInf, root_sb_up_ = -kInf;
   bool root_redo_ = false, root_heur_done_ = false;
   std::vector<Index> root_seeds_;  // columns fixed by root strong branching (propagated on the next pass)
+  // Root restart rule (root_restart_decision) for the current global fixings and the root's cost
+  // (root_work: LP iterations x (rows + columns) of the root worker's LP; root_elapsed: seconds since the
+  // restart before this search, else since its start). restart_allowed: a root restart is possible at all.
+  bool restart_allowed() const;
+  RestartDecision restart_check(double root_work, double root_time, Index* ints, Index* newly_fixed);
+  static double root_work(const DualSimplex& lp) {
+    return static_cast<double>(lp.iterations()) * (lp.num_rows() + lp.num_cols());
+  }
+  double root_elapsed() const { return timer_.elapsed() - (opts_.restart_t0 >= 0.0 ? opts_.restart_t0 : t_start_); }
+  // Root strong branching skipped because the root restarts anyway (MILP_RESTART_SKIP_SB=1): the restart
+  // decision taken then stands at the end of the root.
+  bool root_sb_skipped_ = false;
 
   int process(Worker& w, Node& node, Node* children);
   int process_impl(Worker& w, Node& node, Node* children);
@@ -1124,6 +719,10 @@ class Search {
   LpStatus solve_fixed_ints(const std::vector<double>& x_int, const std::vector<double>& lb,
                             const std::vector<double>& ub, double primal_tol, double cutoff,
                             std::vector<double>& out) const;
+  // An integral node LP point (w.sol) whose rounded point violates the model by more than 1e-9: the
+  // node LP warm with the integer columns fixed at their rounded values, at primal tolerance 1e-9;
+  // replaces w.sol when that point violates less. The LP's state and bounds are restored.
+  void polish_integral_lp(Worker& w, const LpOptions& opt);
   static constexpr double kFeasTol = 1e-6;   // model check of accepted points (absolute, presolved model)
   static constexpr double kPolishTol = 1e-5;  // points up to this violation get the fixed-integer re-solve
   // Integral objective: the incumbent's value rounded to the integer it represents. An incumbent
@@ -1218,15 +817,18 @@ class Search {
   std::vector<double> root_x_;  // root LP solution (child selection)
   // Memory limit (--mem-limit L, a cap on the search's memory that it tries to keep searching
   // under). Tree memory is accounted exactly where it is allocated: bound-path segments
-  // (path_bytes_), stored warm-start bases (basis_bytes_) and the queue arrays (NodePool::bytes).
+  // (path_bytes_), stored warm-start bases (basis_bytes_) and the queue (NodePool::bytes: what
+  // the open nodes use; alloc_bytes: what the queue holds, incl. free slots and spare capacity).
   // used = tree memory + the resident size when the tree search started (opportunistic mode).
-  // States (mem_state_): 0 normal; 1 from 60% of L: new nodes get no warm-start basis; 2 (drain)
-  // from 75% of L or a resident size of 85%: queued nodes lose their bases (shallowest first) down
-  // to 65%, nodes are selected deepest first and workers always plunge, so the open-node count
-  // stops growing; it ends below 60% (and a resident size below 75%). The search stops only at 95%
-  // of L (used or resident). Deterministic mode decides on the tree memory alone, at round
-  // barriers (det_tree_bytes_), so the outcome does not depend on timing; rounds are sized to stay
-  // below these thresholds (run_deterministic, project).
+  // States (mem_state_): 0 normal; 1 from 60% of L: new nodes get no warm-start basis, cut-off
+  // nodes are purged from the queue when the cutoff improves, the queue compacts below half
+  // occupancy; 2 (drain) from 75% of L or 85% allocated or resident: queued nodes lose their bases
+  // (shallowest first) down to 65%, pops alternate k deepest : 1 best bound (NodePool; k adapts so
+  // that the open-node count falls slowly) and workers always plunge, so the bound keeps moving
+  // while the tree shrinks; it ends below 70% (allocated below 80%, resident below 75%). The search stops
+  // only at 95% of L (allocated or resident). Deterministic mode decides on the tree memory alone,
+  // at round barriers (det_tree_bytes_), so the outcome does not depend on timing; rounds are
+  // sized to stay below these thresholds (run_deterministic, project).
   std::atomic<double> rss_checked_{-1.0};
   std::atomic<long long> rss_bytes_{0};
   std::atomic<long long> path_bytes_{0}, basis_bytes_{0};
@@ -1236,11 +838,19 @@ class Search {
   std::atomic<long long> mem_stripped_{0}, mem_drains_{0}, mem_peak_{0};
   std::atomic<double> mem_relief_t_{-1e9}, mem_strip_t_{-1e9};
   std::mutex mem_mu_;
+  // Drain phases (statistics, MipResult): exits, the bound at the last entry, the bound rise over
+  // the finished phases. Queued nodes purged at an improved cutoff.
+  long long mem_drain_exits_ = 0, mem_purged_ = 0;
+  double drain_entry_lb_ = -kInf, drain_rise_ = 0.0;
+  std::atomic<double> purge_cutoff_{kInf}, purge_t_{-1e9};
   long long mem_limit_bytes() const {
     return opts_.mem_limit_bytes > 0 ? opts_.mem_limit_bytes : static_cast<long long>(params_.mem_limit_mb) << 20;
   }
   long long tree_bytes() const { return pool_->bytes() + path_bytes_.load() + basis_bytes_.load() + 12 * ncp_held_nnz_.load(); }
   long long tree_bytes(const Worker& w) const { return w.det ? det_tree_bytes_ : tree_bytes(); }
+  long long tree_alloc_bytes() const {
+    return pool_->alloc_bytes() + path_bytes_.load() + basis_bytes_.load() + 12 * ncp_held_nnz_.load();
+  }
   long long checked_rss() {
     if (!opts_.check_resident) return 0;
     const double now = timer_.elapsed(), last = rss_checked_.load();
@@ -1253,7 +863,7 @@ class Search {
   void memory_control(bool det);
   bool memory_exceeded(bool det) {
     const long long limit = mem_limit_bytes();
-    if (tree_bytes() + (det ? 0 : base_rss_) > limit / 20 * 19) return true;
+    if (tree_alloc_bytes() + (det ? 0 : base_rss_) > limit / 20 * 19) return true;
     return checked_rss() > limit / 20 * 19;
   }
   // Memory budget of a sub-MIP started now: a quarter of what is left (16..256 MB).
@@ -1261,10 +871,16 @@ class Search {
     const long long left = mem_limit_bytes() - (w ? tree_bytes(*w) : tree_bytes()) - (w && w->det ? 0 : base_rss_);
     return static_cast<int>(std::clamp<long long>((left / 4) >> 20, 16, 256));
   }
-  // Warm-start bases: the reference of the sparse form (set before the workers start) and the
-  // shared_ptr deleter that releases the accounting and the pool cuts the basis held.
-  PackedBasis::Ref ref_basis_;
-  std::shared_ptr<const PackedBasis> store_basis(PackedBasis* pb);
+  // Warm-start bases: the reference of the sparse form (set before the workers start, never
+  // changed afterwards), storing a basis (accounting, pool holds) and its release (BasisOwner).
+  std::shared_ptr<const std::vector<VarStatus>> ref_basis_;
+  BasisRef store_basis(const Basis& b, Index size, const std::vector<std::pair<int, VarStatus>>* pool_nb);
+  void basis_released(const PackedBasis& b) override;
+  // Bound paths (Node): the segment a branching node's children share (its own change, then its
+  // reduced-cost fixings if with_rcfix; its path itself when there is neither), and a child's own
+  // change (inline, or a segment of its own with the extra changes in extra).
+  PathRef branch_segment(Worker& w, const Node& node, bool with_rcfix);
+  void set_child_change(Node& c, const PathRef& base, const BoundChange& bc, const std::vector<uint8_t>* extra);
   std::atomic<bool> root_rc_ready_{false};  // set once root_d_/root_at_ are final (FJ thread reads it)
   void root_rc_fixing(double cutoff);
   void record_lurking(const DualSimplex& lp);
@@ -1274,11 +890,26 @@ class Search {
   // problem with these fixings, the root cut rows and the most recently used pool cuts back for a
   // fresh presolve and root (SCIP's restarts). Checked by worker 0 every 128 nodes, or at the round
   // barriers in deterministic mode (from deterministic data only).
+  // Estimation-driven restart (v0.6 R2, opt-in MILP_EST_RESTART=1): also when the tree-size estimate says
+  // the tree is huge and it fixed at least a few columns (est_restart_vote).
   void check_tree_restart(bool det);
+  // One vote of the tree-size estimator (HiGHS's rule, as in the 2026-11-03 design): over the window
+  // since the last check that did not find the tree huge, the tree weight W (TreeWeight) went from
+  // W_ref to W in N - N_ref nodes, so the secant estimate of the nodes for W = 1 is N^ = N_ref +
+  // (N - N_ref)(1 - W) / (W - W_ref). Huge: N^ >= MILP_EST_FACTOR (20) x r x N while the gap shrank
+  // by less than 5% / r in the window (r = (1 - share of the integer columns fixed)^2). Returns the
+  // consecutive huge votes, 0 after a reset.
+  int est_restart_vote(Index fixed, Index free_ints);
   void fill_restart(MipResult& res, bool with_pool);
   Index count_global_fixed();
   std::atomic<bool> tree_restart_{false};
+  bool est_restart_ = false;  // the tree restart came from the estimate
   Index tree_fixed0_ = 0;  // integer columns fixed globally (not by the problem) when the tree started
+  TreeWeight tw_;          // leaves closed so far (worker loops, det task loop, pool drops)
+  // Estimator window (worker 0 / the barrier thread only).
+  long long est_n_ref_ = -1, est_last_ = -1;
+  double est_w_ref_ = 0.0, est_gap_ref_ = kInf, est_nhat_ = kInf;
+  int est_votes_ = 0;
 
   // Global cut pool: globally valid cuts separated at tree nodes. Workers
   // append the entries they have not applied yet to their LPs.
@@ -1334,6 +965,12 @@ class Search {
   long long ncp_nnz_ = 0, ncp_max_nnz_ = 0;
   size_t ncp_max_ = 0, ncp_live_ = 0;
   std::atomic<long long> ncp_added_{0}, ncp_rounds_{0}, ncp_removed_{0}, ncp_purged_{0}, ncp_stripped_{0};
+  std::atomic<long long> ncp_never_bind_{0}, ncp_flat_rounds_{0};  // statistics (verbosity 2)
+  // MILP_POOL_DEDUP=1: live pool cuts by coefficient hash; a published cut with the coefficients of a
+  // live one and no smaller right-hand side maps to that cut's id instead of a new entry.
+  std::unordered_map<uint64_t, int> ncp_by_hash_;
+  std::vector<uint64_t> ncp_hash_;  // per id (dedup only)
+  long long ncp_dups_ = 0;
   void pool_publish(std::vector<Cut>& cuts, std::vector<int>* ids);
   void pool_purge();  // ncp_mu_ held
   void pool_pull(Worker& w);
@@ -1361,6 +998,8 @@ class Search {
   std::atomic<long long> gr_calls_{0}, gr_learned_{0}, gr_uip_{0}, gr_partial_{0}, gr_steps_{0}, gr_reduced_{0},
       gr_mir_{0}, gr_nnz_{0}, gr_ns_{0}, gr_fail_[9] = {};
   std::atomic<long long> sb_probes_{0}, sb_iters_{0};  // strong branching statistics
+  std::atomic<long long> sb_pl_stops_{0};               // probabilistic lookahead stops (MILP_PL)
+  std::atomic<long long> sb_aps_nodes_{0};              // branchings scored with ancestral pseudocosts
   std::atomic<long long> sb_calls_{0};  // branching decisions (select_branch calls)
   std::atomic<long long> sb_fixed_{0};  // strong branching domain reductions
   std::atomic<long long> sb_degen_skips_{0};  // branchings without strong branching (dual degenerate LP)
@@ -1382,6 +1021,15 @@ class Search {
   // node LPs, and how nodes end (see kOutcomeNames).
   std::atomic<long long> prow_sum_{0}, prow_nnz_{0};
   std::atomic<long long> node_it_total_{0}, pool_it_total_{0}, popped_it_{0}, popped_n_{0}, plunged_n_{0};
+  // Node cut time (ns, pool mode): fresh separation, pool scans, cut-round re-solves, first node LP solves;
+  // node LP rows summed over the pool-mode nodes. MILP_POOL_TRACE=1 logs them per progress line.
+  std::atomic<long long> sep_ns_{0}, scan_ns_{0}, cutlp_ns_{0}, nodelp_ns_{0}, lprows_sum_{0};
+  static constexpr size_t kSepStats = 5;  // separate_node: cover, c-MIR, clique, implied bound, tableau c-MIR
+  std::atomic<long long> sep_k_ns_[kSepStats] = {};
+  std::atomic<long long> sep_calls_{0};
+  struct TraceSnap {
+    long long n = 0, prow = 0, rows = 0, it = 0, cit = 0, add = 0, rem = 0, sep = 0, scan = 0, cutlp = 0, nodelp = 0;
+  } trace_last_;
   static constexpr int kOutcomes = 11;
   std::atomic<long long> outcome_[kOutcomes] = {};
   std::atomic<long long> outcome_depth_[kOutcomes] = {};
@@ -1408,6 +1056,19 @@ class Search {
   std::vector<std::pair<double, std::vector<double>>> sol_pool_;
   long long sol_pool_version_ = 0;
   std::atomic<long long> nodes_{0}, lp_iters_{0}, dive_iters_{0}, next_id_{1};
+  // Primal heuristic statistics (the "Heuristics" line): tree dives (calls, points found, new
+  // incumbents, LP iterations), the root feasibility pump's LP iterations, and the tree's sub-MIPs
+  // (calls, new incumbents, LP iterations, of them in the sub-MIPs' dives and pumps).
+  std::atomic<long long> tdive_calls_{0}, tdive_found_{0}, tdive_wins_{0}, tdive_limit_{0}, tdive_iters_{0}, fp_iters_{0};
+  std::atomic<long long> hsub_calls_{0}, hsub_wins_{0}, hsub_iters_{0}, hsub_dive_iters_{0}, hsub_fp_iters_{0};
+  std::atomic<long long> hsub_dive_wins_{0}, hsub_fp_runs_{0}, hsub_fp_wins_{0};
+  // New incumbents of this search from dives / the feasibility pump, and pumps run (MipResult).
+  std::atomic<int> dive_wins_{0}, fp_runs_{0}, fp_wins_{0};
+  void count_win(const char* source) {
+    if (!source) return;
+    if (std::strstr(source, "diving")) ++dive_wins_;
+    else if (std::strncmp(source, "feasibility pump", 16) == 0) ++fp_wins_;
+  }
   std::atomic<bool> stop_{false};
   Status stop_reason_ = Status::Unknown;
   std::mutex stop_mu_;
@@ -1416,9 +1077,11 @@ class Search {
   std::atomic<long long> impl_branches_{0};  // branchings on violated implications
   // verified_point's fixed-integer re-solves: tried, succeeded, total LP iterations (statistics)
   mutable std::atomic<long long> polish_tried_{0}, polish_ok_{0}, polish_iters_{0};
+  std::atomic<long long> lp_polished_{0};  // integral node LP points re-solved warm (polish_integral_lp)
   double lost_bound_ = kInf;  // min bound of subtrees dropped for numerical reasons
   std::atomic<double> root_bound_{-kInf};  // also read by try_incumbent (incumbent callback) on other threads
   double root_cs_before_ = -kInf;  // root LP bound before cuts (ROOTSTAT line)
+  long long root_lp0_iters_ = -1;  // LP iterations of the root LP's first solve (before cuts; -1: not recorded)
   int root_cs_rounds_ = 0, root_cs_cuts_ = 0;
   double det_lb_ = -kInf;  // deterministic mode: global bound after the last round's merge
   std::atomic<bool> det_running_{false};  // run_deterministic() runs (try_incumbent is then called by its thread only)
@@ -1453,6 +1116,53 @@ LpStatus Search::solve_fixed_ints(const std::vector<double>& x_int, const std::v
     }
   }
   return st;
+}
+
+void Search::polish_integral_lp(Worker& w, const LpOptions& opt) {
+  // The node LP's point is integral and feasible within its primal tolerance (1e-6), which postsolve
+  // can amplify past the model check (dano3_5: 2.7e-6 after undoing substitutions). The checks that
+  // repair such points re-solve the fixed-integer LP cold, ~30k iterations on dano3_5's 13.9k
+  // columns: verified_point's ran into its 5 s cap twice, postsolve's into the end of the time limit,
+  // and the solve was repeated without presolve and ended with no solution. Warm from the node LP's
+  // basis the same re-solve takes a few iterations.
+  std::vector<double> r = w.sol;
+  for (Index j = 0; j < p_.num_cols(); ++j) {
+    if (p_.is_int[j]) r[j] = std::round(r[j]);
+  }
+  const double v0 = p_.max_violation(r);
+  if (v0 <= 1e-9) return;
+  DualSimplex& lp = w.lp;
+  DualSimplex::State st;
+  lp.save_state(st);
+  std::vector<std::pair<Index, std::pair<double, double>>> saved;
+  bool ok = true;
+  for (Index j = 0; j < p_.num_cols(); ++j) {
+    if (!p_.is_int[j]) continue;
+    const double lo = lp.col_lower(j), hi = lp.col_upper(j);
+    if (r[j] < lo - 1e-9 || r[j] > hi + 1e-9) ok = false;
+    if (lo == r[j] && hi == r[j]) continue;
+    saved.push_back({j, {lo, hi}});
+    lp.set_col_bounds(j, r[j], r[j]);
+  }
+  if (ok) {
+    LpOptions o = opt;
+    o.tol.primal_feas = 1e-9;
+    o.objective_cutoff = kInf;
+    o.iteration_limit = 1000 + static_cast<long long>(p_.num_rows());
+    if (lp.solve(o) == LpStatus::Optimal) {
+      std::vector<double> y = lp.col_values();
+      y.resize(p_.num_cols());
+      for (Index j = 0; j < p_.num_cols(); ++j) {
+        if (p_.is_int[j]) y[j] = r[j];
+      }
+      if (p_.max_violation(y) < v0) {
+        w.sol = std::move(y);
+        ++lp_polished_;
+      }
+    }
+  }
+  for (const auto& [j, b] : saved) lp.set_col_bounds(j, b.first, b.second);
+  lp.restore_state(st);
 }
 
 bool Search::verified_point(const std::vector<double>& x_arg, std::vector<double>& x, double* obj,
@@ -1534,6 +1244,7 @@ bool Search::try_incumbent(Worker& w, const std::vector<double>& x_in, const cha
   w.inc_x = x;
   w.inc_version = -1;  // differs from the global incumbent until the next round
   w.found.push_back({obj, std::move(x), source});
+  count_win(source);
   return true;
 }
 
@@ -1584,6 +1295,7 @@ bool Search::accept_incumbent(std::vector<double>& x, double obj, const char* so
   if (sol_pool_.size() > kSolPool) sol_pool_.pop_back();
   ++sol_pool_version_;
   inc_x_ = std::move(x);
+  count_win(source);
   log_.log(2, "  new incumbent %.10g (%s) at %.2fs\n", p_.display_sense * (obj + p_.offset), source, timer_.elapsed());
   return true;
 }
@@ -1600,6 +1312,27 @@ void Search::maybe_log(bool force) {
   const double gap = is_finite(inc) ? std::abs(inc - lb) / std::max(std::abs(inc + p_.offset), 1e-10) * 100.0 : kInf;
   log_.log(1, "%10lld nodes %8zu open  bound %14.8g  best %14.8g  gap %7.3f%%  %7.1fs\n", nodes_.load(),
            pool_->size(), p_.display_sense * (lb + p_.offset), p_.display_sense * (inc + p_.offset), gap, t);
+  static const bool trace = knob("MILP_POOL_TRACE", 0.0) > 0.0;
+  if (trace && use_pool_) {
+    // Since the last line, per pool-mode node: LP rows (pool rows), first-solve and cut-round LP iterations,
+    // pool rows added / removed, and the node time split (ms per node).
+    TraceSnap s{popped_n_.load() + plunged_n_.load(), prow_sum_.load(), lprows_sum_.load(), node_it_total_.load(),
+                pool_it_total_.load(), ncp_added_.load(), ncp_removed_.load(), sep_ns_.load(), scan_ns_.load(),
+                cutlp_ns_.load(), nodelp_ns_.load()};
+    const TraceSnap& o = trace_last_;
+    const double k = static_cast<double>(std::max(1LL, s.n - o.n));
+    size_t live = 0;
+    {
+      std::lock_guard<std::mutex> lk2(ncp_mu_);
+      live = ncp_live_;
+    }
+    log_.log(2, "  pool trace: %lld nodes, %.0f LP rows (%.0f pool), %.1f + %.1f LP it/node, +%.1f -%.1f pool rows/node,"
+             " ms/node: LP %.3f, cut LPs %.3f, separation %.3f, pool scan %.3f; pool %zu cuts\n",
+             s.n - o.n, (s.rows - o.rows) / k, (s.prow - o.prow) / k, (s.it - o.it) / k, (s.cit - o.cit) / k,
+             (s.add - o.add) / k, (s.rem - o.rem) / k, 1e-6 * (s.nodelp - o.nodelp) / k, 1e-6 * (s.cutlp - o.cutlp) / k,
+             1e-6 * (s.sep - o.sep) / k, 1e-6 * (s.scan - o.scan) / k, live);
+    trace_last_ = s;
+  }
   if (log_.verbosity() >= 2 && (force || t - last_mem_log_ >= 10.0)) {
     last_mem_log_ = t;
     log_memory();
@@ -1623,13 +1356,16 @@ void Search::log_memory() {
   }
   const double mb = 1.0 / 1048576.0;
   const double per = b.nodes ? 1.0 / static_cast<double>(b.nodes) : 0.0;
-  log_.log(2, "  memory: resident %.0f MB (at tree start %.0f), tree %.0f MB (state %d) = queue %.0f + bases %.0f + paths %.0f"
-              " + held cuts %.0f; open %zu (depth %.0f, %.0f B per node): %lld with a basis (%lld sparse, %.1f pool rows),"
-              " %lld with groups (%.0f MB); pool %lld cuts / %lld nnz; conflict log %zu; %d integers fixed globally\n",
-           resident_bytes() * mb, base_rss_ * mb, tree_bytes() * mb, mem_state_.load(), pool_->bytes() * mb,
-           basis_bytes_.load() * mb, path_bytes_.load() * mb, 12.0 * ncp_held_nnz_.load() * mb, b.nodes, b.depth,
-           tree_bytes() * per, b.with_basis, b.sparse_bases, b.with_basis ? static_cast<double>(b.pool_rows) / b.with_basis : 0.0,
-           b.groups, b.group_bytes * mb, cut_live, cut_nnz, conf, static_cast<int>(count_global_fixed()));
+  log_.log(2, "  memory: resident %.0f MB (at tree start %.0f), tree %.0f MB (state %d, allocated %.0f MB) = queue %.0f"
+              " (allocated %.0f) + bases %.0f + paths %.0f + held cuts %.0f; open %zu (depth %.0f, %.0f B per node: queue %.0f,"
+              " bases %.0f, paths %.0f): %lld with a basis (%lld sparse, %.1f pool rows), %lld with groups (%.0f MB);"
+              " drain k %d; pool %lld cuts / %lld nnz; conflict log %zu; %d integers fixed globally\n",
+           resident_bytes() * mb, base_rss_ * mb, tree_bytes() * mb, mem_state_.load(), tree_alloc_bytes() * mb,
+           pool_->bytes() * mb, pool_->alloc_bytes() * mb, basis_bytes_.load() * mb, path_bytes_.load() * mb,
+           12.0 * ncp_held_nnz_.load() * mb, b.nodes, b.depth, tree_bytes() * per, pool_->bytes() * per,
+           basis_bytes_.load() * per, path_bytes_.load() * per, b.with_basis, b.sparse_bases,
+           b.with_basis ? static_cast<double>(b.pool_rows) / b.with_basis : 0.0, b.groups, b.group_bytes * mb,
+           pool_->drain_ratio(), cut_live, cut_nnz, conf, static_cast<int>(count_global_fixed()));
 }
 
 void Search::memory_control(bool det) {
@@ -1637,28 +1373,61 @@ void Search::memory_control(bool det) {
   const long long base = det ? 0 : base_rss_;
   long long rss = det ? 0 : checked_rss();
   const double now = det ? 0.0 : timer_.elapsed();
-  // The allocator keeps freed memory (old slot / heap arrays, freed bases) resident for reuse; hand
-  // it back to the OS before it counts against the limit (at most every 2 s).
-  if (!det && rss >= limit / 20 * 16 && now - mem_relief_t_.load() >= 2.0) {
-    mem_relief_t_ = now;
+  // The allocator keeps freed memory (old slot / key arrays, freed bases) resident for reuse; hand
+  // it back to the OS before it counts against the limit (at most every 2 s), and after the queue
+  // compacted under memory pressure.
+  const bool compacted = pool_->take_compacted();
+  if (compacted || (!det && rss >= limit / 20 * 16 && now - mem_relief_t_.load() >= 2.0)) {
+    if (!det) mem_relief_t_ = now;
     release_free_memory();
-    rss_checked_ = -1.0;
-    rss = checked_rss();
+    if (!det) {
+      rss_checked_ = -1.0;
+      rss = checked_rss();
+    }
   }
+  int state = mem_state_.load();
+  // Under memory pressure (and in a large queue) drop the queued nodes the cutoff has pruned since
+  // the last purge (at most every 2 s; deterministic mode: at the barriers, in memory states only).
+  const double co = cutoff_.load();
+  if (co < purge_cutoff_.load() && (state >= 1 || (!det && pool_->approx_size() > 1000000)) &&
+      (det || now - purge_t_.load() >= 2.0)) {
+    std::unique_lock<std::mutex> lk(mem_mu_, std::try_to_lock);
+    if (lk.owns_lock() && co < purge_cutoff_.load()) {
+      purge_cutoff_ = co;
+      purge_t_ = now;
+      const size_t before = pool_->approx_size();
+      const long long removed = pool_->purge(co);
+      mem_purged_ += removed;
+      if (removed > 0) {
+        log_.log(2, "  memory: purged %lld of %zu queued nodes at the cutoff %.10g (%.1fs)\n", removed, before,
+                 p_.display_sense * (co + p_.offset), timer_.elapsed());
+      }
+    }
+  }
+  // used: what the open nodes use; alloc: incl. the queue's free slots and spare capacity (the
+  // hard stop applies to it), which counts like the resident size: drain from 85%, exit below 80%.
   long long used = tree_bytes() + base;
-  if (used - base > mem_peak_.load()) mem_peak_ = used - base;  // statistics (racy maximum)
-  const int state = mem_state_.load();
-  int want = used >= limit / 20 * 15 || rss >= limit / 20 * 17 ? 2 : used >= limit / 20 * 12 ? 1 : 0;
-  if (state == 2 && want < 2 && (used >= limit / 20 * 12 || rss >= limit / 20 * 15)) want = 2;
-  // Bytes to free: down to 65% of the limit used, 75% resident.
+  const long long alloc = tree_alloc_bytes() + base;
+  if (alloc - base > mem_peak_.load()) mem_peak_ = alloc - base;  // statistics (racy maximum)
+  const long long big = std::max(alloc, rss);
+  int want = used >= limit / 20 * 15 || big >= limit / 20 * 17 ? 2 : used >= limit / 20 * 12 ? 1 : 0;
+  if (state == 2 && want < 2) {
+    // Leaving drain mode brings the estimate heap back: exit only if that stays below 70% / 80%.
+    const long long grow = pool_->exit_growth();
+    if (used + grow >= limit / 20 * 14 || alloc + grow >= limit / 20 * 16 || rss >= limit / 20 * 15) want = 2;
+  }
+  // Bytes to free: down to 65% of the limit used, 75% allocated / resident.
   const long long excess = std::max(used >= limit / 20 * 15 ? used - limit / 20 * 13 : 0,
-                                    rss >= limit / 20 * 17 ? rss - limit / 20 * 15 : 0);
+                                    big >= limit / 20 * 17 ? big - limit / 20 * 15 : 0);
   const bool strip = want == 2 && excess > 0 && basis_bytes_.load() > limit / 100 && (det || now - mem_strip_t_.load() >= 1.0);
-  if (want == state && !strip) {
+  // Close to the hard stop (85% used, 90% allocated or resident): drain pops all deepest.
+  const bool deep_only = want == 2 && (used >= limit / 20 * 17 || big >= limit / 20 * 18);
+  if (want == state && !strip && deep_only == pool_->deep_only()) {
     if (det) det_tree_bytes_ = tree_bytes();
     return;
   }
   std::lock_guard<std::mutex> lk(mem_mu_);
+  if (deep_only != pool_->deep_only()) pool_->set_deep_only(deep_only);
   if (strip) {
     // Free warm-start bases of queued nodes (shallowest first).
     mem_strip_t_ = now;
@@ -1670,12 +1439,22 @@ void Search::memory_control(bool det) {
              used / 1048576.0, rss / 1048576.0, limit / 1048576.0, timer_.elapsed(), dropped, after / 1048576.0);
     used = after;
   }
-  if (want != mem_state_.load()) {
-    if (want == 2) ++mem_drains_;
+  state = mem_state_.load();
+  if (want != state) {
+    const double lb = pool_->lower_bound();
+    if (want == 2) {
+      ++mem_drains_;
+      drain_entry_lb_ = lb;
+    } else if (state == 2) {
+      ++mem_drain_exits_;
+      drain_rise_ += std::max(0.0, lb - drain_entry_lb_);
+    }
     pool_->set_drain(want == 2);
-    log_.log(2, "  memory: %.0f MB used (resident %.0f MB) of %.0f MB at %.1fs: %s\n", used / 1048576.0, rss / 1048576.0,
-             limit / 1048576.0, timer_.elapsed(),
-             want == 2 ? "drain mode (deepest node first, no stored bases)" : want == 1 ? "no new stored bases" : "normal");
+    pool_->set_pressure(want >= 1);
+    log_.log(2, "  memory: %.0f MB used (resident %.0f MB) of %.0f MB at %.1fs, %zu open, bound %.10g: %s\n",
+             used / 1048576.0, rss / 1048576.0, limit / 1048576.0, timer_.elapsed(), pool_->approx_size(),
+             p_.display_sense * (lb + p_.offset),
+             want == 2 ? "drain mode (k deepest : 1 best bound, no stored bases)" : want == 1 ? "no new stored bases" : "normal");
     mem_state_ = want;
   }
   if (det) det_tree_bytes_ = tree_bytes();
@@ -1725,10 +1504,16 @@ int Search::separate_node(Worker& w, bool tmir) {
   }
   if (!fractional) return 0;
   SepaContext ctx{p_, w.lp, x, p_.num_rows(), cut_data_, 0};
+  // MILP_NODE_SEP_WORK = f: the c-MIR path aggregation's work budget per call at nodes is f times the
+  // root's (4000 max(nnz(A), 20000)); node separation on tr12-30 took 5-18 ms per node, more than its LP.
+  static const double kNodeSepWork = knob("MILP_NODE_SEP_WORK", 1.0);
+  ctx.work_scale = kNodeSepWork;
   std::vector<Cut> cand;
   for (size_t k = 0; k < w.seps.size(); ++k) {
     if (use_pool_ && k + 1 == w.seps.size() && !tmir) continue;  // the tableau c-MIR separator
+    const long long ns = now_ns();
     w.seps[k]->separate(ctx, cand);
+    if (k < kSepStats) sep_k_ns_[k] += now_ns() - ns;
   }
   if (cand.empty()) return 0;
   CutPoolOptions popt;
@@ -1754,7 +1539,11 @@ int Search::separate_node(Worker& w, bool tmir) {
     std::vector<int> ids;
     pool_publish(sel, &ids);
     pool_pull(w);
-    ids.erase(std::remove(ids.begin(), ids.end(), -1), ids.end());
+    // (With MILP_POOL_DEDUP a cut may map to a live pool cut, possibly one this round re-added already.)
+    ids.erase(std::remove_if(ids.begin(), ids.end(), [&](int id) { return id < 0 || w.pool_pos[id] >= 0; }),
+              ids.end());
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     pool_add_rows(w, ids);
     return static_cast<int>(ids.size());
   }
@@ -1767,6 +1556,7 @@ int Search::separate_node(Worker& w, bool tmir) {
 }
 
 void Search::pool_publish(std::vector<Cut>& cuts, std::vector<int>* ids) {
+  static const bool dedup = knob("MILP_POOL_DEDUP", 0.0) > 0.0;
   std::lock_guard<std::mutex> lk(ncp_mu_);
   const long long epoch = nodes_.load();
   for (Cut& c : cuts) {
@@ -1775,12 +1565,38 @@ void Search::pool_publish(std::vector<Cut>& cuts, std::vector<int>* ids) {
       if (ids) ids->push_back(-1);
       continue;
     }
+    uint64_t h = 0;
+    if (dedup) {
+      // Exact duplicates: fresh node separation runs on the LP point at which the round's pool cuts were
+      // chosen, and the root's dropped list holds cuts that were separated again.
+      h = 1469598103934665603ULL;
+      for (size_t k = 0; k < c.idx.size(); ++k) {
+        uint64_t b;
+        std::memcpy(&b, &c.val[k], sizeof b);
+        h = (h ^ static_cast<uint64_t>(c.idx[k])) * 1099511628211ULL;
+        h = (h ^ b) * 1099511628211ULL;
+      }
+      const auto it = ncp_by_hash_.find(h);
+      if (it != ncp_by_hash_.end() && ncp_[it->second]) {
+        const Cut& o = *ncp_[it->second];
+        if (o.idx == c.idx && o.val == c.val && c.rhs >= o.rhs) {
+          if (ids) ids->push_back(it->second);
+          ++ncp_dups_;
+          continue;
+        }
+      }
+    }
     if (ncp_live_ >= ncp_max_ || ncp_nnz_ + nnz > ncp_max_nnz_) pool_purge();
     if (ncp_live_ >= ncp_max_ || ncp_nnz_ + nnz > ncp_max_nnz_) {
       if (ids) ids->push_back(-1);
       continue;
     }
     if (ids) ids->push_back(static_cast<int>(ncp_.size()));
+    if (dedup) {
+      ncp_by_hash_[h] = static_cast<int>(ncp_.size());
+      ncp_hash_.resize(ncp_.size() + 1);
+      ncp_hash_.back() = h;
+    }
     ncp_nnz_ += nnz;
     ++ncp_live_;
     c.pool_id = -1;
@@ -1803,6 +1619,10 @@ void Search::pool_purge() {
   std::nth_element(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(del), order.end());
   for (size_t q = 0; q < del; ++q) {
     const int id = order[q].second;
+    if (static_cast<size_t>(id) < ncp_hash_.size()) {
+      const auto it = ncp_by_hash_.find(ncp_hash_[id]);
+      if (it != ncp_by_hash_.end() && it->second == id) ncp_by_hash_.erase(it);
+    }
     ncp_nnz_ -= static_cast<long long>(ncp_[id]->idx.size());
     if (ncp_refs_[id] > 0) {  // stored bases still need it
       ncp_held_nnz_ += static_cast<long long>(ncp_[id]->idx.size());
@@ -1833,15 +1653,43 @@ std::shared_ptr<const Cut> Search::pool_held_cut(int id) {
   return ncp_[id] ? ncp_[id] : ncp_held_[id];
 }
 
-std::shared_ptr<const PackedBasis> Search::store_basis(PackedBasis* pb) {
-  const long long bytes = pb->bytes();
-  basis_bytes_ += bytes;
-  if (pb->npool > 0) pool_hold(*pb, 1);
-  return std::shared_ptr<const PackedBasis>(pb, [this, bytes](const PackedBasis* q) {
-    if (q->npool > 0) pool_hold(*q, -1);
-    basis_bytes_ -= bytes;
-    delete q;
-  });
+BasisRef Search::store_basis(const Basis& b, Index size, const std::vector<std::pair<int, VarStatus>>* pool_nb) {
+  PackedBasis* pb = PackedBasis::make(b, size, ref_basis_.get(), pool_nb);
+  basis_bytes_ += pb->bytes();
+  if (pb->npool() > 0) pool_hold(*pb, 1);
+  return BasisRef(pb, this);
+}
+
+void Search::basis_released(const PackedBasis& b) {
+  if (b.npool() > 0) pool_hold(b, -1);
+  basis_bytes_ -= b.bytes();
+}
+
+PathRef Search::branch_segment(Worker& w, const Node& node, bool with_rcfix) {
+  const bool rc = with_rcfix && !w.rcfix.empty();
+  if (node.change.col < 0 && !rc) return node.path;
+  w.seg.clear();
+  if (node.change.col >= 0) {
+    const Index j = node.change.col;
+    PathSeg::encode(node.change, p_.col_lb[j], p_.col_ub[j], w.seg);
+  }
+  if (rc) {
+    for (const BoundChange& f : w.rcfix) PathSeg::encode(f, p_.col_lb[f.col], p_.col_ub[f.col], w.seg);
+  }
+  return PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
+}
+
+void Search::set_child_change(Node& c, const PathRef& base, const BoundChange& bc, const std::vector<uint8_t>* extra) {
+  if (extra) {
+    c.path = PathRef(PathSeg::make(base.get(), *extra, &path_bytes_));
+    c.change = BoundChange{-1, -kInf, kInf};
+    return;
+  }
+  c.path = base;
+  // As PathSeg::for_each decodes it: sides at the original bound (or infinite) are infinite.
+  const Index j = bc.col;
+  c.change = BoundChange{j, bc.lb != p_.col_lb[j] && bc.lb > -kInf ? PathSeg::canonical(bc.lb) : -kInf,
+                         bc.ub != p_.col_ub[j] && bc.ub < kInf ? PathSeg::canonical(bc.ub) : kInf};
 }
 
 void Search::pool_flush_used(Worker& w) {
@@ -1884,6 +1732,7 @@ void Search::pool_add_rows(Worker& w, const std::vector<int>& ids) {
     w.pool_pos[id] = static_cast<int>(w.prow.size());
     w.prow.push_back(id);
     w.prow_age.push_back(0);
+    w.prow_bind.push_back(0);
   }
   w.lp.add_rows(static_cast<Index>(ids.size()), start, index, value, lb, ub);
 }
@@ -1892,8 +1741,10 @@ void Search::pool_add_rows(Worker& w, const std::vector<int>& ids) {
 void Search::pool_remove_rows(Worker& w, const std::vector<char>& del) {
   std::vector<Index> rows;
   size_t keep = 0;
+  long long never = 0;
   for (size_t k = 0; k < w.prow.size(); ++k) {
     if (del[k]) {
+      never += !w.prow_bind[k];
       rows.push_back(w.m_base + static_cast<Index>(k));
       w.pool_pos[w.prow[k]] = -1;
       if (w.pool_dead[w.prow[k]]) w.pool[w.prow[k]].reset();
@@ -1901,14 +1752,17 @@ void Search::pool_remove_rows(Worker& w, const std::vector<char>& del) {
     }
     w.prow[keep] = w.prow[k];
     w.prow_age[keep] = w.prow_age[k];
+    w.prow_bind[keep] = w.prow_bind[k];
     w.pool_pos[w.prow[keep]] = static_cast<int>(keep);
     ++keep;
   }
   if (rows.empty()) return;
   w.prow.resize(keep);
   w.prow_age.resize(keep);
+  w.prow_bind.resize(keep);
   w.lp.remove_rows(rows);
   ncp_removed_ += static_cast<long long>(rows.size());
+  ncp_never_bind_ += never;
 }
 
 // Before a node's LP solve: drop aged pool rows and install the node's warm-start basis, adding
@@ -1917,7 +1771,7 @@ void Search::pool_prepare(Worker& w, const Node& node) {
   DualSimplex& lp = w.lp;
   const Index n = p_.num_cols();
   const bool warm = node.basis && node.parent != w.last_node;
-  if (warm && node.basis->size != n + w.m_base) {  // cannot happen: base rows are fixed in pool mode
+  if (warm && node.basis->size() != n + w.m_base) {  // cannot happen: base rows are fixed in pool mode
     lp.reset_basis();
     return;
   }
@@ -1950,13 +1804,17 @@ void Search::pool_prepare(Worker& w, const Node& node) {
       if (!lp.row_is_basic(w.m_base + static_cast<Index>(k))) w.pool_need[w.prow[k]] = 1;
     }
   }
-  // Aging: rows inactive for kAge node LPs leave; beyond the row cap the oldest leave first.
+  // Aging: rows inactive for kAge node LPs leave; beyond the row cap the oldest leave first. Rows that
+  // were never binding since they entered leave after kAgeNew (MILP_POOL_AGE_NEW, default kAge): on
+  // tr12-30 almost half of the rows that aged out had never been binding (added together with
+  // stronger cuts of the same round).
   static const int kAge = static_cast<int>(knob("MILP_POOL_AGE", 10));
+  static const int kAgeNew = static_cast<int>(knob("MILP_POOL_AGE_NEW", kAge));
   const size_t cap = static_cast<size_t>(std::clamp<Index>(p_.num_rows(), 100, 1000));
   std::vector<char> del(np, 0);
   size_t ndel = 0;
   for (size_t k = 0; k < np; ++k) {
-    if (!w.pool_need[w.prow[k]] && w.prow_age[k] >= kAge) del[k] = 1, ++ndel;
+    if (!w.pool_need[w.prow[k]] && w.prow_age[k] >= (w.prow_bind[k] ? kAge : kAgeNew)) del[k] = 1, ++ndel;
   }
   if (np - ndel > cap) {
     std::vector<std::pair<int, size_t>> order;
@@ -1975,7 +1833,7 @@ void Search::pool_prepare(Worker& w, const Node& node) {
     if (w.pool_pos[id] < 0) missing.push_back(id);
   }
   pool_add_rows(w, missing);
-  node.basis->unpack(w.unpacked);
+  node.basis->unpack(w.unpacked, ref_basis_.get());
   w.unpacked.status.resize(static_cast<size_t>(n + lp.num_rows()), VarStatus::Basic);
   for (const auto& [id, st] : w.nb) {
     w.unpacked.status[static_cast<size_t>(n + w.m_base + w.pool_pos[id])] = st;
@@ -1987,6 +1845,10 @@ void Search::pool_prepare(Worker& w, const Node& node) {
 int Search::pool_separate(Worker& w) {
   const double* x = w.lp.x();
   const bool tmir_off = !w.det && tmir_interval_.load() >= kTmirOff;
+  // MILP_POOL_SPARSE=1: rank by violation / (active entries x norm over the active entries), as HiGHS's
+  // pool does (entries whose column is not at the bound that the coefficient's sign prefers): sparse cuts
+  // first. Default: efficacy.
+  static const bool sparse_score = knob("MILP_POOL_SPARSE", 0.0) > 0.0;
   w.pool_cand.clear();
   for (size_t id = 0; id < w.pool.size(); ++id) {
     if (w.pool_pos[id] >= 0 || w.pool_dead[id]) continue;
@@ -1997,14 +1859,56 @@ int Search::pool_separate(Worker& w) {
     if (viol <= 1e-6 * std::max(1.0, std::abs(c.rhs))) continue;
     const double eff = viol / std::max(w.pool_norm[id], 1e-12);
     if (eff < 1e-4) continue;
-    w.pool_cand.emplace_back(-eff, static_cast<int>(id));
+    double score = eff;
+    if (sparse_score) {
+      double nrm = 0.0;
+      int act = 0;
+      for (size_t k = 0; k < c.idx.size(); ++k) {
+        const Index j = c.idx[k];
+        const bool at = c.val[k] > 0 ? x[j] <= w.lp.col_lower(j) + 1e-6 : x[j] >= w.lp.col_upper(j) - 1e-6;
+        if (at) continue;
+        ++act;
+        nrm += c.val[k] * c.val[k];
+      }
+      score = viol / (std::max(act, 1) * std::sqrt(std::max(nrm, 1e-24)));
+    }
+    w.pool_cand.emplace_back(-score, static_cast<int>(id));
   }
   if (w.pool_cand.empty()) return 0;
   static const int kMaxAdd = static_cast<int>(knob("MILP_POOL_ADD", 50));
-  const size_t take = std::min<size_t>(w.pool_cand.size(), static_cast<size_t>(kMaxAdd));
-  std::partial_sort(w.pool_cand.begin(), w.pool_cand.begin() + static_cast<std::ptrdiff_t>(take), w.pool_cand.end());
+  // MILP_POOL_PAR = p < 1: by decreasing efficacy, a cut is taken only if it is at most p parallel to
+  // the cuts taken before it (as the root's selection; 1: the most efficacious kMaxAdd).
+  static const double kPar = knob("MILP_POOL_PAR", 1.0);
   std::vector<int> ids;
-  for (size_t q = 0; q < take; ++q) ids.push_back(w.pool_cand[q].second);
+  if (kPar < 1.0) {
+    std::sort(w.pool_cand.begin(), w.pool_cand.end());
+    if (w.par_occ.size() < static_cast<size_t>(p_.num_cols())) w.par_occ.resize(p_.num_cols());
+    for (const auto& [neg_eff, id] : w.pool_cand) {
+      if (static_cast<int>(ids.size()) >= kMaxAdd) break;
+      const Cut& c = *w.pool[id];
+      w.par_dot.assign(ids.size(), 0.0);
+      for (size_t k = 0; k < c.idx.size(); ++k) {
+        for (const auto& [s, v] : w.par_occ[c.idx[k]]) w.par_dot[s] += v * c.val[k];
+      }
+      bool ok = true;
+      for (size_t s = 0; s < ids.size() && ok; ++s) {
+        ok = std::abs(w.par_dot[s]) <= kPar * w.pool_norm[id] * w.pool_norm[ids[s]];
+      }
+      if (!ok) continue;
+      const int sid = static_cast<int>(ids.size());
+      for (size_t k = 0; k < c.idx.size(); ++k) {
+        if (w.par_occ[c.idx[k]].empty()) w.par_cols.push_back(c.idx[k]);
+        w.par_occ[c.idx[k]].emplace_back(sid, c.val[k]);
+      }
+      ids.push_back(id);
+    }
+    for (Index j : w.par_cols) w.par_occ[j].clear();
+    w.par_cols.clear();
+  } else {
+    const size_t take = std::min<size_t>(w.pool_cand.size(), static_cast<size_t>(kMaxAdd));
+    std::partial_sort(w.pool_cand.begin(), w.pool_cand.begin() + static_cast<std::ptrdiff_t>(take), w.pool_cand.end());
+    for (size_t q = 0; q < take; ++q) ids.push_back(w.pool_cand[q].second);
+  }
   std::sort(ids.begin(), ids.end());  // deterministic row order
   pool_add_rows(w, ids);
   w.pool_used.insert(w.pool_used.end(), ids.begin(), ids.end());
@@ -2023,6 +1927,7 @@ void Search::pool_age(Worker& w) {
       slack = ub - act > 1e-6 * std::max(1.0, std::abs(ub));
     }
     w.prow_age[k] = slack ? w.prow_age[k] + 1 : 0;
+    if (!slack) w.prow_bind[k] = 1;
   }
 }
 
@@ -2516,7 +2421,7 @@ double Search::probe(Worker& w, Index j, double lb, double ub, double obj, const
 
 Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
   static const bool no_sb = std::getenv("MILP_NO_SB") != nullptr;
-  static const bool sb_dyn = knob("MILP_SB_DYN", 0) > 0;
+  static const int sb_dyn = static_cast<int>(knob("MILP_SB_DYN", 2));
   static const int kReliability = static_cast<int>(knob("MILP_REL", 4));
   static const int kMaxProbes = no_sb ? 0 : static_cast<int>(knob("MILP_MAXPROBES", 8));
   static const int kLookahead = static_cast<int>(knob("MILP_LOOKAHEAD", 4));
@@ -2526,14 +2431,18 @@ Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
   // (full while below half of the node LP iterations + 10000, kMinRel above all of them). Not the
   // default: piperout-08 / rmatr100-p10 / mc11 1.2-1.8x slower at 60 s / 2 threads (longer probes on
   // expensive LPs); with MILP_REL=8 drayage-25-23 0/3 solved (degenerate probes), kasai's bound at
-  // 60 s better (gap 0.03-0.06% vs 0.07%) but still unsolved.
+  // 60 s better (gap 0.03-0.06% vs 0.07%) but still unsolved. MILP_SB_DYN=2 (default): the reliability
+  // part only (miplib_wide_core, 120 s, 4 threads, seeds 1-2: solved 109 -> 114 of 126, shifted
+  // geomean 0.975x); 3: the iteration limit only; 0: off.
   static const long long kProbeIters = static_cast<long long>(knob("MILP_PROBE_ITERS", 100));
   static const int kMinRel = static_cast<int>(knob("MILP_REL_MIN", 1));
   int reliability = kReliability;
   w.probe_limit = kProbeIters;
-  if (sb_dyn) {
+  if (sb_dyn == 1 || sb_dyn == 3) {
     const double avg = w.tree_lps > 0 ? static_cast<double>(w.tree_iters) / static_cast<double>(w.tree_lps) : 0.0;
     w.probe_limit = std::clamp<long long>(static_cast<long long>(2.0 * avg), kProbeIters, std::max<long long>(kProbeIters, 500));
+  }
+  if (sb_dyn == 1 || sb_dyn == 2) {
     const double sb = static_cast<double>(w.sb_iters), tree = static_cast<double>(w.tree_iters) + 10000.0;
     if (sb > tree) reliability = kMinRel;
     else if (sb > 0.5 * tree) reliability = kMinRel + static_cast<int>(std::lround((kReliability - kMinRel) * (tree - sb) / (0.5 * tree)));
@@ -2569,7 +2478,11 @@ Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
     degen_factor = factor;
   }
   double ps_scale = 1.0;
-  w.pc->scores(w.fracs, reliability, w.scored, &w.est_sum, &ps_scale, degen_factor);
+  const double gap = cutoff(w) - obj;
+  const BranchScoreRule rule = w.pc->score_rule(gap);
+  bool used_aps = false;
+  w.pc->scores(w.fracs, reliability, w.scored, &w.est_sum, &ps_scale, degen_factor, rule, &used_aps);
+  if (used_aps) ++sb_aps_nodes_;
   static const int tie_rule = static_cast<int>(knob("MILP_TIE", 0));
   if (tie_rule == 0) {
     std::sort(w.scored.begin(), w.scored.end(),
@@ -2589,6 +2502,16 @@ Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
   double best_score = -1.0;
   int probes = 0, no_improve = 0;
   bool probed = false;
+  // Probabilistic lookahead (MILP_PL=1 exponential, 2 Pareto; off by default): once the best candidate
+  // has not changed for MILP_PL_PHI x the lookahead probes, probing stops when one more probe is not
+  // expected to shrink the tree (see branch_score.hpp); needs a finite gap and MILP_PL_MIN nonzero gains.
+  static const int pl = static_cast<int>(knob("MILP_PL", 0));
+  static const double pl_phi = knob("MILP_PL_PHI", 0.6);
+  static const int pl_min = static_cast<int>(knob("MILP_PL_MIN", 3));
+  const int pl_after = static_cast<int>(std::ceil(pl_phi * kLookahead));
+  bool pl_stop = false;
+  double best_g = 0.0;  // geometric-mean gain of the best candidate
+  if (pl > 0) w.la.clear();
   static const bool sb_bounds = std::getenv("MILP_SB_BOUNDS") != nullptr;  // opt-in, see below
   // Opt-in MILP_SB_FIX=1 (strong branching domain reductions, below): A/B vs 6504b88 at 60 s / 2 threads
   // miplib_dev 1.049 [0.96, 1.15], dev medium 1.011 [0.97, 1.08] (gap 0.82, lotsize 1.56): no gain.
@@ -2599,7 +2522,7 @@ Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
   for (const auto& c : w.scored) {
     cand_dn = cand_up = -kInf;
     double score = c.score;
-    if (!c.reliable && probes < max_probes && no_improve < kLookahead) {
+    if (!c.reliable && probes < max_probes && no_improve < kLookahead && !pl_stop) {
       const double v = w.xnode[c.j];
       bool ex_dn = false, ex_up = false;
       const double dn = probe(w, c.j, w.lp.col_lower(c.j), std::floor(v), obj, basis, &ex_dn);
@@ -2637,13 +2560,24 @@ Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
       }
       pc_update(w, c.j, -1, dn / c.f);
       pc_update(w, c.j, 1, up / (1.0 - c.f));
-      score = Pseudocosts::ps_part(std::max(dn, 1e-6) * std::max(up, 1e-6), ps_scale) /
-                  (ps_scale > 0.0 ? degen_factor : 1.0) + c.bonus;
+      score = Pseudocosts::ps_part(branch_score(dn, up, rule), ps_scale) / (ps_scale > 0.0 ? degen_factor : 1.0) +
+              c.bonus;
       if (score > best_score) {
         no_improve = 0;
       } else {
         ++no_improve;
       }
+      if (pl > 0) {
+        const double g = std::sqrt((dn + 1e-6) * (up + 1e-6)) - 1e-6;
+        w.la.add(g);
+        if (score > best_score) best_g = g;
+        if (no_improve >= pl_after && w.la.nonzero() >= pl_min && !w.la.worth_more(gap, best_g, pl - 1)) {
+          pl_stop = true;
+          ++sb_pl_stops_;
+        }
+      }
+    } else if (pl > 0 && score > best_score) {
+      best_g = std::sqrt((c.dn + 1e-6) * (c.up + 1e-6)) - 1e-6;
     }
     if (score > best_score) {
       best_score = score, best = c.j;
@@ -2704,8 +2638,30 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
   // Not in sub-MIP heuristics (MILP_ROOT_SB_SUBMIP=1: there too): their short searches pay the probes
   // at every sub-MIP root.
   static const bool in_sub = knob("MILP_ROOT_SB_SUBMIP", 0) > 0;
+  // MILP_ROOT_SB_ABORT = k (default 4, 0: off): a pass ends after k probes in a row that learn nothing (a
+  // child at the iteration limit, so no bound; no fixing). dano3_5: 23 of 30 children at the limit, 14k
+  // iterations; dano3_3: 3 passes, 26k iterations, 44 of 62 children at the limit.
+  static const int kAbort = static_cast<int>(knob("MILP_ROOT_SB_ABORT", 4));
   root_sb_var_ = -1;
   if (!on || w.fracs.empty() || (!opts_.sub_mip_heuristics && !in_sub)) return 0;
+  // A root whose restart is already due (reduced-cost fixing, the fixings of earlier passes): no probes
+  // here, the restarted root probes the reduced problem (MILP_RESTART_SKIP_SB, default 1, 0: off; read per
+  // call). The rule is the restart's own (root_restart_decision), with this root's cost so far; a refused
+  // restart (the last presolve removed too little, the budget) keeps the probes. Only on roots whose LP work
+  // so far is at least MILP_RESTART_SKIP_SB_WORK (2e7; work units in both modes): on quick roots the probes
+  // cost little and may settle the root (exp-1-500-5-5: 3 passes, 42 fixings, solved at the root in 0.6 s;
+  // skipped, 4 restarts and 2.2 s), while a restart costs a new root with its heuristics.
+  if (knob("MILP_RESTART_SKIP_SB", 1) > 0 && root_work(w.lp) >= knob("MILP_RESTART_SKIP_SB_WORK", 2e7) &&
+      restart_allowed() && !stop_.load()) {
+    Index ints = 0, newly_fixed = 0;
+    const RestartDecision d = restart_check(root_work(w.lp), root_elapsed(), &ints, &newly_fixed);
+    if (d.outcome == RestartDecision::Restart) {
+      root_sb_skipped_ = true;
+      log_.log(1, "Root strong branching skipped: %d of %d integer variables fixed at the root, restart due\n",
+               newly_fixed, ints);
+      return 0;
+    }
+  }
   if (root_sb_budget_ < 0) root_sb_budget_ = static_cast<long long>(kWork * static_cast<double>(root_sb_base_) + kOfs);
   if (root_sb_budget_ <= 0 || root_sb_passes_ >= kPasses) return 0;
   ++root_sb_passes_;
@@ -2714,22 +2670,51 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
   const long long limit = kIters > 0 ? kIters : std::clamp<long long>(root_sb_base_ / 10, 100, 500);
   w.probe_limit = limit;
   double est_sum = 0.0, ps_scale = 1.0;
-  w.pc->scores(w.fracs, std::numeric_limits<int>::max(), w.scored, &est_sum, &ps_scale);
+  // Restarted roots with carried pseudocosts (opt-in MILP_RESTART_SB_REL = k > 0): candidates with at
+  // least k carried observations in both directions are not probed again; they compete with their
+  // pseudocost score.
+  static const int kSkipRel = static_cast<int>(knob("MILP_RESTART_SB_REL", 0));
+  const int skip_rel = kSkipRel > 0 && !opts_.pc_init.empty() ? kSkipRel : std::numeric_limits<int>::max();
+  w.pc->scores(w.fracs, skip_rel, w.scored, &est_sum, &ps_scale);
   std::stable_sort(w.scored.begin(), w.scored.end(),
                    [](const Pseudocosts::Scored& a, const Pseudocosts::Scored& b) { return a.score > b.score; });
-  int probes = 0, fixed = 0, no_improve = 0, inexact = 0;
+  int probes = 0, fixed = 0, no_improve = 0, inexact = 0, idle_run = 0;
   double best_score = -1.0, maxmin = -kInf;
-  bool pruned = false;
+  bool pruned = false, aborted = false;
   root_seeds_.clear();
+  const double gap = cutoff(w) - obj;
+  const BranchScoreRule rule = w.pc->score_rule(gap);
+  // Probabilistic lookahead as in select_branch (MILP_PL), from MILP_PL_PHI x the root lookahead on.
+  static const int pl = static_cast<int>(knob("MILP_PL", 0));
+  static const double pl_phi = knob("MILP_PL_PHI", 0.6);
+  static const int pl_min = static_cast<int>(knob("MILP_PL_MIN", 3));
+  const int pl_after = static_cast<int>(std::ceil(pl_phi * kLook));
+  double best_g = 0.0;
+  w.la.clear();
   for (const auto& c : w.scored) {
     if (probes >= kCands || w.sb_iters - it_start >= root_sb_budget_ || (kLook > 0 && no_improve >= kLook)) break;
+    if (pl > 0 && no_improve >= pl_after && w.la.nonzero() >= pl_min && !w.la.worth_more(gap, best_g, pl - 1)) {
+      ++sb_pl_stops_;
+      break;
+    }
     if (stop_.load() || timer_.elapsed() >= params_.time_limit) break;
+    if (c.reliable) {
+      const double score = branch_score(c.dn, c.up, rule);
+      if (score > best_score) {
+        best_score = score, no_improve = 0;
+        root_sb_var_ = c.j;
+        root_sb_dn_ = root_sb_up_ = -kInf;
+      }
+      continue;
+    }
     const double v = w.xnode[c.j];
     bool ex_dn = false, ex_up = false;
     const double dn = probe(w, c.j, w.lp.col_lower(c.j), std::floor(v), obj, basis, &ex_dn);
     const double up = probe(w, c.j, std::ceil(v), w.lp.col_upper(c.j), obj, basis, &ex_up);
     ++probes;
     inexact += (is_finite(dn) && !ex_dn) + (is_finite(up) && !ex_up);
+    log_.log(3, "    root probe %d col %d: down %.6g%s, up %.6g%s\n", probes, c.j, dn, is_finite(dn) && !ex_dn ? " (limit)" : "",
+             up, is_finite(up) && !ex_up ? " (limit)" : "");
     if (!is_finite(dn) && !is_finite(up)) {
       pruned = true;
       break;
@@ -2740,6 +2725,7 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
       root_seeds_.push_back(c.j);
       ++fixed;
       no_improve = 0;
+      idle_run = 0;
       if (is_finite(dn)) pc_update(w, c.j, -1, dn / c.f);
       else pc_update(w, c.j, 1, up / (1.0 - c.f));
       continue;
@@ -2747,14 +2733,23 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
     pc_update(w, c.j, -1, dn / c.f);
     pc_update(w, c.j, 1, up / (1.0 - c.f));
     if (ex_dn && ex_up) maxmin = std::max(maxmin, std::min(dn, up));
-    const double score = std::max(dn, 1e-6) * std::max(up, 1e-6);
+    const double score = branch_score(dn, up, rule);
+    const double g = std::sqrt((dn + 1e-6) * (up + 1e-6)) - 1e-6;
+    w.la.add(g);
     if (score > best_score) {
       best_score = score, no_improve = 0;
+      best_g = g;
       root_sb_var_ = c.j;
       root_sb_dn_ = ex_dn ? dn : -kInf;
       root_sb_up_ = ex_up ? up : -kInf;
     } else {
       ++no_improve;
+    }
+    idle_run = ex_dn && ex_up ? 0 : idle_run + 1;
+    if (kAbort > 0 && idle_run >= kAbort) {
+      aborted = true;
+      ++root_sb_aborted_;
+      break;
     }
   }
   w.lp.restore_state(w.state);
@@ -2766,7 +2761,8 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
   root_sb_fixed_ += fixed;
   if (is_finite(maxmin)) root_sb_bound_ = std::max(root_sb_bound_, obj + maxmin);
   log_.log(2, "  root strong branching pass %d: %d probes, %lld LP iterations (limit %lld per child, %d children at the "
-           "limit), %d fixings, bound %.10g\n", root_sb_passes_, probes, used, limit, inexact, fixed, p_.display_sense * (std::max(obj, root_sb_bound_) + p_.offset));
+           "limit%s), %d fixings, bound %.10g\n", root_sb_passes_, probes, used, limit, inexact,
+           aborted ? ", pass aborted" : "", fixed, p_.display_sense * (std::max(obj, root_sb_bound_) + p_.offset));
   if (pruned) return 2;
   if (fixed > 0) {
     root_sb_var_ = -1;
@@ -2784,11 +2780,21 @@ void Search::run_dives(Worker& w) {
   constexpr DiveRule kRules[] = {DiveRule::Fractional, DiveRule::Coefficient, DiveRule::Guided,
                                  DiveRule::VectorLength};
   if (++w.nodes_since_dive < 100) return;
-  w.nodes_since_dive = 0;
   // Diving may use up to ~10% of the search's LP iterations (plus a base budget).
   const long long iters = w.det ? w.iters_base : lp_iters_.load();
   const long long dived = w.det ? w.dive_base + w.dive_iters : dive_iters_.load();
-  const long long budget = 1000 + iters / 10 - dived;
+  // MILP_DIVE_ADAPT (default 1; 0: the 10% above): the share follows this worker's dive successes, as SCIP's
+  // diving heuristics, 5% x (1 + 10 (new incumbents + 1) / (dives + 1)), at most MILP_DIVE_ADAPT_MAX
+  // (0.1): 10% for the first 10 dives, 5.5% after 100 without a new incumbent. And a dive starts only once
+  // the budget left covers a whole dive (tree_dive_budget; a dive cut off by the budget finds nothing:
+  // pg5_34 13 of 42, swath3 12 of 29 tree dives; one that never finishes is retried with a doubled budget
+  // each time); until then the next nodes ask again.
+  static const bool adapt = knob("MILP_DIVE_ADAPT", 1) > 0;
+  static const double adapt_max = knob("MILP_DIVE_ADAPT_MAX", 0.1);
+  bool wait = false;
+  const long long budget = tree_dive_budget(w.dives, iters, dived, adapt, adapt_max, &wait);
+  if (wait) return;
+  w.nodes_since_dive = 0;
   if (budget <= 0) return;
   const DiveRule rule = kRules[w.next_rule++ % 4];
   std::vector<double> inc;
@@ -2798,11 +2804,28 @@ void Search::run_dives(Worker& w) {
   lim.iteration_budget = budget;
   lim.time_limit = params_.time_limit - timer_.elapsed();
   long long its = 0;
-  if (dive(p_, w.lp, rule, rounding_, inc.empty() ? nullptr : &inc, lim, w.sol, &its, prop ? w.prop.get() : nullptr)) {
-    try_incumbent(w, w.sol, to_string(rule));
+  DiveOutcome out;
+  ++tdive_calls_;
+  const bool found = dive(p_, w.lp, rule, rounding_, inc.empty() ? nullptr : &inc, lim, w.sol, &its,
+                          prop ? w.prop.get() : nullptr, &out);
+  bool win = false;
+  if (found) {
+    ++tdive_found_;
+    win = try_incumbent(w, w.sol, to_string(rule));
+    tdive_wins_ += win;
+  }
+  tdive_limit_ += out.limit_hit;
+  w.dives.record(its, win, out.limit_hit);
+  static const bool debug = std::getenv("MILP_DIVE_DEBUG") != nullptr;
+  if (debug && opts_.sub_mip_heuristics) {
+    log_.log(0, "  tree %s: %s, %d steps, %lld of %lld iters, node LP mean %.0f, %.2fs\n", to_string(rule),
+             win ? "improved" : found ? "found" : out.limit_hit ? "limit" : "failed", out.steps, its, budget,
+             w.tree_lps > 0 ? static_cast<double>(w.tree_iters) / static_cast<double>(w.tree_lps) : 0.0,
+             timer_.elapsed());
   }
   lp_iters_ += its;
   dive_iters_ += its;
+  tdive_iters_ += its;
   w.dive_iters += its;
   w.lp.restore_state(w.state);
 }
@@ -2811,6 +2834,12 @@ void Search::root_heuristics(Worker& w) {
   // Time this search spent until the end of the root LP with cuts (after a restart: of the
   // restarted root only).
   const double t_root = timer_.elapsed() - t_start_;
+  // MILP_SUBHEUR_DEBUG: the root heuristic lines of the sub-MIPs too (their log is silent).
+  static const bool sub_debug = std::getenv("MILP_SUBHEUR_DEBUG") != nullptr;
+  const int hlog = sub_debug && !opts_.sub_mip_heuristics ? 0 : 3;
+  log_.log(hlog, "  root heuristics: root %lld LP iterations (initial LP %lld), %.2fs, %d rows, %d cols, cutoff %s, time"
+           " left %.2fs\n", w.lp.iterations(), root_lp0_iters_, t_root, p_.num_rows(), p_.num_cols(),
+           is_finite(cutoff(w)) ? "yes" : "no", params_.time_limit - timer_.elapsed());
   struct Result {
     std::vector<double> x;
     const char* source = nullptr;
@@ -2860,13 +2889,19 @@ void Search::root_heuristics(Worker& w) {
           ? static_cast<long long>(std::max(2e8, 3.0 * static_cast<double>(w.lp.iterations()) * dims) / std::max(1.0, dims))
           : -1;
 
-  // Phase 1: one dive per rule, each on its own copy of the root LP.
-  static const bool no_dive = std::getenv("MILP_NO_DIVE") != nullptr;
+  // Phase 1: one dive per rule, each on its own copy of the root LP. Restarted roots from the second
+  // restart on skip the dives, RENS and the root LNS unless the search before the restart improved the
+  // incumbent (SearchOptions::root_heuristics).
+  const bool no_dive = std::getenv("MILP_NO_DIVE") != nullptr || !opts_.root_heuristics;
   static const bool no_dive_prop = std::getenv("MILP_NO_DIVE_PROP") != nullptr;
   // Without an incumbent the dives run beside the sub-MIP heuristics of phase 2 (queued after them)
   // instead of before them.
   static const bool no_merge = std::getenv("MILP_NO_ROOT_MERGE") != nullptr;
-  const bool merge_phases = !no_merge && !is_finite(incumbent(w));
+  // MILP_ROOT_MERGE_INC (default 1; 0: off): also with an incumbent, so RENS gets the incumbent before the
+  // dives as its cutoff (h80x6320d: local MIP's early point; the dives then find the optimum and RENS, with
+  // that as its cutoff, cannot improve it and runs to its 10 s cap).
+  static const bool merge_inc = knob("MILP_ROOT_MERGE_INC", 1) > 0;
+  const bool merge_phases = !no_merge && (merge_inc || !is_finite(incumbent(w)));
   std::vector<Task> dive_tasks;
   if (!no_dive) {
     constexpr DiveRule kRules[] = {DiveRule::Fractional, DiveRule::Coefficient, DiveRule::Guided,
@@ -2874,11 +2909,28 @@ void Search::root_heuristics(Worker& w) {
     auto inc_p = std::make_shared<std::vector<double>>();
     incumbent_x(w, *inc_p);
     // Each dive may use about twice the root LP effort (the dives run in parallel).
-    const long long budget = std::max<long long>(5000, 2 * w.lp.iterations());
+    long long budget = std::max<long long>(5000, 2 * w.lp.iterations());
+    // MILP_ROOT_DIVE_REL = r (default 0: off): at most max(MILP_ROOT_DIVE_MIN (50000), r x the initial root
+    // LP's iterations), the cut loop's not counted. --deterministic has no time cap on the dives, and after a
+    // long cut loop the 2x above is large: puriri at 600 s 48 rounds, 182400 iterations, so 364800 per dive
+    // and ~490 s of dives (2 threads); opportunistic mode caps each at 5% of the time left (puriri ~11 s,
+    // ~15k iterations). The floor keeps the dives of the core set as they are (largest 51376 on qap10, initial
+    // LP 25398; successful dives use up to 39x a small initial LP: pg, h80x6320d).
+    static const double dive_rel = knob("MILP_ROOT_DIVE_REL", 0.0);
+    static const double dive_min = knob("MILP_ROOT_DIVE_MIN", 50000);
+    const long long lp0 = root_lp0_iters_ >= 0 ? root_lp0_iters_ : w.lp.iterations();
+    if (dive_rel > 0.0) {
+      budget = std::min(budget, static_cast<long long>(std::max({5000.0, dive_min, dive_rel * static_cast<double>(lp0)})));
+    }
     const double tl = capped(std::max(2.0, 0.05 * remaining()));
     const double cut = cutoff(w);
+    // MILP_DIVE_DEDUP (default 1; 0: off): no guided dive without an incumbent, where it is the fractional dive
+    // again (same LP, same choices: puriri deterministic 21691 iterations each; in the sub-MIPs, which
+    // start without an incumbent, every time).
+    static const bool dedup = knob("MILP_DIVE_DEDUP", 1) > 0;
     std::vector<Task> tasks;
     for (DiveRule rule : kRules) {
+      if (dedup && rule == DiveRule::Guided && inc_p->empty()) continue;
       tasks.push_back([&, rule, inc_p, budget, tl, cut](Result& r) {
         const std::vector<double>& inc = *inc_p;
         DualSimplex lp = w.lp;
@@ -2893,7 +2945,7 @@ void Search::root_heuristics(Worker& w) {
         const bool ok = dive(p_, lp, rule, rounding_, inc.empty() ? nullptr : &inc, lim, sol, &r.iters, prop.get());
         r.dive_iters = r.iters;
         if (ok) r.x = std::move(sol), r.source = to_string(rule);
-        log_.log(3, "  root %s: %s, %lld iters, %.2fs\n", to_string(rule), ok ? "found" : "failed", r.iters,
+        log_.log(hlog, "  root %s: %s, %lld iters, %.2fs\n", to_string(rule), ok ? "found" : "failed", r.iters,
                  timer_.elapsed() - t0);
       });
     }
@@ -2904,7 +2956,13 @@ void Search::root_heuristics(Worker& w) {
   // Phase 2: feasibility pump (+ RENS around its closest point) if nothing was
   // found yet, and RENS around the root LP point.
   std::vector<Task> tasks;
-  if (!is_finite(incumbent(w)) && std::getenv("MILP_NO_FP") == nullptr) {
+  // MILP_SUB_FP (default 0; 1: as before): no pump in an improvement sub-MIP (a search with a cutoff and no
+  // sub-MIPs of its own: RINS, mutation, crossover, RENS with an incumbent). The pump does not know the
+  // cutoff, and its points are rarely below it (opportunistic, 13 core instances: 6 new sub-MIP
+  // incumbents from 94 pumps, 26-47% of the sub-MIPs' LP iterations on pg5_34 / pg / nu25-pr12).
+  static const bool sub_fp = knob("MILP_SUB_FP", 0) > 0;
+  const bool improvement_sub = !opts_.sub_mip_heuristics && is_finite(external_cutoff_);
+  if (!is_finite(incumbent(w)) && std::getenv("MILP_NO_FP") == nullptr && (sub_fp || !improvement_sub)) {
     tasks.push_back([&](Result& r) {
       FeasPumpLimits lim;
       lim.time_limit = capped(std::min(10.0, 0.1 * remaining()));
@@ -2915,7 +2973,9 @@ void Search::root_heuristics(Worker& w) {
       std::vector<double> closest, sol;
       const double t0 = timer_.elapsed();
       const bool ok = feasibility_pump(p_, w.lp, lim, sol, &r.iters, &closest);
-      log_.log(3, "  root feasibility pump: %s, %lld iters, %.2fs\n", ok ? "found" : "failed", r.iters,
+      fp_iters_ += r.iters;
+      ++fp_runs_;
+      log_.log(hlog, "  root feasibility pump: %s, %lld iters, %.2fs\n", ok ? "found" : "failed", r.iters,
                timer_.elapsed() - t0);
       if (ok) {
         r.x = std::move(sol), r.source = "feasibility pump";
@@ -2940,7 +3000,7 @@ void Search::root_heuristics(Worker& w) {
     });
   }
   static const bool no_submip = std::getenv("MILP_NO_SUBMIP") != nullptr;
-  if (!no_submip && opts_.sub_mip_heuristics) {
+  if (!no_submip && opts_.sub_mip_heuristics && opts_.root_heuristics) {
     const double cut = incumbent(w) + p_.offset;
     tasks.push_back([&, cut, d = w.lp.reduced_costs()](Result& r) {  // only FP reads w.lp concurrently
       SubMipLimits lim;
@@ -2970,11 +3030,24 @@ void Search::root_heuristics(Worker& w) {
   static const bool lp_rens_on = std::getenv("MILP_NO_LP_RENS") == nullptr;
   if (lp_rens_on && !no_submip && opts_.sub_mip_heuristics && !is_finite(incumbent(w))) {
     const double cut = incumbent(w) + p_.offset;
+    // MILP_LP_RENS_REL = r (default 1; 0: the old caps): a budget relative to the root's own cost instead of
+    // the 2 s / 2x floors (the root waits for this task; enlight_hard: 1.06 s after a 0.3 s root where every
+    // other task failed in 0.01 s): at most max(0.5 s, r x the root's time), deterministic max(5e7, 3 r x
+    // the root LP work) work units (as det_sub_iters: 3x the LP work ~ the root's time); and no retry after
+    // a first sub-MIP proved infeasible (lp_rens stop_blind).
+    static const double lp_rens_rel = knob("MILP_LP_RENS_REL", 1.0);
     tasks.push_back([&, cut](Result& r) {
       SubMipLimits lim;
       lim.time_limit = capped(std::min(std::max(2.0, t_root), 0.1 * remaining()));
       lim.node_limit = 1000;
       lim.iteration_limit = det_sub_iters >= 0 ? 2 * det_sub_iters : -1;
+      if (lp_rens_rel > 0.0) {
+        lim.time_limit = std::min(lim.time_limit, capped(std::max(0.5, lp_rens_rel * t_root)));
+        if (lim.iteration_limit >= 0) {
+          const double work = std::max(5e7, 3.0 * lp_rens_rel * static_cast<double>(w.lp.iterations()) * dims);
+          lim.iteration_limit = std::min(lim.iteration_limit, static_cast<long long>(work / std::max(1.0, dims)));
+        }
+      }
       SubMipStats ss;
       lim.stats = &ss;
       LpRensStats ls;
@@ -2982,7 +3055,7 @@ void Search::root_heuristics(Worker& w) {
       const double t0 = timer_.elapsed();
       static const double target = knob("MILP_LP_RENS_TARGET", 0.7);
       static const int attempts = static_cast<int>(knob("MILP_LP_RENS_ATTEMPTS", 4));
-      const bool ok = lp_rens(p_, w.lp, cut, lim, sol, target, attempts, &ls);
+      const bool ok = lp_rens(p_, w.lp, cut, lim, sol, target, attempts, &ls, lp_rens_rel > 0.0);
       r.iters = ls.dive_iterations;
       if (ok) r.x = std::move(sol), r.source = "root LP sub-MIP";
       log_.log(3, "  root LP sub-MIP: %s, %d sub-MIPs, rate %.2f, %lld nodes, %lld iters, %.2fs\n", ok ? "found" : "failed",
@@ -2998,7 +3071,7 @@ void Search::root_heuristics(Worker& w) {
   static const bool no_root_lns = std::getenv("MILP_NO_ROOT_LNS") != nullptr;
   // Only after a root of some size (>= 2000 LP iterations incl. the cut loop): on quick roots
   // the sub-MIP setup costs more than the tree's LNS would.
-  if (no_submip || no_root_lns || !opts_.sub_mip_heuristics || w.lp.iterations() < 2000) return;
+  if (no_submip || no_root_lns || !opts_.sub_mip_heuristics || !opts_.root_heuristics || w.lp.iterations() < 2000) return;
   // After a restart only if the rounds before it improved the incumbent (neos-1445765: ~2.5 s
   // for a round that never succeeds).
   if (!opts_.root_lns) return;
@@ -3173,6 +3246,7 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     w.seeds.push_back(j);
   };
   for (auto it = w.segs.rbegin(); it != w.segs.rend(); ++it) (*it)->for_each(apply);
+  if (node.change.col >= 0) apply(node.change);  // the node's own branching bound comes last
   // Root strong branching fixings of the previous pass (already global bounds): propagate them.
   const bool root_prop = node.id == 0 && !root_seeds_.empty();
   if (root_prop) w.seeds.insert(w.seeds.end(), root_seeds_.begin(), root_seeds_.end());
@@ -3283,7 +3357,7 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     pool_pull(w);
     pool_prepare(w, node);
   } else if (node.basis && node.parent != w.last_node) {
-    node.basis->unpack(w.unpacked);
+    node.basis->unpack(w.unpacked, ref_basis_.get());
     // Cut rows added after the basis was stored enter with basic logicals.
     const size_t need = static_cast<size_t>(lp.num_cols() + lp.num_rows());
     if (w.unpacked.status.size() < need) w.unpacked.status.resize(need, VarStatus::Basic);
@@ -3318,7 +3392,9 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     std::fclose(f);
     log_.log(0, "  dumped numerically failing node LP (%s) to %s\n", where, dump_numeric);
   };
+  const long long ns0 = now_ns();
   LpStatus st = lp.solve(opt);
+  const long long lp_ns = now_ns() - ns0;
   if (debug_fail(node.id)) st = LpStatus::NumericalError;
   bool recovery_tried = false;
   dump_failed("node solve", st);
@@ -3394,6 +3470,8 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   if (pool_on && st == LpStatus::Optimal) {
     w.node_iters += lp.iterations() - it0;
     node_it_total_ += lp.iterations() - it0;
+    nodelp_ns_ += lp_ns;
+    lprows_sum_ += static_cast<long long>(lp.num_rows());
     if (plunge_start) popped_it_ += lp.iterations() - it0, ++popped_n_; else ++plunged_n_;
     {
       long long nnz = 0;
@@ -3410,7 +3488,9 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
       // Scanning the pool costs O(pool nonzeros): keep it below the node LP work.
       if (static_cast<double>(w.pool_scan) > kPoolWork * static_cast<double>(w.lp_work) + 1e6) break;
       const double before = lp.objective();
+      long long ns1 = now_ns();
       int added = pool_separate(w);
+      scan_ns_ += now_ns() - ns1;
       // Fresh separation (into the pool) down to depth kNodeCutDepth at every sep_interval-th node
       // of a worker; deeper only at every kDeepEvery-th of those (0: never). Deep separation at
       // every node helped kasai a lot but cost 15-90% on cflp/lotsize/gap (LP work of the cuts).
@@ -3420,12 +3500,19 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
       const bool fresh = round == 0 && (node.depth <= kNodeCutDepth || kDeepEvery > 0) &&
                          node_cuts_enabled_.load() && w.nodes % every == 0;
       const bool tmir = fresh && tmir_turn(w);
-      if (fresh) added += separate_node(w, tmir);
+      if (fresh) {
+        ns1 = now_ns();
+        added += separate_node(w, tmir);
+        sep_ns_ += now_ns() - ns1;
+        ++sep_calls_;
+      }
       if (added == 0) break;
       ncp_rounds_ += 1;
       const long long it2 = lp.iterations();
       if (dump_numeric) start_basis = lp.get_basis();
+      ns1 = now_ns();
       st = lp.solve(opt);
+      cutlp_ns_ += now_ns() - ns1;
       dump_failed("after pool cuts", st);
       lp_iters_ += lp.iterations() - it2;
       w.pool_iters += lp.iterations() - it2;
@@ -3445,7 +3532,10 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
         return 0;
       }
       if (st != LpStatus::Optimal) break;
-      if (lp.objective() - before <= 1e-6 * std::max(1.0, std::abs(before))) break;
+      if (lp.objective() - before <= 1e-6 * std::max(1.0, std::abs(before))) {
+        ++ncp_flat_rounds_;
+        break;
+      }
     }
     if (st == LpStatus::Optimal) pool_age(w);
     const int bad = w.det ? w.ev_bad : ev_bad_.load();
@@ -3517,6 +3607,11 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   if (node.branch_var >= 0 && node.branch_dist > 0) {
     const double pobj = is_finite(node.parent_obj) ? node.parent_obj : node.bound;
     pc_update(w, node.branch_var, node.branch_dir, std::max(obj - pobj, 0.0) / node.branch_dist);
+    if (node.anc_var >= 0 && node.anc_dist != 0.0f && Pseudocosts::aps_gamma() > 0.0) {
+      const double g = std::max(obj - pobj, 0.0) / std::abs(static_cast<double>(node.anc_dist));
+      w.pc->update_anc(node.anc_var, node.anc_dist > 0.0f ? 1 : -1, g);
+      if (w.det) w.anc_log.emplace_back(node.anc_var, node.anc_dist > 0.0f ? 1 : -1, g);
+    }
   }
   if (obj >= cutoff(w)) {
     if (node.id != 0) {
@@ -3600,6 +3695,8 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   }
   if (w.fracs.empty()) {
     w.sol.assign(x, x + p_.num_cols());
+    static const bool polish_lp = knob("MILP_POLISH_LP", 1) > 0;
+    if (polish_lp) polish_integral_lp(w, opt);
     std::vector<double> chk;
     double chk_obj;
     // Rejected only because it is not better than the incumbent (e.g. found
@@ -3657,6 +3754,14 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     }
     j = root_sb_var_;
     if (j >= 0) w.sb_var = j, w.sb_dn = root_sb_dn_, w.sb_up = root_sb_up_;
+    if (j < 0 && root_sb_skipped_) {
+      // The root restarts (its strong branching was skipped for that): no probes for a branching whose
+      // children are dropped; the most fractional candidate.
+      double best = -1.0;
+      for (const auto& [c, f] : w.fracs) {
+        if (std::min(f, 1.0 - f) > best) best = std::min(f, 1.0 - f), j = c;
+      }
+    }
   }
   if (j < 0) j = select_branch(w, obj, *basis);
   if (j < 0) {
@@ -3670,20 +3775,18 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   // Under memory pressure (memory_control) stop storing warm-start bases with queued nodes.
   const long long limit = mem_limit_bytes();
   const bool keep_basis = mem_state_.load() == 0;
-  std::shared_ptr<const PackedBasis> packed;
+  BasisRef packed;
   if (keep_basis) {
     if (use_pool_ && w.m_base >= 0) {
-      auto* pb = new PackedBasis(*basis, p_.num_cols() + w.m_base, ref_basis_);
       w.nb.clear();
       for (size_t k = 0; k < w.prow.size(); ++k) {
         const VarStatus vs = basis->status[static_cast<size_t>(p_.num_cols() + w.m_base) + k];
         if (vs != VarStatus::Basic) w.nb.emplace_back(w.prow[k], vs);
       }
       std::sort(w.nb.begin(), w.nb.end());
-      pb->set_pool(w.nb);
-      packed = store_basis(pb);
+      packed = store_basis(*basis, p_.num_cols() + w.m_base, &w.nb);
     } else {
-      packed = store_basis(new PackedBasis(*basis, -1, ref_basis_));
+      packed = store_basis(*basis, -1, nullptr);
     }
   }
   for (Node* c : {&down, &up}) {
@@ -3697,18 +3800,19 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     c->parent = node.id;
     c->id = next_node_id(w);
     c->branch_var = j;
+    if (node.branch_var >= 0 && node.branch_dist > 0.0) {
+      c->anc_var = node.branch_var;
+      c->anc_dist = static_cast<float>(node.branch_dir > 0 ? node.branch_dist : -node.branch_dist);
+    }
   }
-  // Bound paths: one segment with this node's reduced-cost fixings (shared by both children; not
-  // kept under memory pressure: the children's LPs only start weaker), then one per child with its
-  // branching bound (the down child also with the orbital fixings).
-  PathRef base = node.path;
-  if (!w.rcfix.empty() && keep_basis) {
-    w.seg.clear();
-    for (const BoundChange& rc : w.rcfix) PathSeg::encode(rc, p_.col_lb[rc.col], p_.col_ub[rc.col], w.seg);
-    base = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
-  }
+  // Bound paths: one segment with this node's own branching bound and its reduced-cost fixings
+  // (shared by both children; the fixings are not kept under memory pressure: the children's LPs
+  // only start weaker), then per child its branching bound, inline (the down child with orbital
+  // fixings in a segment of its own).
+  const PathRef base = branch_segment(w, node, keep_basis);
   w.seg.clear();
   PathSeg::encode({j, cur_lb, std::floor(v)}, p_.col_lb[j], p_.col_ub[j], w.seg);
+  const size_t own_bytes = w.seg.size();
   down.sym = up.sym = node.sym;
   if (node.sym) {
     // Orbital branching: the down child also bounds the orbit of j.
@@ -3739,7 +3843,7 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
       }
     }
   }
-  down.path = PathRef(PathSeg::make(base.get(), w.seg, &path_bytes_));
+  set_child_change(down, base, {j, cur_lb, std::floor(v)}, w.seg.size() > own_bytes ? &w.seg : nullptr);
   for (const auto& c : w.scored) {
     if (c.j != j) continue;
     const double base_est = obj + w.est_sum - std::min(c.dn, c.up);
@@ -3755,21 +3859,19 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   }
   down.branch_dir = -1;
   down.branch_dist = f;
-  w.seg.clear();
-  PathSeg::encode({j, std::ceil(v), cur_ub}, p_.col_lb[j], p_.col_ub[j], w.seg);
-  up.path = PathRef(PathSeg::make(base.get(), w.seg, &path_bytes_));
+  set_child_change(up, base, {j, std::ceil(v), cur_ub}, nullptr);
   up.branch_dir = 1;
   up.branch_dist = 1.0 - f;
   if (!debug_sol_.empty()) {
     // Debug: a node containing the optimum must have a child containing it.
     auto in_path = [&](const Node& c, const PathSeg* stop) {
       Index bad = -1;
-      for (const PathSeg* b = c.path.get(); b && b != stop; b = b->parent()) {
-        b->for_each([&](const BoundChange& bc) {
-          const double xd = debug_sol_[bc.col];
-          if (bad < 0 && (xd < bc.lb - 1e-6 || xd > bc.ub + 1e-6)) bad = bc.col;
-        });
-      }
+      auto check = [&](const BoundChange& bc) {
+        const double xd = debug_sol_[bc.col];
+        if (bad < 0 && (xd < bc.lb - 1e-6 || xd > bc.ub + 1e-6)) bad = bc.col;
+      };
+      for (const PathSeg* b = c.path.get(); b && b != stop; b = b->parent()) b->for_each(check);
+      if (c.change.col >= 0) check(c.change);
       return bad;
     };
     bool node_in = true;
@@ -3928,12 +4030,9 @@ int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
     c->branch_var = -1;  // no pseudocost update
     c->sym = nullptr;    // the trivial group is always valid
   }
-  w.seg.clear();
-  PathSeg::encode({j, w.lb[j], std::floor(v)}, p_.col_lb[j], p_.col_ub[j], w.seg);
-  down.path = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
-  w.seg.clear();
-  PathSeg::encode({j, std::ceil(v), w.ub[j]}, p_.col_lb[j], p_.col_ub[j], w.seg);
-  up.path = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
+  const PathRef base = branch_segment(w, node, false);
+  set_child_change(down, base, {j, w.lb[j], std::floor(v)}, nullptr);
+  set_child_change(up, base, {j, std::ceil(v), w.ub[j]}, nullptr);
   children[0] = std::move(down);
   children[1] = std::move(up);
   return 2;
@@ -3994,12 +4093,9 @@ int Search::implication_branch(Worker& w, Node& node, Node* children, Index z, d
     c->branch_var = -1;  // no pseudocost update
     c->sym = nullptr;
   }
-  w.seg.clear();
-  PathSeg::encode({z, w.lb[z], std::floor(w.lb[z])}, p_.col_lb[z], p_.col_ub[z], w.seg);
-  down.path = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
-  w.seg.clear();
-  PathSeg::encode({z, std::floor(w.lb[z]) + 1.0, w.ub[z]}, p_.col_lb[z], p_.col_ub[z], w.seg);
-  up.path = PathRef(PathSeg::make(node.path.get(), w.seg, &path_bytes_));
+  const PathRef base = branch_segment(w, node, false);
+  set_child_change(down, base, {z, w.lb[z], std::floor(w.lb[z])}, nullptr);
+  set_child_change(up, base, {z, std::floor(w.lb[z]) + 1.0, w.ub[z]}, nullptr);
   children[0] = std::move(down);
   children[1] = std::move(up);
   count_outcome(8, node.depth);
@@ -4269,12 +4365,21 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
     }
     if (pick == kLnsCrossover && ss.solves == 0) st.cx_parents = std::max(cx_parents - 1, 2);  // too few fixed
     if (std::getenv("MILP_LNS_DEBUG")) {
-      log_.log(1, "  LNS %s: %s, %d solves, fixed %d/%d, %lld iters, %s, boost %d, %.2fs\n", source,
-               win ? "improved" : "no", ss.solves, ss.fixed, ss.ints, ss.lp_iterations,
+      log_.log(1, "  LNS %s: %s, %d solves, fixed %d/%d, %lld iters (dives %lld / %d inc, %d pumps %lld / %d inc), %lld"
+               " nodes, %s, boost %d, %.2fs\n", source, win ? "improved" : "no", ss.solves, ss.fixed, ss.ints,
+               ss.lp_iterations, ss.dive_iterations, ss.dive_wins, ss.fp_runs, ss.fp_iterations, ss.fp_wins, ss.nodes,
                ss.exhausted ? "exhausted" : "limit", st.boost, timer_.elapsed());
     }
     st.iters += ss.lp_iterations;
     if (w && !w->det) sub_iters_ += ss.lp_iterations;
+    ++hsub_calls_;
+    hsub_wins_ += win;
+    hsub_iters_ += ss.lp_iterations;
+    hsub_dive_iters_ += ss.dive_iterations;
+    hsub_fp_iters_ += ss.fp_iterations;
+    hsub_dive_wins_ += ss.dive_wins;
+    hsub_fp_runs_ += ss.fp_runs;
+    hsub_fp_wins_ += ss.fp_wins;
     const bool cheap_fail = !win && ss.solves > 0 && ss.exhausted && ss.lp_iterations < 1000;
     if (no_retry || !cheap_fail || pick == kLnsRens || pick == kLnsLocalBranching ||
         (pick == kLnsCrossover && st.cx_parents == cx_parents) ||
@@ -4297,6 +4402,14 @@ int Search::process(Worker& w, Node& node, Node* children) {
     const bool cut = nc == 0 && last_outcome_ != 7;
     w.pc->update_cutoff(node.branch_var, node.branch_dir, cut);
     if (w.det) w.cut_log.emplace_back(node.branch_var, node.branch_dir, cut);
+  }
+  if ((Pseudocosts::sd_mode() & 4) && nc == 0 && node.branch_var >= 0 && !stop_ && last_outcome_ >= 0) {
+    // Leaf for the last-assignment asymmetry: infeasible (path, propagation, orbitope, LP) or integral
+    // vs pruned by bound (LP cutoff, cut rounds, late cutoff, after heuristics, strong branching).
+    const int k = last_outcome_;
+    const bool inf = k == 0 || k == 1 || k == 2 || k == 3 || k == 7;
+    w.pc->update_leaf(node.branch_dir, inf);
+    if (w.det) w.leaf_log.emplace_back(node.branch_dir, inf);
   }
   if (debug_sol_.empty()) return nc;
   // Debug: report when a node whose bounds contain the known optimum is closed.
@@ -4338,12 +4451,14 @@ void Search::worker_loop(int tid) {
       have = true;
     }
     if (cur.bound >= cutoff_.load()) {
+      tw_.close(cur.depth);
       have = false;
       pool_->done(tid);
       continue;
     }
     pool_->set_worker_bound(tid, cur.bound);
     const int nc = process(w, cur, children);
+    if (nc != 2) tw_.close(cur.depth);
     // Plunge control (as SCIP): keep diving into the preferred child only while
     // its bound stays within 25% of the gap above the global bound; otherwise
     // return to best-first selection. Always plunge a couple of levels.
@@ -4505,10 +4620,13 @@ void Search::run_deterministic() {
   // Memory projection of a round (between rounds, from deterministic data only: the tree memory and
   // the open nodes at the round start). The round may add about as many open nodes (grow) as fit
   // between the tree memory now and a target, at 1.5x the average bytes per open node (bases, bound
-  // paths, queue arrays: an array that doubles counts its capacity). The target is 78% of the limit
-  // outside drain mode (just past the drain threshold of 75%: drain mode starts about where it does
-  // in opportunistic mode, not after a round overshot it) and 90% in drain mode (the search stops
-  // at 95%). Where that binds, the growth goes to few workers, each with room for a plunge of
+  // paths, queue arrays; at least NodePool::kNodeBytes), for both measures memory_control uses: the
+  // bytes the open nodes use (target 78% of the limit outside drain mode, just past the drain
+  // threshold of 75%: drain mode starts about where it does in opportunistic mode, not after a
+  // round overshot it; 90% in drain mode) and the allocated bytes (88%, just past their drain
+  // threshold of 85%; 90% in drain mode: the search stops at 95%). A target on one measure alone
+  // could stall the tree just below the other measure's drain threshold. Where that binds, the
+  // growth goes to few workers, each with room for a plunge of
   // kMinGrow nodes (a thin share per worker cut every plunge short: the tree then grew by one node
   // per worker and round and never drained), and the others sit the round out. Sets grow (-1: not
   // binding) and returns the number of workers to hand nodes to.
@@ -4521,11 +4639,12 @@ void Search::run_deterministic() {
     if (limit <= 0) return V;
     long long open = static_cast<long long>(pool_->size());
     for (int t = 0; t < V; ++t) open += carried[t];
-    const long long tb = tree_bytes();
-    const long long per_node =
-        std::max<long long>(static_cast<long long>(sizeof(Node)) + 64, tb / std::max<long long>(1, open)) * 3 / 2;
-    const long long target = drain_round ? limit / 20 * 18 : limit / 100 * 78;
-    const long long g = std::max<long long>(0, (target - tb) / per_node);
+    auto room = [&](long long used, long long target) {
+      const long long per_node = std::max<long long>(NodePool::kNodeBytes, used / std::max<long long>(1, open)) * 3 / 2;
+      return std::max<long long>(0, (target - used) / per_node);
+    };
+    const long long g = std::min(room(tree_bytes(), drain_round ? limit / 20 * 18 : limit / 100 * 78),
+                                 room(tree_alloc_bytes(), drain_round ? limit / 20 * 18 : limit / 100 * 88));
     if (g >= static_cast<long long>(V) * kMaxNodes) return V;  // cannot bind this round
     ++capped_rounds;
     grow = g;
@@ -4568,11 +4687,16 @@ void Search::run_deterministic() {
       while (!local.empty() && !stop_.load() && more(static_cast<long long>(local.size()))) {
         Node cur = std::move(local.back());
         local.pop_back();
-        if (cur.bound >= w.cutoff) continue;
+        if (cur.bound >= w.cutoff) {
+          tw_.close(cur.depth);
+          continue;
+        }
         ++processed;
         if (process(w, cur, children) == 2) {
           local.push_back(std::move(children[1]));
           local.push_back(std::move(children[0]));
+        } else {
+          tw_.close(cur.depth);
         }
       }
     } else {
@@ -4594,6 +4718,7 @@ void Search::run_deterministic() {
           have = true;
         }
         if (cur.bound >= w.cutoff) {
+          tw_.close(cur.depth);
           have = false;
           continue;
         }
@@ -4603,6 +4728,7 @@ void Search::run_deterministic() {
           std::push_heap(local.begin(), local.end(), worse);
           cur = std::move(children[0]);
         } else {
+          tw_.close(cur.depth);
           have = false;
         }
       }
@@ -4615,6 +4741,7 @@ void Search::run_deterministic() {
     }
     for (Node& n : local) {
       if (n.bound < w.cutoff) w.pushed.push_back(std::move(n));
+      else tw_.close(n.depth);
     }
     local.clear();
     wnodes[t] += processed;
@@ -4712,7 +4839,10 @@ void Search::run_deterministic() {
       }
     }
     for (int t = 0; t < V; ++t) {
-      if (carried[t] && carry[t].bound >= cutoff_.load()) carried[t] = 0;  // pruned meanwhile
+      if (carried[t] && carry[t].bound >= cutoff_.load()) {
+        tw_.close(carry[t].depth);
+        carried[t] = 0;  // pruned meanwhile
+      }
       pool_->set_worker_bound(t, kInf);
       has[t] = !assigned[t].empty() || carried[t];
       assigned_count += has[t];
@@ -4777,6 +4907,10 @@ void Search::run_deterministic() {
       w.inf_log.clear();
       for (auto& [j, dir, c] : w.cut_log) pc_.update_cutoff(j, dir, c);
       w.cut_log.clear();
+      for (auto [dir, inf] : w.leaf_log) pc_.update_leaf(dir, inf);
+      w.leaf_log.clear();
+      for (auto& [j, dir, g] : w.anc_log) pc_.update_anc(j, dir, g);
+      w.anc_log.clear();
       for (const auto& cols : w.conf_bumps) pc_.bump_conflict(cols);
       w.conf_bumps.clear();
       for (Node& n : w.pushed) pool_->push(std::move(n));
@@ -4974,6 +5108,36 @@ void Search::fj_start() {
     bool polished = false;
     if (fpr_run_lp_free(publish, deadline, best)) best_obj = p_.objective(best) - p_.offset, polished = true;
     long long min_viol = -1;
+    // One FJ attempt (seed a: params_.seed + 1000003 a), keeping the best point and the closest
+    // infeasible one.
+    auto fj_attempt = [&](int a) {
+      lim.seed = params_.seed + 1000003u * static_cast<unsigned>(a);
+      lim.time_limit = deadline - timer_.elapsed();
+      if (lim.time_limit <= 0.0) return false;
+      FjStats st;
+      feasibility_jump(p_, lim, [&](const std::vector<double>& x, double obj) {
+        log_.log(3, "  FJ: solution %.10g at %.2fs\n", p_.display_sense * (obj + p_.offset), timer_.elapsed());
+        if (obj >= best_obj) return;
+        best = x;
+        best_obj = obj;
+        polished = false;
+        publish(x, "feasibility jump");
+      }, &st);
+      base += st.effort;
+      log_.log(2, "  FJ: %d solutions, %lld moves, min violated %lld, effort %lld, %.2fs\n", st.solutions, st.moves,
+               st.min_violated, st.effort, timer_.elapsed());
+      if (best.empty() && !st.closest.empty() && (min_viol < 0 || st.min_violated < min_viol)) {
+        min_viol = st.min_violated;
+        closest = std::move(st.closest);
+      }
+      return true;
+    };
+    // MILP_FJ_FIRST=1 (opt-in): the first FJ attempt runs before local MIP instead of after it. FJ
+    // stops after ~1 s without progress; local MIP without a solution restarts until its whole budget
+    // is used (5-10 s, longer on a loaded machine), and FJ, which finds neos-3381206-awhea's first
+    // points in < 1 s, then only starts after that (no incumbent during the root).
+    static const bool fj_first = knob("MILP_FJ_FIRST", 0) > 0;
+    if (fj_first && !fj_stop_.load()) fj_attempt(0);
     // Local-MIP style search first (heuristics/lmip.hpp): it finds feasible points where FJ does
     // not and improves them with lift / breakthrough moves. MILP_LMIP=<effort budget> (default 3e9,
     // ~5-10 s; 0 = off).
@@ -4996,35 +5160,18 @@ void Search::fj_start() {
       base += st.effort;
       log_.log(2, "  LMIP: %d solutions, %lld steps, %lld lifts, min violated %lld, effort %lld, %.2fs\n",
                st.solutions, st.steps, st.lift_moves, st.min_violated, st.effort, timer_.elapsed());
-      if (best.empty() && !st.closest.empty()) {
+      if (best.empty() && !st.closest.empty() && (min_viol < 0 || st.min_violated < min_viol)) {
         min_viol = st.min_violated;
         closest = std::move(st.closest);
       }
     }
     // Without a solution FJ stalls after ~1 s; fresh seeds often succeed where one failed. One
     // attempt also after a local-MIP solution (its objective row sometimes does better).
+    // (With MILP_FJ_FIRST the first attempt ran already: more only while nothing was found.)
     constexpr int kAttempts = 8;
-    for (int a = 0; a < kAttempts && (a == 0 || best.empty()) && !fj_stop_.load(); ++a) {
+    for (int a = fj_first ? 1 : 0; a < kAttempts && (a == 0 || best.empty()) && !fj_stop_.load(); ++a) {
       if (a > 0 && !fj_sync_ && is_finite(incumbent_.load())) break;  // another heuristic succeeded
-      lim.seed = params_.seed + 1000003u * static_cast<unsigned>(a);
-      lim.time_limit = deadline - timer_.elapsed();
-      if (lim.time_limit <= 0.0) break;
-      FjStats st;
-      feasibility_jump(p_, lim, [&](const std::vector<double>& x, double obj) {
-        log_.log(3, "  FJ: solution %.10g at %.2fs\n", p_.display_sense * (obj + p_.offset), timer_.elapsed());
-        if (obj >= best_obj) return;
-        best = x;
-        best_obj = obj;
-        polished = false;
-        publish(x, "feasibility jump");
-      }, &st);
-      base += st.effort;
-      log_.log(2, "  FJ: %d solutions, %lld moves, min violated %lld, effort %lld, %.2fs\n", st.solutions, st.moves,
-               st.min_violated, st.effort, timer_.elapsed());
-      if (best.empty() && !st.closest.empty() && (min_viol < 0 || st.min_violated < min_viol)) {
-        min_viol = st.min_violated;
-        closest = std::move(st.closest);
-      }
+      if (!fj_attempt(a)) break;
     }
     {
       // Later solutions are stamped with the total effort (>= the last checkpoint); the progress the
@@ -5291,6 +5438,24 @@ void Search::detect_symmetry_root() {
   }
 }
 
+bool Search::restart_allowed() const {
+  static const bool no_restart = std::getenv("MILP_NO_RESTART") != nullptr;
+  return opts_.allow_restart && !no_restart && root_rc_ready_;
+}
+
+RestartDecision Search::restart_check(double root_work, double root_time, Index* ints, Index* newly_fixed) {
+  *ints = 0, *newly_fixed = 0;
+  {
+    std::lock_guard<std::mutex> lk(gfix_mu_);
+    for (Index j = 0; j < p_.num_cols(); ++j) {
+      if (!p_.is_int[j]) continue;
+      ++*ints;
+      *newly_fixed += glb_[j] == gub_[j] && p_.col_lb[j] != p_.col_ub[j];
+    }
+  }
+  return root_restart_decision(opts_, params_.deterministic, *ints, *newly_fixed, root_work, root_time);
+}
+
 Index Search::count_global_fixed() {
   std::lock_guard<std::mutex> lk(gfix_mu_);
   Index fixed = 0;
@@ -5303,13 +5468,12 @@ Index Search::count_global_fixed() {
 
 void Search::check_tree_restart(bool det) {
   static const double frac = knob("MILP_TREE_RESTART", 0.1);  // <= 0: off
-  if (!opts_.allow_tree_restart || frac <= 0.0 || tree_restart_.load() || stop_.load()) return;
-  // Not once the tree has done most of the work: at least half of the root gap still open, and in
-  // opportunistic mode at most 60% of the time limit used.
-  const double inc = incumbent_.load(), lb = pool_->lower_bound();
-  if (!is_finite(inc) || !is_finite(lb) || !is_finite(root_bound_)) return;
-  if (inc - lb < 0.5 * (inc - root_bound_)) return;
-  if (!det && is_finite(params_.time_limit) && timer_.elapsed() > t_start_ + 0.6 * (params_.time_limit - t_start_)) return;
+  // Opt-in MILP_EST_RESTART=1 (A/B against off: 1.021x, 125 -> 121 of 136; mas74 restarted at 9-15k nodes
+  // and lost its solve in both seeds, eil33-2 restarted at tree weight 0.645, swath3 gained once).
+  static const bool est_on = knob("MILP_EST_RESTART", 0) > 0;
+  const bool fix_rule = opts_.allow_tree_restart && frac > 0.0;
+  const bool est_rule = est_on && opts_.allow_est_restart;
+  if (!(fix_rule || est_rule) || tree_restart_.load() || stop_.load()) return;
   Index ints = 0, free_ints = 0;
   for (Index j = 0; j < p_.num_cols(); ++j) {
     if (!p_.is_int[j]) continue;
@@ -5317,17 +5481,82 @@ void Search::check_tree_restart(bool det) {
     free_ints += p_.col_lb[j] != p_.col_ub[j];
   }
   const Index fixed = count_global_fixed();
+  // The estimator votes at every check (also without an incumbent: its gap ratio is then 1).
+  const int votes = est_rule ? est_restart_vote(fixed, free_ints) : 0;
+  // Not once the tree has done most of the work: at least half of the root gap still open, and in
+  // opportunistic mode at most 60% of the time limit used.
+  const double inc = incumbent_.load(), lb = pool_->lower_bound();
+  if (!is_finite(inc) || !is_finite(lb) || !is_finite(root_bound_)) return;
+  if (inc - lb < 0.5 * (inc - root_bound_)) return;
+  const double used = is_finite(params_.time_limit) ? (timer_.elapsed() - t_start_) / (params_.time_limit - t_start_) : 0.0;
+  if (!det && used > 0.6) return;
   // The later in the tree, the more fixings it takes (the restart throws the tree away: mkp_hard_1
   // restarted after 20-35k nodes with 21% fixed took 4 s instead of 3).
   static const double early = knob("MILP_TREE_RESTART_NODES", 5000);
   const double late = std::max(1.0, static_cast<double>(nodes_.load()) / early);
   const Index need = static_cast<Index>(
       late * static_cast<double>(std::max<Index>(20, static_cast<Index>(frac * static_cast<double>(free_ints - tree_fixed0_)))));
-  if (fixed - tree_fixed0_ < need) return;
-  log_.log(1, "Restart: %d of %d integer variables fixed globally in the tree (%d at its start), %lld nodes\n", fixed,
-           ints, tree_fixed0_, nodes_.load());
+  if (fix_rule && fixed - tree_fixed0_ >= need) {
+    log_.log(1, "Restart: %d of %d integer variables fixed globally in the tree (%d at its start), %lld nodes\n", fixed,
+             ints, tree_fixed0_, nodes_.load());
+    tree_restart_ = true;
+    stop_ = true;
+    return;
+  }
+  // Estimation-driven: enough consecutive huge votes (round(r (10 + leaves / 1000) 1.5^k), k the tree
+  // restarts so far), and a gain: at least max(10, MILP_EST_GATE (1%) of the free integer columns)
+  // fixed since the tree started (tr12-30 and gen-ip054 fix none: their trees are huge, but a restart
+  // would bring nothing). In opportunistic mode within the first half of the time limit. (Tests:
+  // MILP_EST_GATE < 0, no gain needed.)
+  if (votes == 0 || (!det && used > 0.5)) return;
+  static const double gate = knob("MILP_EST_GATE", 0.01);
+  const Index gain = fixed - tree_fixed0_;
+  if (gate >= 0.0 &&
+      gain < std::max<Index>(10, static_cast<Index>(gate * static_cast<double>(free_ints - tree_fixed0_)))) {
+    return;
+  }
+  const double share = free_ints > 0 ? static_cast<double>(fixed) / static_cast<double>(free_ints) : 0.0;
+  const double r = (1.0 - share) * (1.0 - share);
+  const double need_votes = std::round(r * (10.0 + static_cast<double>(tw_.leaves()) / 1000.0) *
+                                       std::pow(1.5, static_cast<double>(opts_.tree_restarts_done)));
+  if (static_cast<double>(votes) < need_votes) return;
+  log_.log(1, "Restart: tree estimated at %.3g nodes after %lld (weight %.3g, %d votes), %d of %d integer variables "
+           "fixed globally in the tree (%d at its start)\n", est_nhat_, nodes_.load(), tw_.weight(), votes, fixed,
+           ints, tree_fixed0_);
   tree_restart_ = true;
+  est_restart_ = true;
   stop_ = true;
+}
+
+int Search::est_restart_vote(Index fixed, Index free_ints) {
+  static const double factor = knob("MILP_EST_FACTOR", 20);
+  static const long long min_nodes = static_cast<long long>(knob("MILP_EST_MIN_NODES", 1000));
+  const long long n = nodes_.load();
+  if (n < min_nodes || (est_last_ >= 0 && n - est_last_ < 100)) return est_votes_;  // at most one vote per 100 nodes
+  est_last_ = n;
+  const double w = tw_.weight();
+  const double inc = incumbent_.load(), lb = pool_->lower_bound();
+  const double gap = is_finite(inc) && is_finite(lb) ? std::max(0.0, inc - lb) : kInf;
+  if (est_n_ref_ < 0) {
+    est_n_ref_ = n, est_w_ref_ = w, est_gap_ref_ = gap;
+    return est_votes_ = 0;
+  }
+  const double share = free_ints > 0 ? static_cast<double>(fixed) / static_cast<double>(free_ints) : 0.0;
+  const double r = std::max(1e-6, (1.0 - share) * (1.0 - share));
+  est_nhat_ = w > est_w_ref_ ? static_cast<double>(est_n_ref_) + static_cast<double>(n - est_n_ref_) * (1.0 - w) / (w - est_w_ref_)
+                             : kInf;
+  // Gap ratio 1 without a finite gap on either side (no incumbent yet).
+  const double ratio = is_finite(gap) && is_finite(est_gap_ref_) && gap > 0.0 ? est_gap_ref_ / gap : 1.0;
+  const bool huge = ratio < 1.0 + 0.05 / r && est_nhat_ >= factor * r * static_cast<double>(n);
+  static const bool trace = knob("MILP_EST_TRACE", 0) > 0;
+  if (trace) {
+    log_.log(0, "EST n %lld w %.4g ref %lld / %.4g nhat %.3g ratio %.4g r %.3g fixed %d -> %s, votes %d, leaves %lld\n", n, w,
+             est_n_ref_, est_w_ref_, est_nhat_, ratio, r, fixed, huge ? "huge" : "reset", huge ? est_votes_ + 1 : 0,
+             tw_.leaves());
+  }
+  if (huge) return ++est_votes_;
+  est_n_ref_ = n, est_w_ref_ = w, est_gap_ref_ = gap;
+  return est_votes_ = 0;
 }
 
 void Search::fill_restart(MipResult& res, bool with_pool) {
@@ -5376,6 +5605,7 @@ void Search::fill_restart(MipResult& res, bool with_pool) {
              static_cast<int>(root_lp_.num_rows() - p_.num_rows()));
   }
   res.debug_point = debug_sol_;
+  res.pc = pc_.snapshot();
 }
 
 MipResult Search::run() {
@@ -5394,10 +5624,23 @@ MipResult Search::run() {
     external_cutoff_ = std::min(external_cutoff_, p_.objective(opts_.start) - p_.offset);
     cutoff_.store(prune_threshold(external_cutoff_));
   }
+  if (!opts_.start.empty()) inc_start_ = p_.objective(opts_.start) - p_.offset;
+  if (!opts_.pc_init.empty()) {
+    // Restart: the pseudocosts of the search before, counts capped at the reliability threshold.
+    // MILP_RESTART_PC=1: the carried entries are history (counts capped at MILP_RESTART_PC_CAP, default
+    // the reliability threshold); 2: estimates only, until a column has observations of its own.
+    const int mode = static_cast<int>(knob("MILP_RESTART_PC", kRestartPcDefault));
+    const int cap = static_cast<int>(knob("MILP_RESTART_PC_CAP", knob("MILP_REL", 4)));
+    pc_.load(opts_.pc_init.capped(std::max(1, cap)), mode >= 2);
+    Index carried = 0;
+    for (size_t k = 0; k + 1 < opts_.pc_init.cnt.size(); k += 2) carried += opts_.pc_init.cnt[k] + opts_.pc_init.cnt[k + 1] > 0;
+    log_.log(2, "  restart: pseudocosts of %d columns carried\n", carried);
+  }
   root_lp_.load(p_.A, p_.cost, p_.col_lb, p_.col_ub, p_.row_lb, p_.row_ub);
   root_lp_.set_seed(params_.seed);
   cut_data_.build(p_);
-  pool_ = std::make_unique<NodePool>(threads_);
+  pool_ = std::make_unique<NodePool>(threads_, this, &path_bytes_);
+  pool_->set_tree_weight(&tw_);
   {
     Index ints = 0;
     for (char c : p_.is_int) ints += c != 0;
@@ -5449,15 +5692,19 @@ MipResult Search::run() {
     pool_->set_worker_bound(0, -kInf);
     if (use_barrier_root()) barrier_root(w.lp);
     else if (use_concurrent_root()) concurrent_root(w.lp);
-    if (p_.is_int.end() != std::find(p_.is_int.begin(), p_.is_int.end(), 1)) {
+    if (opts_.root_cuts && p_.is_int.end() != std::find(p_.is_int.begin(), p_.is_int.end(), 1)) {
       std::vector<Cut> dropped;
       static const bool no_lurk = std::getenv("MILP_NO_LURKRC") != nullptr;
-      std::function<void(const DualSimplex&)> on_lp;
-      if (!no_lurk && std::getenv("MILP_NO_RCFIX") == nullptr) {
+      const bool lurk = !no_lurk && std::getenv("MILP_NO_RCFIX") == nullptr;
+      if (lurk) {
         lurk_lo_.assign(p_.num_cols(), -kInf);
         lurk_up_.assign(p_.num_cols(), -kInf);
-        on_lp = [this](const DualSimplex& lp) { record_lurking(lp); };
       }
+      // The first call comes after the initial LP solve: its iterations (the root dive budget).
+      std::function<void(const DualSimplex&)> on_lp = [this, lurk](const DualSimplex& lp) {
+        if (root_lp0_iters_ < 0) root_lp0_iters_ = lp.iterations();
+        if (lurk) record_lurking(lp);
+      };
       // Reduced-cost fixing between cut rounds against the current cutoff (deterministic: the one at the start).
       const double cutoff0 = cutoff_.load();
       std::function<double()> cutoff_fn = [this, cutoff0, det = params_.deterministic]() {
@@ -5465,7 +5712,8 @@ MipResult Search::run() {
       };
       const CutLoopStats cs = root_cut_loop(p_, w.lp, params_, log_, timer_, incumbent_.load(), &cut_data_,
                                             !opts_.sub_mip_heuristics || opts_.no_zerohalf,
-                                            use_pool_ ? &dropped : nullptr, on_lp, opts_.stop_flag, cutoff_fn);
+                                            use_pool_ ? &dropped : nullptr, on_lp, opts_.stop_flag, cutoff_fn,
+                                            opts_.root_cut_rounds);
       if (!debug_sol_.empty()) {
         const SparseMatrix& RR = w.lp.row_matrix();
         for (Index i = p_.num_rows(); i < w.lp.num_rows(); ++i) {
@@ -5529,9 +5777,9 @@ MipResult Search::run() {
       nc = process(w, root, children);
     }
     if (root_sb_probes_ > 0) {
-      log_.log(1, "Root strong branching: %d passes, %lld probes, %lld LP iterations, %lld fixings, bound %.10g\n",
-               root_sb_passes_, root_sb_probes_, root_sb_iters_, root_sb_fixed_,
-               p_.display_sense * (std::max(root_bound_.load(), root_sb_bound_) + p_.offset));
+      log_.log(1, "Root strong branching: %d passes%s, %lld probes, %lld LP iterations, %lld fixings, bound %.10g\n",
+               root_sb_passes_, root_sb_aborted_ > 0 ? " (aborted: nothing learned)" : "", root_sb_probes_,
+               root_sb_iters_, root_sb_fixed_, p_.display_sense * (std::max(root_bound_.load(), root_sb_bound_) + p_.offset));
     }
     root_done_ = true;
     {
@@ -5565,30 +5813,41 @@ MipResult Search::run() {
       pp->A = R.transpose();
       prop_p_ = std::move(pp);
     }
-    res.root_lp_work = static_cast<double>(w.lp.iterations()) * (w.lp.num_rows() + w.lp.num_cols());
+    res.root_lp_work = root_work(w.lp);
+    res.root_time = root_elapsed();
     res.root_bound = root_bound_ + p_.offset;
     res.root_lns_ran = root_lns_ran_;
     res.root_lns_improved = root_lns_improved_;
     for (int k = 0; k < nc; ++k) pool_->push(std::move(children[k]));
   }
 
-  // Root restart: if root reduced-cost fixing fixed many integer variables,
-  // hand the tightened problem plus root cuts back for a fresh presolve.
-  static const bool no_restart = std::getenv("MILP_NO_RESTART") != nullptr;
-  if (opts_.allow_restart && !no_restart && !stop_.load() && pool_->size() > 0 && root_rc_ready_) {
+  // Root restart: if the root fixed many integer variables globally (reduced-cost fixing, root strong
+  // branching, conflicts), hand the tightened problem plus root cuts back for a fresh presolve.
+  // Rule and budget: SearchOptions (set by solver.cpp, see RestartRule there), root_restart_decision.
+  if (restart_allowed() && !stop_.load() && pool_->size() > 0) {
     Index ints = 0, newly_fixed = 0;
-    {
-      std::lock_guard<std::mutex> lk(gfix_mu_);
-      for (Index j = 0; j < p_.num_cols(); ++j) {
-        if (!p_.is_int[j]) continue;
-        ++ints;
-        newly_fixed += glb_[j] == gub_[j] && p_.col_lb[j] != p_.col_ub[j];
-      }
+    RestartDecision d = restart_check(res.root_lp_work, res.root_time, &ints, &newly_fixed);
+    if (root_sb_skipped_ && d.outcome != RestartDecision::Restart) {
+      // Decided before root strong branching, which was skipped for it (opportunistic mode: the root's
+      // time grew since; the fixings can only have grown).
+      log_.log(2, "  root restart: decided before root strong branching (now: %s)\n",
+               d.refused ? d.refused : "too few fixings");
+      d.outcome = RestartDecision::Restart;
     }
-    if (ints > 0 && newly_fixed >= std::max<Index>(20, ints / 10)) {
-      log_.log(1, "Restart: %d of %d integer variables fixed at the root\n", newly_fixed, ints);
-      fill_restart(res, false);
-      stop_ = true;  // skip the tree; the caller restarts
+    if (ints > 0 && d.outcome == RestartDecision::TooFew) {
+      log_.log(2, "  root restart: %d of %d integer variables fixed at the root (%d needed)\n", newly_fixed, ints, d.need);
+    }
+    if (d.outcome != RestartDecision::TooFew) {
+      // From the second root restart on: only after a restart whose presolve removed enough, and while
+      // the restarted roots stay within the budget (work in deterministic mode, time otherwise).
+      if (d.outcome == RestartDecision::Refused) {
+        log_.log(1, "Restart: %d of %d integer variables fixed at the root, no restart (%s)\n", newly_fixed, ints, d.refused);
+      } else {
+        log_.log(1, "Restart %d: %d of %d integer variables (%.1f%%) fixed at the root\n", opts_.restarts_done + 1,
+                 newly_fixed, ints, 100.0 * static_cast<double>(newly_fixed) / static_cast<double>(ints));
+        fill_restart(res, false);
+        stop_ = true;  // skip the tree; the caller restarts
+      }
     }
   }
   if (!stop_.load()) tree_fixed0_ = count_global_fixed();
@@ -5607,6 +5866,8 @@ MipResult Search::run() {
       for (auto& th : threads) th.join();
     }
     maybe_log(true);
+    log_.log(2, "Tree weight %.6g from %lld leaves (%.6g open), %lld nodes; last size estimate %.3g nodes\n",
+             tw_.weight(), tw_.leaves(), pool_->open_weight(), nodes_.load(), est_nhat_);
     if (conf_learned_.load() > 0) {
       log_.log(1, "Conflicts: %lld learned (%lld from propagation), %lld nodes pruned by conflict propagation\n",
                conf_learned_.load(), prop_conf_learned_.load(), conf_pruned_.load());
@@ -5633,12 +5894,34 @@ MipResult Search::run() {
                " at every %d-th node, %lld strips\n",
                ncp_.size(), ncp_purged_.load(), ncp_rounds_.load(), ncp_added_.load(), ncp_removed_.load(),
                pool_interval_.load(), ncp_stripped_.load());
+      if (log_.verbosity() >= 2) {
+        // Exact duplicates (same coefficients) among the live pool cuts.
+        std::lock_guard<std::mutex> lk(ncp_mu_);
+        std::unordered_set<uint64_t> seen;
+        size_t live = 0;
+        for (const auto& c : ncp_) {
+          if (!c) continue;
+          ++live;
+          uint64_t h = 1469598103934665603ULL;
+          for (size_t k = 0; k < c->idx.size(); ++k) {
+            uint64_t b;
+            std::memcpy(&b, &c->val[k], sizeof b);
+            h = (h ^ static_cast<uint64_t>(c->idx[k])) * 1099511628211ULL;
+            h = (h ^ b) * 1099511628211ULL;
+          }
+          seen.insert(h);
+        }
+        log_.log(2, "  cut pool: %zu live cuts, %zu distinct coefficient vectors (%lld duplicates mapped to live cuts);"
+                 " %lld node rounds without a bound change, %lld pool rows removed without ever binding\n", live,
+                 seen.size(), ncp_dups_, ncp_flat_rounds_.load(), ncp_never_bind_.load());
+      }
     }
     if (mem_peak_.load() > 0) {
       log_.log(mem_drains_.load() > 0 || mem_stripped_.load() > 0 ? 1 : 2,
-               "Memory: tree peak %.1f MB (of %.1f MB), %lld drain phases, %lld stored bases dropped\n",
-               mem_peak_.load() / 1048576.0, mem_limit_bytes() / 1048576.0, mem_drains_.load(),
-               mem_stripped_.load());
+               "Memory: tree peak %.1f MB (of %.1f MB), %lld drain phases (%lld left, bound +%.6g in them),"
+               " %lld stored bases dropped, %lld cut-off nodes purged, %lld queue compactions\n",
+               mem_peak_.load() / 1048576.0, mem_limit_bytes() / 1048576.0, mem_drains_.load(), mem_drain_exits_,
+               drain_rise_, mem_stripped_.load(), mem_purged_, pool_->compactions());
     }
     if (lp_work_total_.load() > 0) {
       log_.log(2, "  propagation work %.3g, %.1f%% of the node LP work\n", static_cast<double>(prop_work_total_.load()),
@@ -5651,6 +5934,19 @@ MipResult Search::run() {
     if (sb_probes_.load() > 0) {
       log_.log(1, "Strong branching: %lld probes, %lld LP iterations (%.1f%% of all)\n", sb_probes_.load(), sb_iters_.load(),
                100.0 * static_cast<double>(sb_iters_.load()) / static_cast<double>(std::max(1LL, lp_iters_.load())));
+      if (sb_pl_stops_.load() > 0) log_.log(1, "Strong branching: %lld early stops (probabilistic lookahead)\n", sb_pl_stops_.load());
+      if (sb_aps_nodes_.load() > 0) log_.log(1, "Branching: %lld nodes scored with ancestral pseudocosts\n", sb_aps_nodes_.load());
+    }
+    if (tdive_calls_.load() + hsub_calls_.load() > 0) {
+      // Sub-MIP iterations are not part of the search's LP iterations (shares relative to them).
+      const double all = static_cast<double>(std::max(1LL, lp_iters_.load()));
+      log_.log(1, "Heuristics: %lld tree dives (%lld found, %lld improved, %lld at their limit), %lld LP iterations"
+               " (%.1f%%); %lld sub-MIPs (%lld improved), %lld LP iterations (%.1f%%; dives %lld with %lld incumbents,"
+               " %lld pumps %lld with %lld)\n",
+               tdive_calls_.load(), tdive_found_.load(), tdive_wins_.load(), tdive_limit_.load(), tdive_iters_.load(),
+               100.0 * static_cast<double>(tdive_iters_.load()) / all, hsub_calls_.load(), hsub_wins_.load(),
+               hsub_iters_.load(), 100.0 * static_cast<double>(hsub_iters_.load()) / all, hsub_dive_iters_.load(),
+               hsub_dive_wins_.load(), hsub_fp_runs_.load(), hsub_fp_iters_.load(), hsub_fp_wins_.load());
     }
     if (sb_fixed_.load() + sb_degen_skips_.load() > 0) {
       log_.log(2, "  strong branching: %lld domain reductions (one child cut off), %lld of %lld branchings without "
@@ -5692,6 +5988,17 @@ MipResult Search::run() {
       }
       log_.log(2, "Node LP iterations: %lld first solves (%lld of them at %lld plunge starts, %lld in plunges), %lld cut rounds\n",
                node_it_total_.load(), popped_it_.load(), popped_n_.load(), plunged_n_.load(), pool_it_total_.load());
+      if (popped_n_.load() + plunged_n_.load() > 0) {
+        log_.log(2, "Node cut time: first LP solves %.2f s (%.0f rows on average), cut-round LP solves %.2f s, separation"
+                 " %.2f s in %lld calls (cover %.2f, c-MIR %.2f, clique %.2f, implied bound %.2f, tableau %.2f), pool scans"
+                 " %.2f s\n",
+                 1e-9 * static_cast<double>(nodelp_ns_.load()),
+                 static_cast<double>(lprows_sum_.load()) / static_cast<double>(popped_n_.load() + plunged_n_.load()),
+                 1e-9 * static_cast<double>(cutlp_ns_.load()), 1e-9 * static_cast<double>(sep_ns_.load()),
+                 sep_calls_.load(), 1e-9 * static_cast<double>(sep_k_ns_[0].load()), 1e-9 * static_cast<double>(sep_k_ns_[1].load()),
+                 1e-9 * static_cast<double>(sep_k_ns_[2].load()), 1e-9 * static_cast<double>(sep_k_ns_[3].load()),
+                 1e-9 * static_cast<double>(sep_k_ns_[4].load()), 1e-9 * static_cast<double>(scan_ns_.load()));
+      }
       if (tmir_rounds_.load() > 0) {
         log_.log(2, "Tableau cuts: %lld separation rounds, %lld successful\n", tmir_rounds_.load(), tmir_won_.load());
       }
@@ -5710,6 +6017,9 @@ MipResult Search::run() {
       log_.log(2, "Fixed-integer re-solves of near-feasible points: %lld, %lld feasible, %lld LP iterations\n",
                polish_tried_.load(), polish_ok_.load(), polish_iters_.load());
     }
+    if (lp_polished_.load() > 0) {
+      log_.log(2, "Integral node LP points re-solved warm with the integers fixed: %lld\n", lp_polished_.load());
+    }
     if (sym_branches_.load() > 0) {
       log_.log(1, "Symmetry: %lld orbital branchings fixed %lld variables, %lld stabilizers\n", sym_branches_.load(),
                sym_fixed_.load(), sym_stabs_.load());
@@ -5719,14 +6029,31 @@ MipResult Search::run() {
   if (tree_restart_.load()) {
     fill_restart(res, true);
     res.tree_restart = true;
+    res.est_restart = est_restart_;
   }
   fj_finish();
   report_progress();
   res.nodes = nodes_.load();
   res.lp_iterations = lp_iters_.load();
+  res.dive_iterations = dive_iters_.load();
+  res.fp_iterations = fp_iters_.load();
+  res.dive_wins = dive_wins_.load();
+  res.fp_runs = fp_runs_.load();
+  res.fp_wins = fp_wins_.load();
   res.mem_drains = mem_drains_.load();
+  res.mem_drain_exits = mem_drain_exits_;
+  res.mem_drain_rise = drain_rise_;
+  res.mem_purged = mem_purged_;
   const double inc = incumbent_.load();
   res.has_solution = is_finite(inc);
+  // MILP_RESTART_IMPROVED_GAP (default 1; 0: beyond 1e-9 relative): an improvement counts only beyond the
+  // gap tolerance (h80x6320d, deterministic: copies of the optimum 9e-6 apart counted, so a third restarted
+  // root ran RENS for 11 s with the optimum as its cutoff).
+  static const bool improved_gap = knob("MILP_RESTART_IMPROVED_GAP", 1) > 0;
+  const double start_mag = std::max(1.0, std::abs(inc_start_ + p_.offset));
+  const double improved_tol = improved_gap ? std::max(std::max(1e-9, params_.mip_rel_gap) * start_mag, params_.mip_abs_gap)
+                                           : 1e-9 * start_mag;
+  res.improved = is_finite(inc) && (!is_finite(inc_start_) || inc < inc_start_ - improved_tol);
   if (res.has_solution) {
     res.x = inc_x_;
     res.objective = inc + p_.offset;
@@ -5757,6 +6084,22 @@ MipResult Search::run() {
 }
 
 }  // namespace
+
+RestartDecision root_restart_decision(const SearchOptions& o, bool deterministic, Index ints, Index newly_fixed,
+                                      double root_work, double root_time) {
+  RestartDecision d;
+  d.need = std::max<Index>(o.restart_min_cols, static_cast<Index>(std::floor(o.restart_frac * static_cast<double>(ints))));
+  if (ints <= 0 || newly_fixed < d.need) return d;
+  // From the second root restart on: only after a restart whose presolve removed enough, and while the
+  // restarted roots stay within the budget (this root's cost again on top of it so far).
+  if (o.restarts_done >= 1) {
+    if (o.last_restart_removed < o.restart_min_removed) d.refused = "the last restart removed too little";
+    else if (deterministic ? 2.0 * root_work > o.restart_work_left : 2.0 * root_time > o.restart_time_left)
+      d.refused = "restart budget used";
+  }
+  d.outcome = d.refused ? RestartDecision::Refused : RestartDecision::Restart;
+  return d;
+}
 
 MipResult branch_and_bound(const MipProblem& p, const SolverParams& params, const Logger& log, const Timer& timer,
                            const SearchOptions& opts) {

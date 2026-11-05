@@ -1,5 +1,6 @@
 #include "milp/heuristics/diving.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "milp/core/interrupt.hpp"
@@ -76,9 +77,36 @@ Choice choose(const MipProblem& p, const DualSimplex& lp, const double* x, DiveR
 
 }  // namespace
 
+void TreeDiveHistory::record(long long iters, bool win, bool limit_hit) {
+  ++calls;
+  wins += win;
+  if (limit_hit) {
+    need = std::max(need, 2 * iters);
+  } else {
+    ++done;
+    done_iters += iters;
+    need = 0;
+  }
+}
+
+long long tree_dive_budget(const TreeDiveHistory& h, long long iters, long long dived, bool adapt, double adapt_max,
+                           bool* wait) {
+  if (wait) *wait = false;
+  double share = 0.1;
+  if (adapt) {
+    share = std::min(adapt_max, 0.05 * (1.0 + 10.0 * static_cast<double>(h.wins + 1) / static_cast<double>(h.calls + 1)));
+  }
+  const long long budget = 1000 + static_cast<long long>(share * static_cast<double>(iters)) - dived;
+  if (budget <= 0 || !adapt) return budget;
+  const long long whole = std::max(h.need, h.done > 0 ? h.done_iters / h.done : 0);
+  if (budget >= whole) return budget;
+  if (wait) *wait = true;
+  return 0;
+}
+
 bool dive(const MipProblem& p, DualSimplex& lp, DiveRule rule, const SimpleRounding& rounding,
           const std::vector<double>* incumbent, const DiveLimits& limits, std::vector<double>& sol,
-          long long* iterations, DomainPropagator* prop) {
+          long long* iterations, DomainPropagator* prop, DiveOutcome* outcome) {
   Timer timer;
   const long long it0 = lp.iterations();
   const Index n = p.num_cols();
@@ -108,6 +136,7 @@ bool dive(const MipProblem& p, DualSimplex& lp, DiveRule rule, const SimpleRound
     }
   };
   bool found = false;
+  DiveOutcome out;
   for (;;) {
     const double* x = lp.x();
     if (rounding.run(x, sol)) {
@@ -121,7 +150,10 @@ bool dive(const MipProblem& p, DualSimplex& lp, DiveRule rule, const SimpleRound
       break;
     }
     const long long used = lp.iterations() - it0;
-    if (used >= limits.iteration_budget || timer.elapsed() > limits.time_limit || interrupted()) break;
+    if (used >= limits.iteration_budget || timer.elapsed() > limits.time_limit || interrupted()) {
+      out.limit_hit = true;
+      break;
+    }
 
     const double v = x[c.j];
     const double lo = lp.col_lower(c.j), hi = lp.col_upper(c.j);
@@ -151,14 +183,19 @@ bool dive(const MipProblem& p, DualSimplex& lp, DiveRule rule, const SimpleRound
         }
       }
       const LpStatus st = lp.solve(opt);
+      ++out.steps;
       ok = st == LpStatus::Optimal && lp.objective() < limits.cutoff;
       if (!ok) undo(mark);
-      if (!ok && st != LpStatus::Infeasible && st != LpStatus::CutoffReached) break;  // limits
+      if (!ok && st != LpStatus::Infeasible && st != LpStatus::CutoffReached) {  // limits
+        out.limit_hit = st != LpStatus::Optimal;
+        break;
+      }
     }
     if (!ok) break;
   }
   undo(0);
   if (iterations) *iterations = lp.iterations() - it0;
+  if (outcome) *outcome = out;
   return found;
 }
 

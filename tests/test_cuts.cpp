@@ -1192,6 +1192,39 @@ TEST(cuts_degenerate_bin_packing) {
   CHECK(invalid == 0);
 }
 
+TEST(cuts_row_aging_keeps_validity) {
+  // CutLoopOptions::cut_age: slack cut rows stay for a few re-solves; at the end every cut row
+  // with a basic logical leaves. Random pure integer models: all cuts valid, the bound at most the
+  // optimum, and only rows with nonbasic logicals left.
+  std::mt19937 rng(43);
+  int checked = 0;
+  for (int t = 0; t < iters(60); ++t) {
+    Model m = random_mip(rng, false);
+    MipProblem p = make_problem(m);
+    const double opt = enumerate_optimum(p);
+    if (opt == kInf) continue;
+    DualSimplex lp;
+    lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
+    Logger log(0);
+    Timer timer;
+    std::vector<Cut> cuts;
+    CutLoopOptions o;
+    o.cut_age = 3;
+    CutLoopStats st = cut_loop(p, lp, o, log, timer, kInf, &cuts);
+    if (st.rounds == 0) continue;
+    CHECK(st.bound_after <= opt + 1e-6 * std::max(1.0, std::abs(opt)));
+    for (Index i = p.num_rows(); i < lp.num_rows(); ++i) CHECK(!lp.row_is_basic(i));
+    int invalid = 0;
+    enumerate_ints(p, [&](const std::vector<double>& x) {
+      if (p.max_violation(x) > 1e-9) return;
+      for (const Cut& c : cuts) invalid += c.activity(x.data()) > c.rhs + 1e-9;
+    });
+    CHECK(invalid == 0);
+    ++checked;
+  }
+  CHECK(checked > 5);
+}
+
 TEST(cuts_end_to_end_matches_enumeration) {
   std::mt19937 rng(37);
   SolverParams params;

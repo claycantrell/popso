@@ -272,3 +272,55 @@ TEST(lu_ft_update_flags_large_row_eta) {
     CHECK_EQ(lu.wants_refactor(), K > 100.0);
   }
 }
+
+TEST(lu_ftran_without_spike_keeps_the_update) {
+  // The primal simplex keeping DSE weights solves B tau = rho between the entering column's ftran and
+  // the update: with spike = false that solve must leave the column's Forrest-Tomlin spike in place.
+  std::mt19937 rng(23);
+  for (int trial = 0; trial < 60; ++trial) {
+    const Index m = 30 + static_cast<Index>(rng() % 300);
+    std::vector<Col> cols = random_basis(rng, m, trial % 3 == 0);
+    LuFactor lu;
+    lu.hyper_mode = trial % 2 ? 2 : 1;
+    factorize(lu, cols);
+    for (int u = 0; u < 20; ++u) {
+      Col a;
+      for (int k = 0; k < 1 + static_cast<int>(rng() % 4); ++k)
+        a.push_back({static_cast<Index>(rng() % m), static_cast<double>(static_cast<int>(rng() % 7) - 3)});
+      HVector h;
+      h.resize(m);
+      for (auto [r, v] : a) {
+        if (h.dense[r] == 0.0) h.nz[h.count++] = r;
+        h.dense[r] += v;
+      }
+      lu.ftran(h);
+      HVector other = sparse_rhs(rng, m, 1 + static_cast<int>(rng() % 5));
+      lu.ftran(other, -1.0, false);
+      const Index p = static_cast<Index>(rng() % m);
+      double amax = 0.0;
+      for (Index i = 0; i < m; ++i) amax = std::max(amax, std::abs(h.dense[i]));
+      if (std::abs(h.dense[p]) < std::max(0.1 * amax, 1e-3)) continue;
+      lu.update(p, h);
+      Col ac;
+      for (Index r = 0; r < m; ++r) {
+        double v = 0.0;
+        for (auto [rr, vv] : a)
+          if (rr == r) v += vv;
+        if (v != 0.0) ac.push_back({r, v});
+      }
+      cols[p] = ac;
+      if (lu.wants_refactor()) break;
+    }
+    HVector b = sparse_rhs(rng, m, 3), x = b;
+    lu.ftran(x);
+    std::vector<double> bx(m, 0.0);
+    for (Index c = 0; c < m; ++c)
+      for (auto [r, v] : cols[c]) bx[r] += v * x.dense[c];
+    double res = 0.0, scale = 1.0;
+    for (Index i = 0; i < m; ++i) {
+      res = std::max(res, std::abs(bx[i] - b.dense[i]));
+      scale = std::max(scale, std::abs(b.dense[i]));
+    }
+    CHECK(res <= 1e-7 * scale);
+  }
+}

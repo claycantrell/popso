@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <numeric>
 
+#include "milp/core/interrupt.hpp"
 #include "milp/search/propagation.hpp"
 
 namespace milp {
@@ -124,7 +125,7 @@ void CutData::build(const MipProblem& p) {
   }
 }
 
-void CutData::probe(const MipProblem& p, const double* x, long long work_limit) {
+void CutData::probe(const MipProblem& p, const double* x, long long work_limit, const std::function<bool()>& stop) {
   probed = true;
   const Index n = p.num_cols();
   auto binary = [&](Index j) { return p.is_int[j] && p.col_lb[j] == 0.0 && p.col_ub[j] == 1.0; };
@@ -150,8 +151,11 @@ void CutData::probe(const MipProblem& p, const double* x, long long work_limit) 
   std::vector<double> l0(n), u0(n), l1(n), u1(n);  // bounds after y = 0 / 1, valid where st == y
   std::vector<Index> st0(n, -1), st1(n, -1), t0, t1, seed(1);
   std::vector<uint64_t> pairs;
+  size_t probes = 0;
   for (Index y : order) {
     if (budget <= 0 || pairs.size() >= kMaxPairs) break;
+    // The results so far are valid; an interrupted solve stops soon (cflp_hard_1: ~1.4 s of probing).
+    if ((++probes & 63) == 0 && (interrupted() || (stop && stop()))) break;
     bool ok[2];
     for (int v = 0; v < 2; ++v) {
       std::vector<Index>& t = v ? t1 : t0;
@@ -378,8 +382,15 @@ std::vector<Cut> CutPool::select() {
   std::vector<std::vector<Occ>> col_occ(cuts_.empty() ? 0 : p_.num_cols());
   std::vector<double> dots;
   std::vector<int> touched;
+  sstats_ = SelectStats{};
+  sstats_.candidates = static_cast<int>(cuts_.size());
+  int seen = 0;
   for (Cut& c : cuts_) {
-    if (static_cast<int>(sel.size()) >= opt_.max_cuts) break;
+    if (static_cast<int>(sel.size()) >= opt_.max_cuts) {
+      sstats_.over_limit = sstats_.candidates - seen;
+      break;
+    }
+    ++seen;
     const double nc = norm2(c);
     for (size_t k = 0; k < c.idx.size(); ++k) {
       const double v = c.val[k];
@@ -397,7 +408,10 @@ std::vector<Cut> CutPool::select() {
       dots[s] = 0.0;
     }
     touched.clear();
-    if (!ok) continue;
+    if (!ok) {
+      ++sstats_.parallel;
+      continue;
+    }
     const int id = static_cast<int>(sel.size());
     for (size_t k = 0; k < c.idx.size(); ++k) col_occ[c.idx[k]].push_back({id, c.val[k]});
     sel.push_back(std::move(c));

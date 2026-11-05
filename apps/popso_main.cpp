@@ -215,6 +215,8 @@ int main(int argc, char** argv) {
     else std::printf("Gap: inf\n");
     std::printf("Nodes: %lld\n", result.stats.nodes);
     std::printf("LP iterations: %lld\n", result.stats.lp_iterations);
+    if (result.stats.restarts + result.stats.tree_restarts > 0)
+      std::printf("Restarts: %d root, %d in-tree\n", result.stats.restarts, result.stats.tree_restarts);
     std::printf("Time: %.3fs (total %.3fs)\n", result.stats.time, timer.elapsed());
   }
 

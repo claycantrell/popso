@@ -15,9 +15,31 @@ constexpr double kBigBound = 1e12;  // larger bounds are treated as infinite
 
 class Prober {
  public:
-  Prober(const MipProblem& p, long long work_limit)
+  Prober(const MipProblem& p, long long work_limit, const ProbingOptions& opt)
       : p_(p), rows_(p.A.transpose()), limit_(work_limit), lb_(p.col_lb), ub_(p.col_ub) {
     queued_.assign(p.num_rows(), 0);
+    lift_ = opt.lift;
+    max_conf_ = opt.max_conflicts;
+    if (max_conf_ > 0) {
+      conf_.resize(2 * static_cast<size_t>(p.num_cols()));
+      last_lit_.assign(p.num_cols(), -1);
+      no_imp_.assign(p.num_cols(), -1);
+      if (opt.seeds) {
+        for (const auto& [a, b] : *opt.seeds) {
+          if (num_conf_ >= max_conf_) break;
+          if (is_binary(a >> 1) && is_binary(b >> 1) && (a >> 1) != (b >> 1)) add_conflict(a, b);
+        }
+      }
+    }
+    if (lift_) {
+      touch_.assign(p.num_rows(), -1);
+      best_.assign(p.num_rows(), -1);
+      redundant_.assign(p.num_rows(), 0);
+      rowmax_.assign(p.num_rows(), 0.0);
+      for (Index i = 0; i < p.num_rows(); ++i) {
+        for (Index k = rows_.begin(i); k < rows_.end(i); ++k) rowmax_[i] = std::max(rowmax_[i], std::abs(rows_.value[k]));
+      }
+    }
     stamp_.assign(p.num_cols(), -1);
     first_.assign(p.num_cols(), -1);
     lb0_.resize(p.num_cols());
@@ -74,16 +96,51 @@ class Prober {
       const long long work0 = work_;
       const size_t found = res.equiv.size();
       // x = 0: remember the resulting bounds of every changed column.
+      start_touch();
       set_bounds(x, 0.0, 0.0);
       const bool f0 = propagate();
+      collect_ = false;
+      lift0_.clear();
+      if (f0 && lift_) find_lifts(x, false, lift0_);
+      fix0_.clear();
       for (const Change& c : trail_) {
+        if (stamp_[c.j] != x && c.j != x && max_conf_ > 0 && fixed_binary(c.j)) fix0_.push_back(c.j);
         stamp_[c.j] = x;
         lb0_[c.j] = lb_[c.j];
         ub0_[c.j] = ub_[c.j];
       }
       undo();
+      start_touch();
       set_bounds(x, 1.0, 1.0);
       const bool f1 = propagate();
+      collect_ = false;
+      if (f0 && f1 && lift_) {
+        // Liftings only while x is free (a fixing makes them moot); the best one per row is kept.
+        lift1_.clear();
+        find_lifts(x, true, lift1_);
+        for (const auto* v : {&lift0_, &lift1_}) {
+          for (const ProbingResult::Lift& l : *v) keep_lift(l, res);
+        }
+      }
+      if (f0 && f1 && num_conf_ < max_conf_) {
+        // x = v fixed the binary y to w: literals (x = v) and (y = 1 - w) conflict. A binary fixed to the same value
+        // by both settings is fixed globally below instead.
+        for (Index j : fix0_) {
+          if (num_conf_ >= max_conf_) break;
+          const Index w = lb0_[j] > 0.5 ? 1 : 0;
+          if (lb_[j] == ub_[j] && lb_[j] == lb0_[j]) continue;
+          add_conflict(2 * x, 2 * j + 1 - w, &res);
+        }
+        for (const Change& c : trail_) {
+          const Index j = c.j;
+          if (j == x || num_conf_ >= max_conf_ || !fixed_binary(j)) continue;
+          const Index w = lb_[j] > 0.5 ? 1 : 0;
+          if (stamp_[j] == x && lb0_[j] == ub0_[j] && lb0_[j] == lb_[j]) continue;
+          if (last_lit_[j] == 2 * x + 1) continue;  // the trail may hold j several times
+          last_lit_[j] = 2 * x + 1;
+          add_conflict(2 * x + 1, 2 * j + 1 - w, &res);
+        }
+      }
       if (!f0 && !f1) {
         res.infeasible = true;
         break;
@@ -131,6 +188,70 @@ class Prober {
   }
 
  private:
+  // Liftings of the rows touched by the current probe x = v (bounds now those implied by it), see
+  // probing.hpp. One-sided rows only (an equation or a ranged row shares a_x between both sides), not
+  // redundant under the bounds before the probe; delta > 1e-6 max(1, |b|) and > 1e-3 max |a|.
+  void find_lifts(Index x, bool one, std::vector<ProbingResult::Lift>& out) {
+    for (Index i : touched_) {
+      const bool up = std::isfinite(p_.row_ub[i]);
+      if (up == std::isfinite(p_.row_lb[i]) || redundant_[i]) continue;
+      if (up ? nmax_[i] > 0 : nmin_[i] > 0) continue;  // unbounded activity
+      const double s = up ? 1.0 : -1.0;
+      const double b = up ? p_.row_ub[i] : -p_.row_lb[i];
+      const double need = std::max(1e-6 * std::max(1.0, std::abs(b)), 1e-3 * rowmax_[i]);
+      // Cheap test on the incremental activities (they may drift a little; the exact sum decides).
+      if (!(b - (up ? amax_[i] : -amin_[i]) > 0.5 * need)) continue;
+      const Index rb = rows_.begin(i), re = rows_.end(i);
+      work_ += re - rb;
+      double act = 0.0, act0 = 0.0, mag = std::abs(b);
+      bool ok = true, has_x = false, exact = mag < 1e9 && b == std::round(b);
+      for (Index k = rb; k < re && ok; ++k) {
+        const Index j = rows_.index[k];
+        const double a = s * rows_.value[k];
+        has_x = has_x || j == x;
+        const double h = a > 0 ? ub_[j] : lb_[j], h0 = a > 0 ? root_ub(j) : root_lb(j);
+        ok = std::abs(h) < kBigBound && std::abs(h0) < kBigBound;
+        act += a * h;
+        act0 += a * h0;
+        mag += std::abs(a * h0);
+        exact = exact && a == std::round(a) && h == std::round(h) && h0 == std::round(h0) && std::abs(a * h0) < 1e9;
+      }
+      if (!ok) continue;
+      if (act0 <= b + 1e-9 * (1.0 + std::abs(b))) {
+        redundant_[i] = 1;  // also later in this pass: the global bounds only tighten (presolve removes it)
+        continue;
+      }
+      // Margin against rounding errors in the activity (none when all data are moderate integers).
+      const double safety = exact ? 0.0 : 1e-10 * mag;
+      double delta = b - act - safety;
+      if (!(delta > need)) continue;
+      // A margin-sized distance to an integer is rounding error (continuous bounds relaxed by the propagation, the
+      // safety margin): integral data stay integral (the error, <= 1e-8 |delta|, is far below the tolerances).
+      const double r = std::round(delta);
+      if (std::abs(delta - r) <= 1e-8 * std::max(1.0, std::abs(delta))) delta = r;
+      out.push_back({i, x, delta, up, one, !has_x, delta / rowmax_[i]});
+    }
+  }
+
+  // Keeps l if it is the best lifting of its row so far (largest delta / max |a|; on ties no new entry).
+  void keep_lift(const ProbingResult::Lift& l, ProbingResult& res) {
+    Index& b = best_[l.row];
+    if (b < 0) {
+      b = static_cast<Index>(res.lifts.size());
+      res.lifts.push_back(l);
+      return;
+    }
+    const ProbingResult::Lift& o = res.lifts[b];
+    if (l.score > o.score * (1.0 + 1e-9) || (l.score >= o.score * (1.0 - 1e-9) && o.fill && !l.fill)) res.lifts[b] = l;
+  }
+
+  void start_touch() {
+    touched_.clear();
+    collect_ = lift_;
+    ++touch_id_;
+    ++phase_;
+  }
+
   struct Change {
     Index j;
     double lb, ub;  // previous bounds (in the trail) or new bounds (global list)
@@ -199,6 +320,7 @@ class Prober {
         amax_[i] += v1 - v0, nmax_[i] += i1 - i0;
       }
       if (enqueue && !queued_[i]) queued_[i] = 1, queue_.push_back(i);
+      if (collect_ && touch_[i] != touch_id_) touch_[i] = touch_id_, touched_.push_back(i);
     }
     updates_ += p_.A.end(j) - p_.A.begin(j);
   }
@@ -210,6 +332,11 @@ class Prober {
     ub_[j] = std::min(ub_[j], u);
     work_ += p_.A.end(j) - p_.A.begin(j);
     update_activities(j, trail_.back().lb, trail_.back().ub, true);
+    // A binary just fixed: its literal is true (its conflicts are propagated).
+    if (num_conf_ > 0 && lb_[j] == ub_[j] && trail_.back().lb == 0.0 && trail_.back().ub == 1.0 && p_.is_int[j]) {
+      const Index lit = 2 * j + (lb_[j] > 0.5 ? 1 : 0);
+      if (!conf_[lit].empty()) lits_.push_back(lit);
+    }
   }
 
   void undo() {
@@ -244,21 +371,58 @@ class Prober {
   void clear_queue() {
     for (Index i : queue_) queued_[i] = 0;
     queue_.clear();
+    lits_.clear();
   }
 
-  // Processes the row queue; false if a row is proven infeasible.
+  // Processes the row queue and the literals that became true (their conflicts); false if a row or a conflict is
+  // proven infeasible.
   bool propagate() {
-    for (size_t head = 0; head < queue_.size(); ++head) {
-      const Index i = queue_[head];
-      queued_[i] = 0;
-      if (!process_row(i)) {
-        for (size_t h = head + 1; h < queue_.size(); ++h) queued_[queue_[h]] = 0;
-        queue_.clear();
-        return false;
+    for (;;) {
+      for (size_t head = 0; head < queue_.size(); ++head) {
+        const Index i = queue_[head];
+        queued_[i] = 0;
+        if (!process_row(i)) {
+          for (size_t h = head + 1; h < queue_.size(); ++h) queued_[queue_[h]] = 0;
+          queue_.clear();
+          lits_.clear();
+          return false;
+        }
       }
+      queue_.clear();
+      if (lits_.empty()) return true;
+      for (size_t h = 0; h < lits_.size(); ++h) {
+        const Index lit = lits_[h];
+        work_ += static_cast<long long>(conf_[lit].size());
+        for (size_t t = 0; t < conf_[lit].size(); ++t) {
+          const Index o = conf_[lit][t], k = o >> 1;
+          const double v = (o & 1) ? 0.0 : 1.0;  // the literal (k, o & 1) is false: x_k = 1 - (o & 1)
+          if (lb_[k] == ub_[k]) {
+            if (lb_[k] != v) {
+              lits_.clear();
+              clear_queue();
+              return false;
+            }
+            continue;
+          }
+          set_bounds(k, v, v);  // queues the rows and the literal of k
+          no_imp_[k] = phase_;
+        }
+      }
+      lits_.clear();
     }
-    queue_.clear();
-    return true;
+  }
+
+  // Whether j is a binary fixed by the current probe (free before it) whose implication is worth keeping: not one
+  // fixed through the implication graph (the graph already leads to it).
+  bool fixed_binary(Index j) const {
+    return p_.is_int[j] && lb_[j] == ub_[j] && root_lb(j) == 0.0 && root_ub(j) == 1.0 && no_imp_[j] != phase_;
+  }
+
+  void add_conflict(Index a, Index b, ProbingResult* res = nullptr) {
+    conf_[a].push_back(b);
+    conf_[b].push_back(a);
+    ++num_conf_;
+    if (res) res->conflicts.push_back({std::min(a, b), std::max(a, b)});
   }
 
   bool process_row(Index i) {
@@ -342,7 +506,10 @@ class Prober {
       nu = std::min(nu, u);
       if (nl > nu) {
         if (integer || nl - nu > kFeasTol * (1.0 + std::abs(nl))) return false;
-        nl = nu = 0.5 * (nl + nu);
+        // Fixed inside the current domain: a midpoint below the lower bound (or above the upper one) would leave
+        // the bounds crossed, and such errors add up over a long row (neos-5104907-jarama: 92 columns >= 0 with
+        // bounds [1e-9, -5e-8], the row "proven" infeasible in the second probing pass).
+        nl = nu = std::clamp(0.5 * (nl + nu), lb_[j], ub_[j]);
       }
       if (nl > lb_[j] || nu < ub_[j]) {
         set_bounds(j, nl, nu);
@@ -364,12 +531,30 @@ class Prober {
   std::vector<double> amin_, amax_, range_;  // incremental row activities; max entry range per row
   std::vector<int> nmin_, nmax_;
   long long updates_ = 0;
+  // Liftings: rows whose activities the current probe changed (touch_ stamps them with touch_id_), the
+  // candidates of the x = 0 / x = 1 probes, the index of each row's kept lifting in the result.
+  bool lift_ = false, collect_ = false;
+  long long touch_id_ = 0;
+  std::vector<long long> touch_;
+  std::vector<Index> touched_, best_;
+  std::vector<double> rowmax_;  // max |a| per row
+  std::vector<ProbingResult::Lift> lift0_, lift1_;
+  // Implication graph: conflicting literals (2 j + v: x_j = v) per literal; literals that became true and await
+  // propagation; binaries fixed by the x = 0 probe; last literal whose conflict with j was added (trail duplicates).
+  size_t max_conf_ = 0, num_conf_ = 0;
+  std::vector<std::vector<Index>> conf_;
+  std::vector<Index> lits_, fix0_;
+  std::vector<Index> last_lit_;
+  // Current probe x = v (stamps of no_imp_); phase in which a column was fixed through the implication graph.
+  long long phase_ = 0;
+  std::vector<long long> no_imp_;
+  std::vector<char> redundant_;  // rows found redundant under the current global bounds (no lifting)
 };
 
 }  // namespace
 
-ProbingResult probe_binaries(const MipProblem& p, long long work_limit) {
-  Prober pr(p, work_limit);
+ProbingResult probe_binaries(const MipProblem& p, long long work_limit, const ProbingOptions& opt) {
+  Prober pr(p, work_limit, opt);
   return pr.run();
 }
 

@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 #include "milp/core/interrupt.hpp"
 
@@ -60,7 +62,8 @@ void drop_if_outside(const MipProblem& p, std::vector<double>& x) {
 CutLoopStats root_cut_loop(const MipProblem& p, DualSimplex& lp, const SolverParams& params, const Logger& log,
                            const Timer& timer, double cutoff, CutData* data, bool sub_mip,
                            std::vector<Cut>* dropped, const std::function<void(const DualSimplex&)>& on_lp,
-                           const std::atomic<bool>* stop, const std::function<double()>& cutoff_fn) {
+                           const std::atomic<bool>* stop, const std::function<double()>& cutoff_fn,
+                           int max_rounds) {
   if (cuts_disabled_by_env()) return CutLoopStats{};
   CutLoopOptions opt;
   opt.on_lp = on_lp;
@@ -84,9 +87,22 @@ CutLoopStats root_cut_loop(const MipProblem& p, DualSimplex& lp, const SolverPar
   // never moved) are capped by time; the bin packing like models they are for have cheap rounds.
   if (!params.deterministic) opt.flat_time_factor = 3.0;
   if (const char* v = std::getenv("MILP_FLAT_TIME")) opt.flat_time_factor = std::atof(v);
+  // MILP_FLAT_WORK = f (default 3; 0: the time cap above): that cap in work units, in both modes (a
+  // wall-clock cap moves with the machine's load: neos-3381206-awhea's 7 flat rounds before its bound moves
+  // take 0.4-0.8 s unloaded and more than the 1 s floor loaded, and then the tree cannot close 415 -> 453;
+  // --deterministic had no cap: neos-960392 15 rounds, now 4). MILP_FLAT_WORK_MIN: the floor.
+  opt.flat_work_factor = 3.0;
+  if (const char* v = std::getenv("MILP_FLAT_WORK")) opt.flat_work_factor = std::atof(v);
+  if (const char* v = std::getenv("MILP_FLAT_WORK_MIN")) opt.flat_work_min = std::atof(v);
   if (const char* v = std::getenv("MILP_CHEAP_ROUNDS")) opt.max_rounds_cheap = std::atoi(v);
   if (const char* v = std::getenv("MILP_MAX_CUTS")) opt.max_cuts_per_round = std::atoi(v);
   if (const char* v = std::getenv("MILP_CHEAP_RECENT_REL")) opt.cheap_recent_rel = std::atof(v);
+  // MILP_CUT_AGE = k: slack cut rows stay for k further slack re-solves (0: removed at the first).
+  if (const char* v = std::getenv("MILP_CUT_AGE")) opt.cut_age = std::atoi(v);
+  if (max_rounds >= 0) {
+    opt.max_rounds = std::min(opt.max_rounds, max_rounds);
+    opt.max_rounds_cheap = 0;
+  }
   return cut_loop(p, lp, opt, log, timer, cutoff, nullptr, data, dropped);
 }
 
@@ -119,6 +135,12 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   const double t_lp_end = timer.elapsed(), initial_lp_time = t_lp_end - t_lp0;
   log.log(2, "  initial LP: %lld iterations, %.2fs (%d rows, %d cols)\n", iters0 - iters_start, initial_lp_time,
           static_cast<int>(lp.num_rows()), static_cast<int>(lp.num_cols()));
+  // Work of the loop after the initial solve (flat_work_factor): the cut probing budget (its time counts for
+  // the time cap too), per round the re-solve's iterations x (rows + columns) plus the separation, estimated
+  // as Gomory's: a tableau row (a BTRAN and a pass over the row matrix) for each fractional integer column,
+  // at most 500 (neos-960392: a flat round costs ~0.4x the initial solve, mostly Gomory).
+  const double initial_work = static_cast<double>(iters0 - iters_start) * static_cast<double>(lp.num_rows() + n);
+  double loop_work = 0.0;
   double lp_time = 0.0;
   int extra_rounds = 0;
   double obj = lp.objective();
@@ -153,7 +175,10 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
                            : env_work           ? std::atoll(env_work)
                                                 : std::clamp<long long>(2000 * nnz, 1000000LL, 500000000LL);
     const double t0 = timer.elapsed();
-    data.probe(p, lp.x(), work);
+    // At the time limit the probing stops (its work budget alone took up to 6.5 s on fiball at 1 thread: a
+    // 10 s limit overran by 10 s on a loaded machine).
+    data.probe(p, lp.x(), work, [&] { return timer.elapsed() > opt.total_time_limit; });
+    loop_work += static_cast<double>(work);  // its budget (counted by the time cap too)
     log.log(2, "  cut probing: %zu implied bounds, %zu literal conflicts, %zu implied variable bounds, %.2fs\n",
             data.probe_imps.size(), data.conflict_lit.size() / 2, data.num_implied_vbs, timer.elapsed() - t0);
   }
@@ -185,6 +210,72 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   std::vector<Cut> row_cuts;  // the cut in LP row r0 + k
   std::vector<Cut> dropped;   // cuts removed for slack, candidates for re-adding
   const size_t max_dropped = 20000;
+  // MILP_CUT_TRACE=1 (diagnostics, verbosity 2): per round, the cuts re-added from the dropped list,
+  // fresh cuts with the coefficients of a cut that was in the LP before (re-separated), the
+  // selection's rejections and the removed rows by their age in rounds.
+  static const bool trace = [] { const char* v = std::getenv("MILP_CUT_TRACE"); return v && *v && *v != '0'; }();
+  std::vector<int> row_round;  // trace: round in which row_cuts[k] entered the LP
+  std::unordered_set<uint64_t> seen_rows;
+  long long tr_added = 0, tr_readded = 0, tr_resep = 0, tr_removed = 0;
+  auto cut_hash = [](const Cut& c) {
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
+    for (size_t k = 0; k < c.idx.size(); ++k) {
+      uint64_t b;
+      std::memcpy(&b, &c.val[k], sizeof b);
+      mix(static_cast<uint64_t>(c.idx[k])), mix(b);
+    }
+    return h;
+  };
+  // Cut row aging (cut_age = k > 0): a cut row whose logical is basic with slack stays in the LP until
+  // k + 1 re-solves in a row found it slack (SCIP / HiGHS keep slack rows for 10 LP solves). Removing
+  // it at the first slack re-solve (k = 0) churns: on tr12-30 most removed rows were added in the same
+  // round, and a fifth of the added cuts were re-adds or re-separations of removed ones. Aged rows give
+  // way when a full round would not fit below max_cut_rows. At the end of the loop (keep_age < 0) every
+  // cut row with a basic logical leaves, also at zero slack (the LP optimum stays): aging leaves many
+  // degenerate rows behind (mzzv11 with k = 10: 1926 cut rows instead of 579), and the tree's LPs keep
+  // the root's cut rows.
+  std::vector<int> row_age;  // per row_cuts: consecutive slack re-solves
+  auto remove_slack = [&](int keep_age, int round, int* age_hist) {
+    std::vector<Index> slack_rows;
+    std::vector<char> slack(lp.num_rows(), 0);
+    for (Index i = first_removable; i < lp.num_rows(); ++i) {
+      if (!lp.row_is_basic(i)) {
+        if (i >= r0) row_age[i - r0] = 0;
+        continue;
+      }
+      const double act = -lp.var_value(n + i), ub = -lp.var_lower(n + i);
+      const bool is_slack = ub - act > 1e-6 * std::max(1.0, std::abs(ub)) || (keep_age < 0 && i >= r0);
+      if (i >= r0) row_age[i - r0] = is_slack ? row_age[i - r0] + 1 : 0;
+      if (is_slack && (i < r0 || row_age[i - r0] > keep_age)) slack_rows.push_back(i), slack[i] = 1;
+    }
+    if (keep_age > 0 &&
+        lp.num_rows() - m0 - static_cast<Index>(slack_rows.size()) > max_cut_rows - popt.max_cuts) {
+      for (Index i = r0; i < lp.num_rows(); ++i) {  // no room for a full round: all slack rows go
+        if (!slack[i] && row_age[i - r0] > 0) slack_rows.push_back(i), slack[i] = 1;
+      }
+      std::sort(slack_rows.begin(), slack_rows.end());
+    }
+    lp.remove_rows(slack_rows);
+    size_t w = 0;
+    for (size_t k = 0; k < row_cuts.size(); ++k) {
+      if (slack[r0 + k]) {
+        if (trace) {
+          const int age = round - row_round[k] + 1;  // removed rows by rounds in the LP: 1, 2, 3-5, 6+
+          ++age_hist[age <= 1 ? 0 : age == 2 ? 1 : age <= 5 ? 2 : 3];
+        }
+        if (dropped.size() < max_dropped) dropped.push_back(std::move(row_cuts[k]));
+      } else {
+        if (w != k) row_cuts[w] = std::move(row_cuts[k]), row_age[w] = row_age[k];
+        if (trace && w != k) row_round[w] = row_round[k];
+        ++w;
+      }
+    }
+    row_cuts.resize(w);
+    row_age.resize(w);
+    if (trace) row_round.resize(w);
+    return slack_rows.size();
+  };
   const double itol = opt.tol.integrality;
   std::vector<double> debug_sol = load_debug_solution(n);
   drop_if_outside(p, debug_sol);
@@ -238,6 +329,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     }
   };
 
+  bool lp_optimal = true;     // the LP is at an optimum (the final slack cleanup needs its basis)
   int degenerate_rounds = 0;  // rounds that ended on a dual degenerate LP
   // Dual degeneracy: share of nonbasic structurals with zero reduced cost. On such LPs
   // cuts often only move the solution to an alternative optimum for several rounds
@@ -269,6 +361,12 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
       if (p.is_int[j]) frac = std::abs(x[j] - std::round(x[j])) > itol;
     }
     if (!frac) break;
+    if (opt.flat_work_factor > 0.0) {
+      Index nfrac = 0;
+      for (Index j = 0; j < n; ++j) nfrac += p.is_int[j] && std::abs(x[j] - std::round(x[j])) > itol;
+      loop_work += static_cast<double>(std::min<Index>(nfrac, 500)) *
+                   static_cast<double>(lp.row_matrix().nnz() + lp.num_rows());
+    }
 
     // Separate. Cuts dropped earlier for slack compete again when violated (on
     // degenerate LPs the solution otherwise cycles between alternative optima).
@@ -297,6 +395,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
       raw[s] = static_cast<int>(cand.size());
       for (Cut& c : cand) found[s] += pool.add(std::move(c), x);
     }
+    const int pool_candidates = static_cast<int>(pool.size());
     std::vector<Cut> cuts = pool.select();
     {
       Index rows = lp.num_rows() - m0;
@@ -308,6 +407,16 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
         if (rows >= max_cut_rows && (rows >= 2 * max_cut_rows || nnz > max_cut_nnz)) break;
       }
       cuts.resize(keep);
+    }
+    int tr_round_readd = 0, tr_round_resep = 0;
+    if (trace) {
+      for (const Cut& c : cuts) {
+        const bool again = !seen_rows.insert(cut_hash(c)).second;
+        tr_round_readd += c.pool_id >= 0;
+        tr_round_resep += again && c.pool_id < 0;
+      }
+      tr_added += static_cast<long long>(cuts.size());
+      tr_readded += tr_round_readd, tr_resep += tr_round_resep;
     }
     {
       // Selected pool cuts leave the pool (they become rows again).
@@ -349,6 +458,8 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     const Basis basis_before = lp.get_basis();
     lp.add_rows(static_cast<Index>(cuts.size()), start, idx, val, lo, up);
     row_cuts.insert(row_cuts.end(), cuts.begin(), cuts.end());
+    row_age.resize(row_cuts.size(), 0);
+    if (trace) row_round.resize(row_cuts.size(), round);
     const double t_solve = timer.elapsed();
     const LpStatus st = solve();
     const double round_lp_time = timer.elapsed() - t_solve;
@@ -358,11 +469,13 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     // tenth of the initial solve's iterations (and > 5000), halve the cuts per round. Counted in
     // iterations, not time, so that deterministic runs stay reproducible.
     const long long resolve_iters = lp.iterations() - round_iters;
+    loop_work += static_cast<double>(resolve_iters) * static_cast<double>(lp.num_rows() + n);
     if (resolve_iters > std::max<long long>(5000, (iters0 - iters_start) / 10) && popt.max_cuts > 50) {
       popt.max_cuts = std::max(50, popt.max_cuts / 2);
       log.log(2, "  slow LP re-solve (%lld iterations): at most %d cuts per round\n", resolve_iters, popt.max_cuts);
     }
     if (st == LpStatus::Infeasible || st == LpStatus::CutoffReached) {
+      lp_optimal = false;
       // Valid cuts: the node is infeasible / cut off; keep the rows, B&B re-detects it.
       stats.cuts_added += static_cast<int>(cuts.size());
       record(cuts);
@@ -376,8 +489,10 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
       for (Index i = first_new; i < lp.num_rows(); ++i) rows.push_back(i);
       lp.remove_rows(rows);
       row_cuts.resize(row_cuts.size() - rows.size());
+      row_age.resize(row_cuts.size());
+      if (trace) row_round.resize(row_cuts.size());
       lp.set_basis(basis_before);  // the optimal basis of the previous round (removing nonbasic rows breaks it)
-      solve();
+      lp_optimal = solve() == LpStatus::Optimal;
       log.log(2, "  cut round %d: LP %s, round discarded\n", round, to_string(st));
       break;
     }
@@ -388,26 +503,17 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     obj = lp.objective();
     stats.bound_after = obj;
 
-    // Drop cuts that are no longer binding (basic logical with positive slack).
-    std::vector<Index> slack_rows;
-    std::vector<char> slack(lp.num_rows(), 0);
-    for (Index i = first_removable; i < lp.num_rows(); ++i) {
-      if (!lp.row_is_basic(i)) continue;
-      const double act = -lp.var_value(n + i), ub = -lp.var_lower(n + i);
-      if (ub - act > 1e-6 * std::max(1.0, std::abs(ub))) slack_rows.push_back(i), slack[i] = 1;
-    }
-    lp.remove_rows(slack_rows);
-    {
-      size_t w = 0;
-      for (size_t k = 0; k < row_cuts.size(); ++k) {
-        if (slack[r0 + k]) {
-          if (dropped.size() < max_dropped) dropped.push_back(std::move(row_cuts[k]));
-        } else {
-          if (w != k) row_cuts[w] = std::move(row_cuts[k]);
-          ++w;
-        }
-      }
-      row_cuts.resize(w);
+    // Drop cuts that are no longer binding (basic logical with positive slack), after cut_age further slack
+    // re-solves (see remove_slack).
+    int tr_age[4] = {0, 0, 0, 0};
+    const size_t removed = remove_slack(opt.cut_age, round, tr_age);
+    if (trace) {
+      const CutPool::SelectStats& ss = pool.select_stats();
+      tr_removed += static_cast<long long>(removed);
+      log.log(2, "  churn round %2d: %d candidates (%d from the dropped list), %d too parallel, %d over the limit; "
+              "added %zu (%d re-added, %d re-separated); removed %zu (age 1: %d, 2: %d, 3-5: %d, 6+: %d)\n", round,
+              pool_candidates, from_pool, ss.parallel, ss.over_limit, cuts.size(), tr_round_readd, tr_round_resep,
+              removed, tr_age[0], tr_age[1], tr_age[2], tr_age[3]);
     }
 
     const bool dual_degenerate = is_dual_degenerate();
@@ -434,8 +540,15 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
         // While the bound has not moved at all on a degenerate LP, keep going for a few
         // extra rounds within an LP work budget (a multiple of the initial solve).
         const bool flat = obj - stats.bound_before <= 1e-9 * std::max(1.0, std::abs(obj));
-        const bool flat_time_ok = opt.flat_time_factor <= 0.0 ||
-                                  timer.elapsed() - t_lp_end <= std::max(1.0, opt.flat_time_factor * initial_lp_time);
+        const bool flat_time_ok =
+            opt.flat_work_factor > 0.0
+                ? loop_work <= std::max(opt.flat_work_min, opt.flat_work_factor * initial_work)
+                : opt.flat_time_factor <= 0.0 ||
+                      timer.elapsed() - t_lp_end <= std::max(1.0, opt.flat_time_factor * initial_lp_time);
+        if (opt.flat_work_factor > 0.0 && flat && dual_degenerate) {
+          log.log(3, "  flat round %d: loop work %.3g of max(%.3g, %.3g x initial %.3g)\n", round, loop_work,
+                  opt.flat_work_min, opt.flat_work_factor, initial_work);
+        }
         if (flat && dual_degenerate && !flat_time_ok) break;
         if (flat && dual_degenerate && extra_rounds < opt.degenerate_rounds &&
             lp.iterations() - iters0 <= 5 * std::max<long long>(iters0 - iters_start, 1000)) {
@@ -479,6 +592,17 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     std::string s;
     for (const auto& [name, cnt] : by_origin) s += " " + name + " " + std::to_string(cnt);
     log.log(2, "  cut rows by separator:%s\n", s.c_str());
+    if (trace) {
+      log.log(2, "  churn: %lld cuts added (%lld re-added from the dropped list, %lld re-separated), %lld removed for "
+              "slack, %zu distinct cuts in the LP at some point, %zu in the dropped list\n", tr_added, tr_readded,
+              tr_resep, tr_removed, seen_rows.size(), dropped.size());
+    }
+  }
+  if (opt.cut_age > 0 && lp_optimal && stats.rounds > 0) {
+    // Cut rows with basic logicals leave now: the tree's LPs keep only the cuts the root LP vertex rests on.
+    int hist[4] = {0, 0, 0, 0};
+    const size_t removed = remove_slack(-1, stats.rounds, hist);
+    log.log(2, "  %zu cut rows with basic logicals removed at the end of the loop\n", removed);
   }
   if (!rc_saved.empty()) {
     // Restore the bounds (boxed columns left at the wrong bound are flipped by the next solve).

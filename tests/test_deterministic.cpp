@@ -166,8 +166,10 @@ MipResult solve_capped(const MipProblem& p, Logger& log, long long cap, int thre
 // A search whose tree outgrows the cap drains it and still proves the optimum: the opportunistic
 // 1-thread run and the deterministic 2- and 4-thread runs on every seed (deterministic decisions
 // are taken at round barriers only, so a round must not carry the tree past the stop threshold),
-// the deterministic ones reproducibly. Returns the number of capped runs that drained.
-int check_memory_case(const char* name, const Model& m, long long cap, int seeds) {
+// the deterministic ones reproducibly. Returns the number of capped runs that drained; *gradual:
+// those that left drain mode again with the bound risen during drain mode (the k deepest : 1 best
+// bound alternation).
+int check_memory_case(const char* name, const Model& m, long long cap, int seeds, int* gradual = nullptr) {
   const char* only = std::getenv("MILP_TEST_MEMCASE");  // debugging: run this case only
   if (only && std::string(only) != name) return 1 + 2 * seeds;
   MipProblem p;
@@ -176,7 +178,7 @@ int check_memory_case(const char* name, const Model& m, long long cap, int seeds
   Logger log(verbose && std::getenv("MILP_TEST_VERBOSE")[0] == '2' ? 2 : 0);
   const MipResult ref = solve_capped(p, log, -1, 1, false, 1);
   CHECK(ref.status == Status::Optimal);
-  int drained = 0;
+  int drained = 0, grad = 0;
   auto check = [&](const MipResult& r, int threads, bool det, unsigned seed) {
     if (r.status != Status::Optimal || std::abs(r.objective - ref.objective) > 1e-6) {
       std::printf("  %s: %d threads%s seed %u: status %d, %lld nodes, obj %.10g (optimum %.10g)\n", name, threads,
@@ -185,6 +187,7 @@ int check_memory_case(const char* name, const Model& m, long long cap, int seeds
     CHECK(r.status == Status::Optimal);
     CHECK(std::abs(r.objective - ref.objective) <= 1e-6);
     drained += r.mem_drains > 0;
+    grad += r.mem_drain_exits > 0 && r.mem_drain_rise > 0.0;
   };
   const MipResult a = solve_capped(p, log, cap, 1, false, 1);
   check(a, 1, false, 1);
@@ -200,14 +203,17 @@ int check_memory_case(const char* name, const Model& m, long long cap, int seeds
         CHECK_EQ(b.nodes, c.nodes);
         CHECK_EQ(b.lp_iterations, c.lp_iterations);
         CHECK_EQ(b.objective, c.objective);
+        CHECK_EQ(b.mem_drains, c.mem_drains);
+        CHECK_EQ(b.mem_drain_exits, c.mem_drain_exits);
       }
     }
   }
   if (verbose) {
     std::printf("  %s: %lld nodes without the cap; with %lld bytes: %lld (1 thread), mean %lld / %lld (2 / 4 threads"
-                " deterministic); %d of %d runs drained\n",
-                name, ref.nodes, cap, a.nodes, nodes[0] / seeds, nodes[1] / seeds, drained, 1 + 2 * seeds);
+                " deterministic); %d of %d runs drained, %d left drain mode with the bound risen\n",
+                name, ref.nodes, cap, a.nodes, nodes[0] / seeds, nodes[1] / seeds, drained, 1 + 2 * seeds, grad);
   }
+  if (gradual) *gradual = grad;
   return drained;
 }
 
@@ -216,19 +222,24 @@ int check_memory_case(const char* name, const Model& m, long long cap, int seeds
 // Memory limit: a search whose tree outgrows a tiny cap drops stored bases, drains the tree depth
 // first and still proves the optimum (same objective as without the cap), in both modes; the
 // deterministic one stays reproducible. Several seeds and thread counts (the drain must not depend
-// on a lucky seed) and instance types.
+// on a lucky seed) and instance types. The drain is gradual: runs leave drain mode again, with the
+// bound risen while in it (its best-bound pops).
 TEST(memory_limit_drains_tree) {
   static const long long cap = std::getenv("MILP_TEST_MEMCAP") ? std::atoll(std::getenv("MILP_TEST_MEMCAP")) : 0;
   static const int seeds = std::getenv("MILP_TEST_MEMSEEDS") ? std::atoi(std::getenv("MILP_TEST_MEMSEEDS")) : 6;
   {
-    std::mt19937 rng(8);  // ~1300-1700 nodes
-    const int d = check_memory_case("mkp", random_mkp(rng, 90, 4), cap > 0 ? cap : 100000, seeds);
+    std::mt19937 rng(8);  // ~1300-1700 nodes (80 KB: the compact queue fits the tree in 100 KB with some cut settings)
+    int g = 0;
+    const int d = check_memory_case("mkp", random_mkp(rng, 90, 4), cap > 0 ? cap : 80000, seeds, &g);
     CHECK(d >= 1 + seeds);  // the cap binds
+    if (cap == 0 && !std::getenv("MILP_TEST_MEMCASE")) CHECK(g >= seeds);
   }
   {
     std::mt19937 rng(5);
-    const int d = check_memory_case("gik", random_gik(rng, 60, 3), cap > 0 ? cap : 100000, seeds);
+    int g = 0;
+    const int d = check_memory_case("gik", random_gik(rng, 60, 3), cap > 0 ? cap : 100000, seeds, &g);
     CHECK(d >= 1 + seeds);
+    if (cap == 0 && !std::getenv("MILP_TEST_MEMCASE")) CHECK(g >= seeds);
   }
   {
     // 3 rows: no zero-slack split, the proof needs a tree (with 24 columns and 2 rows the local-MIP

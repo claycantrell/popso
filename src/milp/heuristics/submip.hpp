@@ -15,6 +15,8 @@ struct SubMipStats {
   int solves = 0;              // sub-MIPs actually solved (0: neighbourhood rejected)
   bool exhausted = false;      // last sub-MIP finished (optimal or infeasible): neighbourhood too small
   long long lp_iterations = 0, nodes = 0;
+  long long dive_iterations = 0, fp_iterations = 0;  // of lp_iterations: the sub-MIPs' dives and pumps
+  int dive_wins = 0, fp_runs = 0, fp_wins = 0;       // their new incumbents in the sub-MIPs; pumps run
   Index fixed = 0, ints = 0;  // integer variables fixed / total in the last sub-MIP
 };
 
@@ -53,9 +55,16 @@ struct LpRensStats {
   long long dive_iterations = 0;  // LP iterations of the fixing dives
   double last_rate = 0.0;     // fixing rate of the last sub-MIP
   int presolve_rejects = 0;   // fixing batches undone because presolve proved them infeasible
+  bool stopped_blind = false;  // stop_blind ended the retries (below)
 };
+// `stop_blind`: no further attempt after a first sub-MIP that was exhausted (infeasible, or nothing below
+// the cutoff): the dive's LP accepted fixings that are infeasible together, so it gives no signal and
+// other rates are blind guesses (enlight_hard: first sub-MIP infeasible after 1-5 nodes, then 3 more
+// down to rate 0.07 while the root waited 1 s; where the sub-MIP finds the first incumbent -- binkar10_1,
+// cbs-cta, piperout-08, fiball -- the first attempt succeeds).
 bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const SubMipLimits& limits,
-             std::vector<double>& sol, double target = 0.7, int attempts = 3, LpRensStats* out = nullptr);
+             std::vector<double>& sol, double target = 0.7, int attempts = 3, LpRensStats* out = nullptr,
+             bool stop_blind = false);
 
 // RINS: fix integers on which the LP solution and the incumbent agree. If that fixes less
 // than `target_fixed` of the integers, more are fixed at their incumbent values, those

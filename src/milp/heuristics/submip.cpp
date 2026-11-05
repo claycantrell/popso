@@ -16,6 +16,16 @@
 
 namespace milp {
 
+namespace {
+
+// Parameter override from the environment (tuning experiments), as the search's knob().
+double sub_knob(const char* name, double def) {
+  const char* v = std::getenv(name);
+  return v ? std::atof(v) : def;
+}
+
+}  // namespace
+
 bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std::vector<double>& ub, double cutoff,
                    const SubMipLimits& limits, std::vector<double>& sol) {
   MipProblem q = p;
@@ -28,7 +38,12 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
   sp.time_limit = limits.time_limit;
   sp.mem_limit_mb = limits.mem_limit_mb;
   sp.mip_rel_gap = 1e-3;
-  Logger log(0);
+  // MILP_SUBMIP_VERBOSE=<v>: the sub-MIPs' own log at verbosity v (diagnostics; interleaves with the main log).
+  static const int verbose = [] {
+    const char* e = std::getenv("MILP_SUBMIP_VERBOSE");
+    return e ? std::atoi(e) : 0;
+  }();
+  Logger log(verbose);
   Timer timer;
   SearchOptions opts;
   opts.cutoff = cutoff;
@@ -37,6 +52,18 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
   opts.progress = limits.progress;
   opts.iteration_limit = limits.iteration_limit;
   opts.check_resident = false;
+  // The sub-MIP's root cut loop: MILP_SUB_CUT_ROUNDS = k (default -1: as the main search) at most k rounds
+  // (no cheap extra rounds); MILP_SUB_CUTS = 0 (default 1): none; MILP_SUB_CUTS_FREE = f (default 0: off):
+  // none when at most f integer columns are left free. pg5_34's sub-MIPs (225 x 2600, 70-98 of 100 integers
+  // fixed) spend 0.3-1 s of their 1.3-3 s in the root's MIR separation, then 1-25 nodes; swath's
+  // (2600-4800 columns after presolve) 0.2-2.3 s in the cut probing.
+  static const int sub_cut_rounds = static_cast<int>(sub_knob("MILP_SUB_CUT_ROUNDS", -1));
+  static const bool sub_cuts = sub_knob("MILP_SUB_CUTS", 1) > 0;
+  static const double sub_cuts_free = sub_knob("MILP_SUB_CUTS_FREE", 0);
+  Index free_ints = 0;
+  for (Index j = 0; j < p.num_cols(); ++j) free_ints += p.is_int[j] && lb[j] < ub[j];
+  opts.root_cut_rounds = sub_cut_rounds;
+  opts.root_cuts = sub_cuts && !(sub_cuts_free > 0 && static_cast<double>(free_ints) <= sub_cuts_free);
   // Presolve large problems first: the fixings usually remove most of them. Small ones are
   // solved as they are (presolve saves little there, and on timtab1 its aggregations of
   // general integers made the sub-MIPs markedly less successful).
@@ -45,6 +72,10 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
   Presolver pre;
   PresolveOptions po;
   po.probing_effort = 0.2;
+  // A sub-MIP's presolve also stops with the sub-MIP (FJ repair on supportcase19, 1.4M columns: 4 s past the
+  // solve's end in parallel_cols).
+  po.stop = limits.stop;
+  po.time_limit = limits.time_limit;
   static const long long presolve_nnz = [] {
     const char* e = std::getenv("MILP_SUBMIP_PRESOLVE_NNZ");
     return e ? std::atoll(e) : 20000LL;
@@ -53,6 +84,7 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
   const bool presolve = !no_presolve && p.A.nnz() >= presolve_nnz && p.implications.empty();
   // Unbounded (or skipped): solve the unreduced problem, which classifies it precisely.
   const PresolveStatus ps = presolve ? pre.run(q, po, log) : PresolveStatus::Unbounded;
+  const double t_presolve = timer.elapsed();
   if (ps == PresolveStatus::Infeasible) {
     r.status = Status::Infeasible;
   } else if (ps == PresolveStatus::Reduced && pre.reduced().num_cols() == 0) {
@@ -82,13 +114,18 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
     ++st->solves;
     st->exhausted = r.status == Status::Optimal || r.status == Status::Infeasible;
     st->lp_iterations += r.lp_iterations;
+    st->dive_iterations += r.dive_iterations;
+    st->fp_iterations += r.fp_iterations;
+    st->dive_wins += r.dive_wins;
+    st->fp_runs += r.fp_runs;
+    st->fp_wins += r.fp_wins;
     st->nodes += r.nodes;
     st->fixed = fixed;
     st->ints = ints;
   }
   if (std::getenv("MILP_SUBMIP_DEBUG")) {
-    std::fprintf(stderr, "sub-MIP: fixed %d/%d ints, status %s, nodes %lld, sol %d obj %.10g, %.2fs\n", fixed, ints,
-                 to_string(r.status), r.nodes, r.has_solution, r.objective, timer.elapsed());
+    std::fprintf(stderr, "sub-MIP: fixed %d/%d ints, status %s, nodes %lld, sol %d obj %.10g, %.2fs (presolve %.2fs)\n",
+                 fixed, ints, to_string(r.status), r.nodes, r.has_solution, r.objective, timer.elapsed(), t_presolve);
   }
   if (!r.has_solution || r.objective >= cutoff) return false;
   sol = std::move(r.x);
@@ -128,6 +165,11 @@ bool rens(const MipProblem& p, const double* lp_x, double cutoff, const SubMipLi
     st.solves += local.solves;
     st.exhausted = local.exhausted;
     st.lp_iterations += local.lp_iterations;
+    st.dive_iterations += local.dive_iterations;
+    st.fp_iterations += local.fp_iterations;
+    st.dive_wins += local.dive_wins;
+    st.fp_runs += local.fp_runs;
+    st.fp_wins += local.fp_wins;
     st.nodes += local.nodes;
     st.fixed = local.fixed;
     st.ints = local.ints;
@@ -242,7 +284,7 @@ bool presolve_infeasible(const MipProblem& p, const std::vector<double>& lb, con
 }  // namespace
 
 bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const SubMipLimits& limits,
-             std::vector<double>& sol, double target, int attempts, LpRensStats* out) {
+             std::vector<double>& sol, double target, int attempts, LpRensStats* out, bool stop_blind) {
   static const bool debug = std::getenv("MILP_SUBMIP_DEBUG") != nullptr;
   static const bool no_pcheck = std::getenv("MILP_LP_RENS_NO_PRESOLVE") != nullptr;
   Timer timer;
@@ -264,6 +306,11 @@ bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const 
       SubMipStats& o = *limits.stats;
       o.solves += ss_total.solves;
       o.lp_iterations += ss_total.lp_iterations + st.dive_iterations;
+      o.dive_iterations += ss_total.dive_iterations;
+      o.fp_iterations += ss_total.fp_iterations;
+      o.dive_wins += ss_total.dive_wins;
+      o.fp_runs += ss_total.fp_runs;
+      o.fp_wins += ss_total.fp_wins;
       o.nodes += ss_total.nodes;
       o.exhausted = ss_total.exhausted;
       o.fixed = ss_total.fixed;
@@ -414,6 +461,11 @@ bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const 
     const bool found = solve_sub_mip(p, lb, ub, cutoff, lim, sol);
     ss_total.solves += ss.solves;
     ss_total.lp_iterations += ss.lp_iterations;
+    ss_total.dive_iterations += ss.dive_iterations;
+    ss_total.fp_iterations += ss.fp_iterations;
+    ss_total.dive_wins += ss.dive_wins;
+    ss_total.fp_runs += ss.fp_runs;
+    ss_total.fp_wins += ss.fp_wins;
     ss_total.nodes += ss.nodes;
     ss_total.exhausted = ss.exhausted;
     ss_total.fixed = ss.fixed;
@@ -428,6 +480,11 @@ bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const 
                    found ? "found" : (ss.exhausted ? "exhausted" : "limit"), ss.nodes, timer.elapsed());
     }
     if (found) return finish(true);
+    if (stop_blind && a == 0 && ss.exhausted) {
+      st.stopped_blind = true;
+      if (debug) std::fprintf(stderr, "LP-RENS: first sub-MIP exhausted, no retry\n");
+      break;
+    }
     // Bisection on the fixing rate between "too large" (exhausted) and "too small" (limits hit).
     if (ss.exhausted) {
       if (achieved < hi) hi = achieved, hi_set = order;

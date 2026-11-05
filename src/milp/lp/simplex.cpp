@@ -25,7 +25,45 @@ const char* to_string(LpStatus s) {
 
 namespace {
 thread_local Timer t_timer;
+
+// LP parameter override from the environment (tuning experiments; defaults unchanged).
+double lp_knob(const char* name, double def) {
+  const char* v = std::getenv(name);
+  return v ? std::atof(v) : def;
 }
+
+// Dual degeneracy knobs (PLAN.md, 2026-11-04 v0.6 node-LP 3). On by default (=0 restores the old
+// behaviour; core A/B over 4 seeds 0.977x, 241 -> 245 of 252 solved): MILP_LP_PERTURB_COLSCALE=1|2|3 sizes
+// the structurals' perturbation by their column scale (see compute_pert_scale); MILP_LP_PRIMAL_DSE=1 keeps
+// the DSE weights through primal simplex pivots instead of resetting them to 1. Off (measured, no gain):
+// MILP_LP_PERTURB_ROWS=k perturbs the nonbasic logicals of inequality rows too, k times the structurals'
+// magnitude for a zero cost (MILP_LP_BOOST_ROWS=k: in the cold boost only); MILP_LP_COLD_STALL=f brings a
+// cold solve's boost forward once the objective has moved less than MILP_LP_STALL_TOL (relative) over
+// max(500, f m) iterations; MILP_LP_WARM_STALL=f does the same on warm solves with a MILP_LP_WARM_PERTURB
+// times larger perturbation; the stall test measures c^T x with the true costs (MILP_LP_STALL_DUAL=1:
+// c_w^T x with the working costs, the dual objective of the perturbed LP); MILP_LP_HARRIS_SIGNED=1 bounds
+// the first Harris group by (d_j + tol) / |alpha_j| with a wrong-sign d_j instead of tol / |alpha_j|.
+const double kPerturbRows = lp_knob("MILP_LP_PERTURB_ROWS", 0.0);
+const double kBoostRows = lp_knob("MILP_LP_BOOST_ROWS", -1.0);  // -1: as MILP_LP_PERTURB_ROWS
+const double kColdStall = lp_knob("MILP_LP_COLD_STALL", 0.0);
+const double kStallTol = lp_knob("MILP_LP_STALL_TOL", 1e-9);
+const bool kStallDual = lp_knob("MILP_LP_STALL_DUAL", 0.0) != 0.0;
+const double kWarmStall = lp_knob("MILP_LP_WARM_STALL", 0.0);
+const double kWarmMul = lp_knob("MILP_LP_WARM_PERTURB", 10.0);
+const bool kPrimalDse = lp_knob("MILP_LP_PRIMAL_DSE", 1.0) != 0.0;
+const bool kHarrisSigned = lp_knob("MILP_LP_HARRIS_SIGNED", 0.0) != 0.0;
+const double kPerturbColscale = lp_knob("MILP_LP_PERTURB_COLSCALE", 1.0);
+
+// Uniform [0, 1) factor of logical i for the perturbation (splitmix64 of the row and the seed; rows are
+// added and removed, so no stored table).
+double row_rand(Index i, uint64_t seed) {
+  uint64_t z = static_cast<uint64_t>(i) + seed * 0x9E3779B97F4A7C15ull + 0x632BE59BD9B4E019ull;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  z ^= z >> 31;
+  return static_cast<double>(z >> 11) * 0x1.0p-53;
+}
+}  // namespace
 
 void DualSimplex::load(const SparseMatrix& A, const std::vector<double>& cost, const std::vector<double>& col_lb,
                        const std::vector<double>& col_ub, const std::vector<double>& row_lb,
@@ -500,15 +538,20 @@ void DualSimplex::perturb_costs(double mul) {
   // Magnitude as in HiGHS: 5e-7 (1 + |c_j|) (1 + rand) times a cost scale (max |c|, its fourth
   // root above 100, at most 1 when hardly any variable is boxed). Smaller perturbations made
   // degenerate LPs much slower (mzzv11 root: 30.6k iterations with 5e-7 alone, 12.9k with this).
+  // HiGHS perturbs its column-scaled LP, so by default the 1 is the column's largest entry
+  // (compute_pert_scale): with a plain 1 the perturbation of columns with large entries sat at the dual
+  // tolerance's level (csched008's cold root crawled at 171 for ~4900 iterations, 5415 vs HiGHS's 1458).
   const double base = 5e-7 * pert_scale_ * mul;
   for (Index j = 0; j < n_; ++j) {
     const VarStatus st = status_[j];
     if (st == VarStatus::Basic || st == VarStatus::AtZero || lb_[j] == ub_[j]) continue;
-    const double xi = (1.0 + std::abs(cost_[j])) * base * (1.0 + perturb_rand_[j]);
+    const double one = pert_col_.empty() ? 1.0 : pert_col_[j];
+    const double xi = (one + std::abs(cost_[j])) * base * (1.0 + perturb_rand_[j]);
     const double delta = st == VarStatus::AtLower ? xi : -xi;
     wcost_[j] = cost_[j] + delta;
     d_[j] += delta;
   }
+  perturb_rows(base * kPerturbRows, false);
 }
 
 void DualSimplex::boost_perturbation(double extra) {
@@ -517,16 +560,53 @@ void DualSimplex::boost_perturbation(double extra) {
   for (Index j = 0; j < n_; ++j) {
     const VarStatus st = status_[j];
     if (st == VarStatus::Basic || st == VarStatus::AtZero || lb_[j] == ub_[j]) continue;
-    const double xi = (1.0 + std::abs(cost_[j])) * base * (1.0 + perturb_rand_[j]);
+    const double one = pert_col_.empty() ? 1.0 : pert_col_[j];
+    const double xi = (one + std::abs(cost_[j])) * base * (1.0 + perturb_rand_[j]);
     const double delta = st == VarStatus::AtLower ? xi : -xi;
     wcost_[j] += delta;
+    d_[j] += delta;
+  }
+  perturb_rows(base * (kBoostRows >= 0.0 ? kBoostRows : kPerturbRows), true);
+}
+
+void DualSimplex::perturb_rows(double b, bool add) {
+  // MILP_LP_PERTURB_ROWS: the nonbasic logicals of inequality rows as well (cost 0, scaled rows), so that
+  // tight rows with d = 0 no longer tie in the ratio test.
+  if (b <= 0.0) return;
+  for (Index i = 0; i < m_; ++i) {
+    const Index j = n_ + i;
+    const VarStatus st = status_[j];
+    if (st == VarStatus::Basic || st == VarStatus::AtZero || lb_[j] == ub_[j]) continue;
+    const double xi = b * (1.0 + row_rand(i, pert_seed_));
+    const double delta = st == VarStatus::AtLower ? xi : -xi;
+    wcost_[j] = (add ? wcost_[j] : cost_[j]) + delta;
     d_[j] += delta;
   }
 }
 
 void DualSimplex::compute_pert_scale() {
+  // MILP_LP_PERTURB_COLSCALE: the "1 +" of the magnitude becomes the column's largest entry (row-scaled
+  // matrix, clamped to [1/16, 64]), i.e. HiGHS's perturbation of its column-scaled LP mapped back
+  // (xi = (1 / s_j + |c_j|) ... for a column scale s_j = 1 / max entry); = 2 also takes the cost scale
+  // from the scaled costs |c_j| / max entry; = 3 uses the geometric mean sqrt(min max) of the column's
+  // entries instead of the largest.
+  pert_col_.clear();
+  if (kPerturbColscale > 0.0) {
+    pert_col_.assign(n_, 1.0);
+    for (Index j = 0; j < n_; ++j) {
+      double mx = 0.0, mn = kInf;
+      for (Index p = A_.begin(j); p < A_.end(j); ++p) {
+        const double a = std::abs(A_.value[p]);
+        if (a == 0.0) continue;
+        mx = std::max(mx, a);
+        mn = std::min(mn, a);
+      }
+      if (mx > 0.0) pert_col_[j] = std::clamp(kPerturbColscale == 3.0 ? std::sqrt(mn * mx) : mx, 1.0 / 16.0, 64.0);
+    }
+  }
   double bigc = 0.0;
-  for (Index j = 0; j < n_; ++j) bigc = std::max(bigc, std::abs(cost_[j]));
+  for (Index j = 0; j < n_; ++j)
+    bigc = std::max(bigc, std::abs(cost_[j]) / (kPerturbColscale == 2.0 ? pert_col_[j] : 1.0));
   if (bigc > 100.0) bigc = std::sqrt(std::sqrt(bigc));
   Index boxed = 0;
   for (Index j = 0; j < n_ + m_; ++j) boxed += is_finite(lb_[j]) && is_finite(ub_[j]);
@@ -539,6 +619,7 @@ void DualSimplex::compute_pert_scale() {
 }
 
 void DualSimplex::set_seed(unsigned seed) {
+  pert_seed_ = seed;
   rng_.seed(12345u + seed * 7919u);
   std::uniform_real_distribution<double> unif(0.0, 1.0);
   perturb_rand_.resize(n_);
@@ -711,6 +792,8 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
     }
     dse_new_.clear();
   }
+  boost_at_ = -1;  // also for unperturbed solves: a cold solve that ended early leaves its boost pending
+  stall_window_ = -1;
   if (opt.perturb) {
     // A long cold solve (started from a slack basis, still running after max(m/2, 5000) iterations) gets a 100x
     // larger perturbation from then on. Long cold solves of dual degenerate LPs stall with the HiGHS
@@ -723,13 +806,28 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
     static const double kColdIters = [] { const char* v = std::getenv("MILP_LP_COLD_ITERS"); return v ? std::atof(v) : 0.5; }();
     bool cold = true;
     for (Index p = 0; p < m_ && cold; ++p) cold = basic_[p] >= n_;
-    boost_at_ = -1;
     if (cold && kColdIters > 0.0) {
       perturb_costs(1.0);
       boost_at_ = iter_start_ + std::max(5000LL, static_cast<long long>(kColdIters * m_));
       boost_mul_ = kColdMul - 1.0;
+      // MILP_LP_COLD_STALL: the boost comes earlier once the objective stagnates (csched008's cold root
+      // sits at 171 from iteration ~100 to the boost at 5000, then finishes in 400). Unlike a share of zero
+      // dual steps (productive on neos-827175), a flat objective is no progress on the true LP.
+      if (kColdStall > 0.0) {
+        stall_window_ = std::max(500LL, static_cast<long long>(kColdStall * m_));
+        stall_ref_it_ = iter_start_;
+        stall_ref_obj_ = kInf;
+      }
     } else {
       perturb_costs(cold ? kColdMul : 1.0);
+      if (!cold && kWarmStall > 0.0) {
+        // MILP_LP_WARM_STALL: the same stagnation test on warm solves, boosting by MILP_LP_WARM_PERTURB.
+        boost_at_ = std::numeric_limits<long long>::max();
+        boost_mul_ = kWarmMul - 1.0;
+        stall_window_ = std::max(500LL, static_cast<long long>(kWarmStall * m_));
+        stall_ref_it_ = iter_start_;
+        stall_ref_obj_ = kInf;
+      }
     }
   }
   const Index dual_infeasible = opt.primal_first ? count_dual_infeasibilities(false) : 0;
@@ -871,7 +969,7 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
         if (trace) std::fprintf(stderr, "LPTRACE round %d: primal cleanup %s %lld it\n", round, to_string(st), total_iterations_ - it_p);
         if (st == LpStatus::Optimal) continue;
         if (st != LpStatus::IterationLimit || (opt.iteration_limit >= 0 && opt.iteration_limit <= cap)) return st;
-        dse_.assign(m_, 1.0);  // the primal pivots do not maintain the weights
+        if (!kPrimalDse) dse_.assign(m_, 1.0);  // the primal pivots do not maintain the weights
       }
     }
     if (count_dual_infeasibilities(true) == 0) {
@@ -984,7 +1082,22 @@ LpStatus DualSimplex::dual_loop(const LpOptions& opt, bool phase1) {
       move_ok = false;
     }
     if (infeas_dirty_) rebuild_infeasible(ptol);
+    if (boost_at_ >= 0 && !phase1 && stall_window_ > 0 && (total_iterations_ - iter_start_) % 100 == 0) {
+      // Stagnation check every 100 iterations. c_w^T x is the dual objective of the perturbed LP; it keeps
+      // creeping up by perturbation-sized steps (csched008: 1e-6 relative per 500 iterations at 171.00), so
+      // the default is c^T x with the true costs, which is flat once only the perturbation makes progress.
+      const std::vector<double>& c = kStallDual ? wcost_ : cost_;
+      double obj = 0.0;
+      for (Index j = 0; j < n_ + m_; ++j) obj += c[j] * x_[j];
+      if (!(std::abs(obj - stall_ref_obj_) <= kStallTol * std::max(1.0, std::abs(obj)))) {
+        stall_ref_obj_ = obj;
+        stall_ref_it_ = total_iterations_;
+      } else if (total_iterations_ - stall_ref_it_ >= stall_window_) {
+        boost_at_ = total_iterations_;
+      }
+    }
     if (boost_at_ >= 0 && !phase1 && total_iterations_ >= boost_at_) {
+      if (opt.verbosity >= 3) std::printf("  boost x%g at it %lld\n", boost_mul_ + 1.0, total_iterations_);
       boost_at_ = -1;
       boost_perturbation(boost_mul_);
     }
@@ -1068,7 +1181,9 @@ LpStatus DualSimplex::dual_loop(const LpOptions& opt, bool phase1) {
         }
         const double ratio = std::max(dj_eff, 0.0) / aa;
         cd[nc++] = {j, ratio, aa};
-        theta0 = std::min(theta0, ratio + dtol / aa);
+        // MILP_LP_HARRIS_SIGNED: a wrong-sign d_j tightens the Harris bound (as HiGHS), so it cannot drift
+        // further than the tolerance below zero.
+        theta0 = std::min(theta0, kHarrisSigned ? std::max(dj_eff + dtol, 0.0) / aa : ratio + dtol / aa);
       }
     }
     if (nc == 0) return infeasible(phase1);
@@ -1284,9 +1399,9 @@ LpStatus DualSimplex::dual_loop(const LpOptions& opt, bool phase1) {
     }
     ++total_iterations_;
     if (opt.verbosity >= 3 && total_iterations_ % 100 == 0) {
-      double obj = 0.0;
-      for (Index j = 0; j < n_ + m_; ++j) obj += wcost_[j] * x_[j];
-      std::printf("  dual%s it %lld obj %.10g (last 100: shifts %lld, zero steps %lld, flips %lld), infeasible %zu\n", phase1 ? "1" : "2", total_iterations_, obj, dbg_shifts_, dbg_degen_, dbg_flips_, infeas_list_.size());
+      double obj = 0.0, tobj = 0.0;
+      for (Index j = 0; j < n_ + m_; ++j) obj += wcost_[j] * x_[j], tobj += cost_[j] * x_[j];
+      std::printf("  dual%s it %lld obj %.10g true %.10g (last 100: shifts %lld, zero steps %lld, flips %lld), infeasible %zu\n", phase1 ? "1" : "2", total_iterations_, obj, tobj, dbg_shifts_, dbg_degen_, dbg_flips_, infeas_list_.size());
       dbg_shifts_ = dbg_degen_ = dbg_flips_ = 0;
     }
   }
@@ -1317,7 +1432,7 @@ LpStatus DualSimplex::primal_loop(const LpOptions& opt) {
       if (infeas > best) best = infeas, q = j;
     }
     if (q < 0) {
-      dse_.assign(m_, 1.0);
+      if (!kPrimalDse) dse_.assign(m_, 1.0);
       return LpStatus::Optimal;
     }
     const double dir = d_[q] < 0 ? 1.0 : -1.0;
@@ -1376,6 +1491,27 @@ LpStatus DualSimplex::primal_loop(const LpOptions& opt) {
     }
     d_[q] = 0.0;
     d_[jl] = -theta_d;
+    if (kPrimalDse) {
+      // MILP_LP_PRIMAL_DSE: the dual steepest-edge weights follow the primal pivots (the dual loop's
+      // update; one more ftran, of rho), so the next dual loop or warm solve keeps them.
+      double wr = 0.0;
+      tau_.clear();
+      for (Index e = 0; e < rho_.count; ++e) {
+        const Index i = rho_.nz[e];
+        const double v = rho_.dense[i];
+        wr += v * v;
+        tau_.dense[i] = v;
+        tau_.nz[tau_.count++] = i;
+      }
+      lu_.ftran(tau_, dens_tau_, false);
+      for (Index e = 0; e < alpha_.count; ++e) {
+        const Index p = alpha_.nz[e];
+        if (p == r) continue;
+        const double ratio = alpha[p] / alpha_rq;
+        dse_[p] = std::max(dse_[p] - 2.0 * ratio * tau_.dense[p] + ratio * ratio * wr, 1e-6);
+      }
+      dse_[r] = std::max(wr / (alpha_rq * alpha_rq), 1e-6);
+    }
     lu_.update(r, alpha_);
     basic_[r] = q;
     status_[q] = VarStatus::Basic;

@@ -165,7 +165,8 @@ def read_mps(path) -> Model:
     with _open(path) as f:
         for lineno, raw in enumerate(f, 1):
             line = raw.rstrip("\n\r")
-            if not line.strip() or line.lstrip().startswith("*"):
+            # A comment has its '*' in column 1: irish-electricity's RHS lines start with "    *RHS*".
+            if not line.strip() or line.startswith("*"):
                 continue
             toks = line.split()
             if not line[0].isspace():

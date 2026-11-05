@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <random>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "milp/presolve/clique_merge.hpp"
 #include "milp/presolve/implied_int.hpp"
 #include "milp/presolve/presolve.hpp"
+#include "milp/presolve/probing.hpp"
 #include "milp/solver/postsolve.hpp"
 #include "milp/solver/solver.hpp"
 #include "test_framework.hpp"
@@ -52,6 +54,7 @@ PresolveOptions only(bool bt, bool coef, bool par, bool dual, bool aggr) {
   o.probing = false;
   o.parallel_cols = false;
   o.dominated_cols = false;
+  o.sparsify = false;
   return o;
 }
 
@@ -921,18 +924,20 @@ int g_numeric = 0;      // cases skipped because the LP solver reported numerica
 
 void print_coverage(const char* name) {
   std::printf("  %s reductions: %lld aggregations, %lld substitutions, %lld parallel cols, %lld dominated, probing "
-              "%lld fixed / %lld bounds / %lld equivs, cliques %lld extended / %lld dominated / %lld fixed\n",
+              "%lld fixed / %lld bounds / %lld equivs / %lld lifts, cliques %lld extended / %lld dominated / %lld fixed, "
+              "%lld rows sparsified\n",
               name, g_stats.aggregations, g_stats.substitutions, g_stats.parallel_cols, g_stats.dominated,
-              g_stats.probing_fixed, g_stats.probing_bounds, g_stats.probing_equivs, g_stats.clique_extended,
-              g_stats.clique_dominated, g_stats.clique_fixed);
+              g_stats.probing_fixed, g_stats.probing_bounds, g_stats.probing_equivs, g_stats.probing_lifts,
+              g_stats.clique_extended, g_stats.clique_dominated, g_stats.clique_fixed, g_stats.sparsify_rows);
   if (g_numeric > 0) std::printf("  %s: %d cases skipped (numerical trouble)\n", name, g_numeric);
   g_stats = PresolveStats{};
   g_numeric = 0;
 }
 
 // Solves m with and without presolve (presolve + reduced solve + postsolve, without the solver's safety fallback)
-// and checks that both agree. Returns the status without presolve (NodeLimit if skipped).
-Status compare_with_presolve(const Model& m, int it) {
+// and checks that both agree. Returns the status without presolve (NodeLimit if skipped). sparsify: 0 / 1 off / on,
+// -1 off in a third of the cases.
+Status compare_with_presolve(const Model& m, int it, int sparsify = -1) {
   SolverParams params;
   params.verbosity = 0;
   params.threads = 1;
@@ -949,12 +954,17 @@ Status compare_with_presolve(const Model& m, int it) {
   const bool valid = MipProblem::from_model(m, &p);
   PresolveOptions opt;
   opt.substitution_bounded = it % 2 == 1;  // the default (off) and the opt-in variant
+  opt.probing_cliques = it % 4 >= 2;       // likewise
+  opt.sparsify = sparsify < 0 ? it % 3 != 2 : sparsify != 0;
+  opt.sparsify_protect = (it / 4) % 2 == 0;  // the default (on) and off
   const PresolveStatus ps = valid ? pre.run(p, opt, kQuiet) : PresolveStatus::Infeasible;
+  g_stats.sparsify_rows += pre.stats().sparsify_rows;
   g_stats.aggregations += pre.stats().aggregations;
   g_stats.substitutions += pre.stats().substitutions;
   g_stats.probing_fixed += pre.stats().probing_fixed;
   g_stats.probing_bounds += pre.stats().probing_bounds;
   g_stats.probing_equivs += pre.stats().probing_equivs;
+  g_stats.probing_lifts += pre.stats().probing_lifts;
   g_stats.parallel_cols += pre.stats().parallel_cols;
   g_stats.dominated += pre.stats().dominated;
   g_stats.clique_extended += pre.stats().clique_extended;
@@ -1150,6 +1160,55 @@ TEST(presolve_random_structured_milps_match_no_presolve) {
   std::printf("  structured presolve: %d optimal, %d infeasible, %d other\n", optimal, infeasible, other);
   print_coverage("structured");
   CHECK(optimal > iters / 5);
+}
+
+TEST(presolve_roundoff_regressions) {
+  // Wrong answers of the presolve found by the sparsify fuzz test (minimized; also without sparsify).
+  // (1) GCD tightening: 5 x8 + 5 x5 in [13.9999999999972, 14.9999999999972] (the coefficient tightening's safety
+  // margin on a row with -3.5, carried through a parallel-row merge and two substitutions) was declared infeasible:
+  // the lower side was rounded up to 15, the upper one stayed just below it. (2) The same with a margin from a
+  // propagated continuous bound. (3) 0.1 - 0.1 = 1.4e-17 left by a substitution for a free integer column became
+  // the pivot of the next one (optimum 160.25, presolved 27.25).
+  const char* cases[] = {
+      "NAME c13\nOBJSENSE\n  MAX\nROWS\n N OBJ\n E r0\n L r5\n L r6\nCOLUMNS\n"
+      "    MARK0000 'MARKER' 'INTORG'\n"
+      "    x10 OBJ 5\n    x10 r0 -8\n    x10 r6 -8\n    x9 OBJ 2\n    x9 r0 2\n    x9 r5 -1\n    x9 r6 2\n"
+      "    x8 OBJ 5\n    x8 r0 5\n    x5 OBJ -5\n    x5 r0 5\n    x2 OBJ 2\n    x2 r0 7\n    x2 r5 -3.5\n    x2 r6 7\n"
+      "    MARK0001 'MARKER' 'INTEND'\n"
+      "RHS\n    RHS r0 24\n    RHS r5 -8.5\n    RHS r6 10\n"
+      "BOUNDS\n BV BND x10\n UI BND x9 6\n BV BND x8\n UI BND x5 5\n UI BND x2 4\nENDATA\n",
+      "NAME c21\nROWS\n N OBJ\n E r0\n L r3\n L r4\n L r5\n L r7\nCOLUMNS\n"
+      "    x9 OBJ -4\n    x9 r0 5\n    x9 r3 -2.25\n    x9 r4 0.5\n    x9 r5 -0.075\n    x9 r7 -0.75\n"
+      "    MARK0000 'MARKER' 'INTORG'\n"
+      "    x8 OBJ -2\n    x8 r5 -4\n    x8 r7 -3\n    x7 OBJ 1\n    x7 r0 -1.75\n    x7 r3 -5.25\n    x7 r4 -0.175\n"
+      "    x7 r5 -0.175\n    x7 r7 -1.75\n    x5 OBJ -3\n    x5 r5 3\n"
+      "    MARK0001 'MARKER' 'INTEND'\n"
+      "RHS\n    RHS r0 21.25\n    RHS r3 -6.5625\n    RHS r4 2.125\n    RHS r5 -12.31875\n    RHS r7 -12.1875\n"
+      "RANGES\n    RNG r3 6\n    RNG r4 3\n    RNG r5 1\n    RNG r7 1\n"
+      "BOUNDS\n UP BND x9 7\n UI BND x8 7\n BV BND x7\n BV BND x5\nENDATA\n",
+      "NAME c22\nOBJSENSE\n  MAX\nROWS\n N OBJ\n E r1\n E r2\n E r4\nCOLUMNS\n"
+      "    x7 OBJ 3\n    x7 r1 -5\n"
+      "    MARK0000 'MARKER' 'INTORG'\n"
+      "    x3 OBJ 4\n    x3 r1 -7\n    x3 r2 1\n    x3 r4 0.1\n"
+      "    MARK0001 'MARKER' 'INTEND'\n"
+      "    x2 OBJ 5\n    x2 r1 8\n    x2 r2 -1.5\n    x2 r4 -0.15\n"
+      "    MARK0002 'MARKER' 'INTORG'\n"
+      "    x1 OBJ 5\n    x1 r1 1.25\n    x1 r4 1\n"
+      "    MARK0003 'MARKER' 'INTEND'\n"
+      "RHS\n    RHS r1 -31.75\n    RHS r2 -0.375\n    RHS r4 0.9625\n"
+      "BOUNDS\n UP BND x7 7\n LI BND x3 0\n BV BND x1\nENDATA\n",
+  };
+  const double opt[] = {12.0, -23.0, 160.25};
+  for (int k = 0; k < 3; ++k) {
+    const Model m = read_mps_string(cases[k]);
+    CHECK(compare_with_presolve(m, 0) == Status::Optimal);
+    SolverParams sp;
+    sp.verbosity = 0;
+    sp.threads = 1;
+    const SolveResult r = solve(m, sp);
+    CHECK(r.status == Status::Optimal);
+    CHECK_NEAR(r.objective, opt[k], 1e-6);
+  }
 }
 
 namespace {
@@ -1420,4 +1479,601 @@ TEST(presolve_random_implied_integer_models) {
   print_coverage("implint");
   CHECK(optimal > iters / 4);
   CHECK(implied > iters / 2);
+}
+
+namespace {
+
+// Random pure-integer models small enough to enumerate (4-10 binaries, at most two integers in [0, 3]): set
+// packing / partitioning / covering rows, knapsacks, implications, big-M rows, cardinality rows and rows with
+// mixed signs; mostly one-sided (the rows probing lifts).
+MipProblem random_enum_model(std::mt19937& rng) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  Builder b;
+  std::vector<Index> bin, gen, all;
+  for (int j = uni(4, 10); j > 0; --j) bin.push_back(b.col(uni(-5, 5), 0.0, 1.0, true));
+  for (int j = uni(0, 2); j > 0; --j) gen.push_back(b.col(uni(-3, 3), 0.0, uni(1, 3), true));
+  all = bin;
+  all.insert(all.end(), gen.begin(), gen.end());
+  std::vector<double> ub(all.size() + 1, 1.0);
+  for (Index g : gen) ub[g] = b.b.model().col_ub[g];
+  auto pick = [&](const std::vector<Index>& v) { return v[uni(0, static_cast<int>(v.size()) - 1)]; };
+  auto row = [&](double lo, double hi, const std::vector<std::pair<Index, double>>& c) {
+    std::vector<std::pair<Index, double>> u;
+    for (const auto& e : c) {
+      if (std::none_of(u.begin(), u.end(), [&](const auto& f) { return f.first == e.first; })) u.push_back(e);
+    }
+    if (u.size() >= 2) b.row(lo, hi, u);
+  };
+  for (int i = uni(2, 9); i > 0; --i) {
+    const int kind = uni(0, 5);
+    std::vector<std::pair<Index, double>> c;
+    if (kind == 0) {  // set packing / partitioning / covering
+      for (int k = uni(2, 5); k > 0; --k) c.push_back({pick(bin), 1.0});
+      const int s = uni(0, 3);
+      row(s == 2 ? 1.0 : -kInf, s == 3 ? kInf : 1.0, c);
+    } else if (kind == 1) {  // knapsack (or its covering counterpart)
+      double tot = 0.0;
+      for (int k = uni(2, 6); k > 0; --k) {
+        const double a = uni(1, 9);
+        c.push_back({pick(all), a});
+        tot += a;
+      }
+      const double rhs = std::floor(tot * uni(3, 8) / 10.0);
+      if (uni(0, 3)) row(-kInf, rhs, c); else row(rhs, kInf, c);
+    } else if (kind == 2) {  // x <= y, x + y <= 1, x + y >= 1
+      const int t = uni(0, 2);
+      row(t == 2 ? 1.0 : -kInf, t == 0 ? 0.0 : (t == 1 ? 1.0 : kInf), {{pick(bin), 1.0}, {pick(bin), t == 0 ? -1.0 : 1.0}});
+    } else if (kind == 3 && !gen.empty()) {  // big-M: g <= M x
+      row(-kInf, 0.0, {{pick(gen), 1.0}, {pick(bin), -static_cast<double>(uni(2, 9))}});
+    } else if (kind == 4) {  // cardinality
+      for (int k = uni(3, 6); k > 0; --k) c.push_back({pick(bin), 1.0});
+      if (uni(0, 1)) row(-kInf, 2.0, c); else row(2.0, kInf, c);
+    } else {  // mixed signs, one-sided (sometimes an equation)
+      double lo = 0.0, hi = 0.0;
+      for (int k = uni(2, 5); k > 0; --k) {
+        const Index j = pick(all);
+        double a = uni(-4, 4);
+        if (a == 0.0) a = 1.0;
+        c.push_back({j, a});
+        (a > 0 ? hi : lo) += a * ub[j];
+      }
+      const double rhs = std::round(lo + (hi - lo) * uni(2, 7) / 10.0);
+      const int s = uni(0, 5);
+      row(s >= 3 ? rhs : -kInf, s == 5 || s < 3 ? rhs : kInf, c);
+    }
+  }
+  return b.build();
+}
+
+// The integer points within the bounds of p satisfying its rows (absolute tolerance 1e-9).
+std::vector<std::vector<double>> enumerate_feasible(const MipProblem& p) {
+  const Index n = p.num_cols();
+  const SparseMatrix R = p.A.transpose();
+  std::vector<std::vector<double>> out;
+  std::vector<double> x(n);
+  for (Index j = 0; j < n; ++j) x[j] = p.col_lb[j];
+  for (;;) {
+    bool ok = true;
+    for (Index i = 0; i < p.num_rows() && ok; ++i) {
+      double act = 0.0;
+      for (Index k = R.begin(i); k < R.end(i); ++k) act += R.value[k] * x[R.index[k]];
+      ok = act >= p.row_lb[i] - 1e-9 && act <= p.row_ub[i] + 1e-9;
+    }
+    if (ok) out.push_back(x);
+    Index j = 0;
+    while (j < n && x[j] >= p.col_ub[j]) x[j] = p.col_lb[j], ++j;
+    if (j == n) break;
+    x[j] += 1.0;
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(probing_lifting_keeps_feasible_points) {
+  // Probing results on enumerable models: every feasible point satisfies the derived bounds, equivalences and
+  // conflicts and each lifted row (liftings of different rows hold together: at most one per row).
+  std::mt19937 rng(fuzz_seed(4242u));
+  const int iters = fuzz_iters(2000);
+  long long lifts = 0, fills = 0, conflicts = 0, equivs = 0, infeasible = 0;
+  for (int it = 0; it < iters; ++it) {
+    const MipProblem p = random_enum_model(rng);
+    const auto pts = enumerate_feasible(p);
+    ProbingOptions po;
+    po.lift = true;
+    po.max_conflicts = 100000;
+    const ProbingResult pr = probe_binaries(p, 10000000, po);
+    if (pr.infeasible) {
+      ++infeasible;
+      if (!CHECK(pts.empty())) std::fprintf(stderr, "  case %d: probing infeasible, %zu feasible points\n", it, pts.size());
+      continue;
+    }
+    bool ok = true;
+    for (const auto& x : pts) {
+      for (Index j = 0; j < p.num_cols(); ++j) ok = ok && x[j] >= pr.lb[j] - 1e-9 && x[j] <= pr.ub[j] + 1e-9;
+      for (const ProbingResult::Equiv& e : pr.equiv) ok = ok && std::abs(x[e.y] - (e.v0 + (e.v1 - e.v0) * x[e.x])) <= 1e-9;
+      for (const auto& [a, c] : pr.conflicts) ok = ok && !(x[a >> 1] == (a & 1) && x[c >> 1] == (c & 1));
+    }
+    if (!CHECK(ok)) std::fprintf(stderr, "  case %d: bounds / equivalences / conflicts cut off a feasible point\n", it);
+    const SparseMatrix R = p.A.transpose();
+    std::vector<char> lifted(p.num_rows(), 0);
+    for (const ProbingResult::Lift& l : pr.lifts) {
+      CHECK(!lifted[l.row]);
+      lifted[l.row] = 1;
+      // The row in <= form with the lifting applied.
+      const double s = l.upper ? 1.0 : -1.0;
+      std::vector<double> a(p.num_cols(), 0.0);
+      for (Index k = R.begin(l.row); k < R.end(l.row); ++k) a[R.index[k]] = s * R.value[k];
+      CHECK(l.fill == (a[l.col] == 0.0));
+      double rhs = l.upper ? p.row_ub[l.row] : -p.row_lb[l.row];
+      a[l.col] += l.one ? l.delta : -l.delta;
+      if (!l.one) rhs -= l.delta;
+      bool row_ok = true;
+      for (const auto& x : pts) {
+        double act = 0.0;
+        for (Index j = 0; j < p.num_cols(); ++j) act += a[j] * x[j];
+        row_ok = row_ok && act <= rhs + 1e-9;
+      }
+      if (!CHECK(row_ok)) std::fprintf(stderr, "  case %d: lifting of row %d by col %d cuts off a feasible point\n", it, l.row, l.col);
+      ++lifts;
+      fills += l.fill;
+    }
+    conflicts += static_cast<long long>(pr.conflicts.size());
+    equivs += static_cast<long long>(pr.equiv.size());
+  }
+  std::printf("  probing: %lld liftings (%lld new entries), %lld conflicts, %lld equivalences, %lld infeasible\n", lifts,
+              fills, conflicts, equivs, infeasible);
+  CHECK(lifts > iters / 4);
+  CHECK(fills > 0);
+  CHECK(conflicts > iters);
+}
+
+TEST(presolve_probing_round_trip_enumerated) {
+  // Presolve with probing (liftings, passes, kept implications; clique extension): the feasible points of the
+  // original problem map exactly onto those of the reduced one (crush), and back (postsolve).
+  std::mt19937 rng(fuzz_seed(777777u));
+  const int iters = fuzz_iters(1500);
+  long long lifts = 0, compared = 0;
+  for (int it = 0; it < iters; ++it) {
+    const MipProblem p = random_enum_model(rng);
+    const auto pts = enumerate_feasible(p);
+    PresolveOptions o = only_probing();
+    o.probing_cliques = it % 2 == 1;
+    Presolver pre;
+    const PresolveStatus st = pre.run(p, o, kQuiet);
+    if (st == PresolveStatus::Infeasible) {
+      if (!CHECK(pts.empty())) std::fprintf(stderr, "  case %d: presolve infeasible, %zu feasible points\n", it, pts.size());
+      continue;
+    }
+    REQUIRE(st == PresolveStatus::Reduced);
+    lifts += pre.stats().probing_lifts;
+    const MipProblem& q = pre.reduced();
+    std::set<std::vector<double>> image;
+    bool ok = true;
+    for (const auto& x : pts) {
+      const std::vector<double> z = pre.crush(x);
+      ok = ok && q.max_violation(z) <= 1e-9;
+      image.insert(z);
+    }
+    if (!CHECK(ok)) std::fprintf(stderr, "  case %d: presolve cut off a feasible point\n", it);
+    if (q.num_cols() > 14) continue;
+    const auto red = enumerate_feasible(q);
+    ++compared;
+    if (!CHECK_EQ(red.size(), image.size())) {
+      std::fprintf(stderr, "  case %d: %zu reduced vs %zu original points\n", it, red.size(), image.size());
+    }
+    bool back = true;
+    for (const auto& z : red) back = back && p.max_violation(pre.postsolve(z)) <= 1e-9;
+    if (!CHECK(back)) std::fprintf(stderr, "  case %d: a reduced point postsolves to an infeasible one\n", it);
+  }
+  std::printf("  probing round trip: %lld liftings, %lld compared exactly\n", lifts, compared);
+  CHECK(lifts > iters / 10);
+  CHECK(compared > iters / 2);
+}
+
+TEST(presolve_probing_lifts_big_m) {
+  // y <= 100 x where x = 1 forces w = 1 and with it y <= 5 (y + 10 w <= 15): lifted to y <= 5 x (with x = 0,
+  // y = 0 already). Liftings off: the coefficient stays.
+  for (bool lift : {true, false}) {
+    Builder b;
+    const Index x = b.col(1.0, 0.0, 1.0, true);
+    const Index w = b.col(1.0, 0.0, 1.0, true);
+    const Index y = b.col(-1.0, 0.0, 100.0);
+    const Index z = b.col(-1.0, 0.0, 1.0, true);
+    b.row(-kInf, 0.0, {{y, 1.0}, {x, -100.0}});
+    b.row(-kInf, 15.0, {{y, 1.0}, {w, 10.0}, {z, 1.0}});
+    b.row(-kInf, 0.0, {{x, 1.0}, {w, -1.0}});
+    PresolveOptions o = only_probing();
+    o.probing_lift = lift;
+    Presolver pre;
+    REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+    const MipProblem& q = pre.reduced();
+    const Index rx = reduced_index(pre, x), ry = reduced_index(pre, y);
+    REQUIRE(rx >= 0 && ry >= 0);
+    // The row of exactly y and x: its coefficient ratio.
+    const SparseMatrix R = q.A.transpose();
+    double ratio = 0.0;
+    for (Index i = 0; i < q.num_rows(); ++i) {
+      double ax = 0.0, ay = 0.0;
+      for (Index k = R.begin(i); k < R.end(i); ++k) {
+        if (R.index[k] == rx) ax = R.value[k];
+        if (R.index[k] == ry) ay = R.value[k];
+      }
+      if (ax != 0.0 && ay != 0.0 && R.end(i) - R.begin(i) == 2) ratio = ax / ay;
+    }
+    CHECK_NEAR(ratio, lift ? -5.0 : -100.0, 1e-9);
+    CHECK_EQ(pre.stats().probing_lifts > 0, lift);
+  }
+}
+
+namespace {
+
+// Random MILPs with the structures liftings work on: knapsacks and set packing over binaries, big-M rows of
+// continuous and general integer columns, implications and partitioning rows.
+Model random_lifting_model(std::mt19937& rng) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  ModelBuilder b;
+  std::vector<Index> bin, oth;
+  for (int j = uni(4, 12); j > 0; --j) bin.push_back(b.add_col("b" + std::to_string(j), uni(-6, 4), 0, 1, VarType::Binary));
+  for (int j = uni(1, 4); j > 0; --j) {
+    const bool integer = uni(0, 1);
+    oth.push_back(b.add_col("o" + std::to_string(j), uni(-4, 1), 0, uni(2, 20), integer ? VarType::Integer : VarType::Continuous));
+  }
+  auto pick = [&](const std::vector<Index>& v) { return v[uni(0, static_cast<int>(v.size()) - 1)]; };
+  int r = 0;
+  auto row = [&](double lo, double hi, const std::vector<std::pair<Index, double>>& c) {
+    const Index i = b.add_row("r" + std::to_string(r++), lo, hi);
+    std::vector<Index> seen;
+    for (const auto& [j, v] : c) {
+      if (std::find(seen.begin(), seen.end(), j) != seen.end()) continue;
+      seen.push_back(j);
+      b.add_coef(i, j, v);
+    }
+  };
+  for (int i = uni(3, 10); i > 0; --i) {
+    const int kind = uni(0, 4);
+    std::vector<std::pair<Index, double>> c;
+    if (kind == 0) {
+      for (int k = uni(2, 5); k > 0; --k) c.push_back({pick(bin), 1.0});
+      row(uni(0, 3) ? -kInf : 1.0, 1.0, c);
+    } else if (kind == 1) {
+      double tot = 0.0;
+      for (int k = uni(2, 6); k > 0; --k) {
+        const double a = uni(1, 9) * (uni(0, 4) ? 1.0 : 0.5);
+        c.push_back({uni(0, 3) ? pick(bin) : pick(oth), a});
+        tot += a;
+      }
+      row(-kInf, std::floor(tot * uni(3, 7) / 10.0), c);
+    } else if (kind == 2) {
+      row(-kInf, 0.0, {{pick(oth), 1.0}, {pick(bin), -static_cast<double>(uni(5, 50))}});
+    } else if (kind == 3) {
+      const bool imp = uni(0, 1);
+      row(-kInf, imp ? 0.0 : 1.0, {{pick(bin), 1.0}, {pick(bin), imp ? -1.0 : 1.0}});
+    } else {
+      for (int k = uni(2, 4); k > 0; --k) c.push_back({pick(oth), static_cast<double>(uni(1, 3))});
+      c.push_back({pick(bin), static_cast<double>(uni(1, 8))});
+      row(-kInf, uni(4, 15), c);
+    }
+  }
+  if (uni(0, 1)) b.model().sense = ObjSense::Maximize;
+  return b.build();
+}
+
+}  // namespace
+
+TEST(presolve_random_lifting_milps_match_no_presolve) {
+  std::mt19937 rng(fuzz_seed(31337u));
+  const int iters = fuzz_iters(1000);
+  int optimal = 0;
+  for (int it = 0; it < iters; ++it) optimal += compare_with_presolve(random_lifting_model(rng), it) == Status::Optimal;
+  std::printf("  lifting models: %d optimal\n", optimal);
+  const long long lifts = g_stats.probing_lifts;
+  print_coverage("lifting");
+  CHECK(optimal > iters / 2);
+  CHECK(lifts > iters / 10);
+}
+
+TEST(presolve_sparsify_cancels_entries) {
+  // 2 y1 + 3 y2 + 5 y3 = 10 (general integers: not substituted, 3 / 2 is fractional) taken from
+  // 2 y1 + 3 y2 + 5 y3 + 2 y4 <= 12 leaves 2 y4 <= 2: y4 <= 1, fixed there by its cost. Off: y4 <= 6.
+  for (bool on : {true, false}) {
+    Builder b;
+    const Index y1 = b.col(1.0, 0.0, 10.0, true), y2 = b.col(1.0, 0.0, 10.0, true), y3 = b.col(1.0, 0.0, 10.0, true);
+    const Index y4 = b.col(-1.0, 0.0, 10.0, true);
+    b.row(10.0, 10.0, {{y1, 2.0}, {y2, 3.0}, {y3, 5.0}});
+    b.row(-kInf, 12.0, {{y1, 2.0}, {y2, 3.0}, {y3, 5.0}, {y4, 2.0}});
+    PresolveOptions o;
+    o.sparsify = on;
+    Presolver pre;
+    REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+    CHECK_EQ(pre.stats().sparsify_rows, on ? 1LL : 0LL);
+    const Index r4 = reduced_index(pre, y4);
+    if (on) {
+      CHECK(r4 < 0);
+      CHECK_EQ(pre.postsolve(pre.reduced().col_lb)[y4], 1.0);
+    } else {
+      REQUIRE(r4 >= 0);
+      CHECK_EQ(pre.reduced().col_ub[r4], 6.0);
+    }
+  }
+}
+
+TEST(presolve_sparsify_keeps_structure) {
+  // Only sparsify (and the basic row / column passes).
+  PresolveOptions o = only(false, false, false, false, false);
+  o.clique_extension = false;
+  o.sparsify = true;
+  {
+    // The set partitioning equation x1 + x2 + x3 = 1 is not used: x1 + x2 + x4 <= 1 would become x4 - x3 <= 0.
+    Builder b;
+    const Index x1 = b.col(-1.0, 0.0, 1.0, true), x2 = b.col(-1.0, 0.0, 1.0, true), x3 = b.col(-1.0, 0.0, 1.0, true);
+    const Index x4 = b.col(-1.0, 0.0, 1.0, true), z = b.col(1.0, 0.0, 5.0);
+    b.row(1.0, 1.0, {{x1, 1.0}, {x2, 1.0}, {x3, 1.0}});
+    b.row(-kInf, 1.0, {{x1, 1.0}, {x2, 1.0}, {x4, 1.0}});
+    b.row(-kInf, 4.0, {{x1, 2.0}, {x2, 2.0}, {x4, 1.0}, {z, 1.0}});
+    Presolver pre;
+    REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+    CHECK_EQ(pre.stats().sparsify_rows, 0LL);
+  }
+  {
+    // A set packing row is kept: x1 + x2 + x3 - y + w = 1 (no partitioning row) would turn x1 + x2 + x3 <= 1 into
+    // y - w <= 0 and lose the clique. The mixed row 3 x1 + 3 x2 + 3 x3 + z <= 7 becomes 3 y - 3 w + z <= 4.
+    Builder b;
+    const Index x1 = b.col(-1.0, 0.0, 1.0, true), x2 = b.col(-1.0, 0.0, 1.0, true), x3 = b.col(-1.0, 0.0, 1.0, true);
+    const Index y = b.col(1.0, 0.0, 1.0, true), w = b.col(1.0, 0.0, 1.0, true), z = b.col(-1.0, 0.0, 5.0);
+    b.row(1.0, 1.0, {{x1, 1.0}, {x2, 1.0}, {x3, 1.0}, {y, -1.0}, {w, 1.0}});
+    b.row(-kInf, 1.0, {{x1, 1.0}, {x2, 1.0}, {x3, 1.0}});
+    b.row(-kInf, 7.0, {{x1, 3.0}, {x2, 3.0}, {x3, 3.0}, {z, 1.0}});
+    Presolver pre;
+    REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+    CHECK_EQ(pre.stats().sparsify_rows, 1LL);
+    CHECK_EQ(pre.stats().sparsify_removed, 1LL);
+    CHECK_EQ(pre.reduced().A.nnz(), 11);
+  }
+  {
+    // A row of integer columns with integral coefficients stays integral: 0.5 y1 + 0.5 y2 + 0.25 y3 = 1 is not added
+    // to y1 + y2 + y4 <= 3 (lambda = -2 gives -0.5 y3), but it is to y1 + y2 + z <= 3 (z continuous): -0.5 y3 + z <= 1.
+    Builder b;
+    const Index y1 = b.col(1.0, 0.0, 4.0, true), y2 = b.col(1.0, 0.0, 4.0, true), y3 = b.col(1.0, 0.0, 4.0, true);
+    const Index y4 = b.col(-1.0, 0.0, 4.0, true), z = b.col(-1.0, 0.0, 4.0);
+    b.row(1.0, 1.0, {{y1, 0.5}, {y2, 0.5}, {y3, 0.25}});
+    b.row(-kInf, 3.0, {{y1, 1.0}, {y2, 1.0}, {y4, 1.0}});
+    b.row(-kInf, 3.0, {{y1, 1.0}, {y2, 1.0}, {z, 1.0}});
+    Presolver pre;
+    REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+    CHECK_EQ(pre.stats().sparsify_rows, 1LL);
+    const MipProblem& q = pre.reduced();
+    REQUIRE(q.num_rows() == 3);
+    const SparseMatrix R = q.A.transpose();
+    CHECK_EQ(R.end(1) - R.begin(1), 3);  // unchanged
+    CHECK_EQ(R.end(2) - R.begin(2), 2);
+    CHECK_EQ(q.row_ub[2], 1.0);
+  }
+}
+
+TEST(presolve_sparsify_protects_variable_bounds) {
+  // Equations with a continuous column that has a variable bound are not used (sparsify_protect); off, they are.
+  for (bool protect : {true, false}) {
+    PresolveOptions o = only(false, false, false, false, false);
+    o.clique_extension = false;
+    o.sparsify = true;
+    o.sparsify_protect = protect;
+    {
+      // Flow balance x1 + x2 - x3 = 0 with x1 <= 5 y1, x2 <= 5 y2: x1 + x2 + x4 = 2 would become x3 + x4 = 2.
+      Builder b;
+      const Index x1 = b.col(1.0, 0.0, 5.0), x2 = b.col(1.0, 0.0, 5.0), x3 = b.col(1.0, 0.0, 5.0);
+      const Index x4 = b.col(1.0, 0.0, 5.0), x5 = b.col(-1.0, 0.0, 5.0), x6 = b.col(-1.0, 0.0, 5.0);
+      const Index y1 = b.col(1.0, 0.0, 1.0, true), y2 = b.col(1.0, 0.0, 1.0, true);
+      b.row(0.0, 0.0, {{x1, 1.0}, {x2, 1.0}, {x3, -1.0}});
+      b.row(-kInf, 0.0, {{x1, 1.0}, {y1, -5.0}});
+      b.row(-kInf, 0.0, {{x2, 1.0}, {y2, -5.0}});
+      b.row(2.0, 2.0, {{x1, 1.0}, {x2, 1.0}, {x4, 1.0}});
+      b.row(-kInf, 7.0, {{x3, 1.0}, {x5, 1.0}});
+      b.row(-3.0, kInf, {{x3, 1.0}, {x6, -1.0}});
+      Presolver pre;
+      REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+      CHECK_EQ(pre.stats().sparsify_rows, protect ? 0LL : 1LL);
+    }
+    {
+      // Arc total z = f1 + f2 + f3 and the capacity row f1 + f2 + f3 <= 7 y (y general integer): the capacity row
+      // would become z <= 7 y, hiding the flows from the cut separators.
+      Builder b;
+      const Index f1 = b.col(1.0, 0.0, kInf), f2 = b.col(2.0, 0.0, kInf), f3 = b.col(3.0, 0.0, kInf);
+      const Index z = b.col(0.0, 0.0, kInf), y = b.col(4.0, 0.0, 10.0, true);
+      b.row(0.0, 0.0, {{f1, 1.0}, {f2, 1.0}, {f3, 1.0}, {z, -1.0}});
+      b.row(-kInf, 0.0, {{f1, 1.0}, {f2, 1.0}, {f3, 1.0}, {y, -7.0}});
+      b.row(5.0, kInf, {{f1, 1.0}, {f2, 1.0}});
+      Presolver pre;
+      REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+      CHECK_EQ(pre.stats().sparsify_rows, protect ? 0LL : 1LL);
+    }
+  }
+}
+
+namespace {
+
+// Random pure-integer models small enough to enumerate (4-9 binaries, at most two integers in [0, 3]) built around
+// 1-3 equations (general coefficients, now and then set partitioning) and rows containing most of an equation's
+// columns with proportional coefficients (multiples +-1, 2, -2, 1/2, 3; sometimes one coefficient off by 1) and a few
+// others: the rows sparsify combines.
+MipProblem random_sparsify_model(std::mt19937& rng) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  Builder b;
+  std::vector<Index> all;
+  std::vector<double> ub, x0;
+  for (int j = uni(4, 9); j > 0; --j) all.push_back(b.col(uni(-5, 5), 0.0, 1.0, true)), ub.push_back(1.0);
+  for (int j = uni(0, 2); j > 0; --j) {
+    ub.push_back(uni(1, 3));
+    all.push_back(b.col(uni(-3, 3), 0.0, ub.back(), true));
+  }
+  for (size_t j = 0; j < all.size(); ++j) x0.push_back(uni(0, static_cast<int>(ub[j])));
+  auto pick = [&] { return all[uni(0, static_cast<int>(all.size()) - 1)]; };
+  auto act = [&](const std::vector<std::pair<Index, double>>& c) {
+    double v = 0.0;
+    for (const auto& [j, a] : c) v += a * x0[j];
+    return v;
+  };
+  auto unique = [](const std::vector<std::pair<Index, double>>& c) {
+    std::vector<std::pair<Index, double>> u;
+    for (const auto& e : c) {
+      if (e.second != 0.0 && std::none_of(u.begin(), u.end(), [&](const auto& f) { return f.first == e.first; })) {
+        u.push_back(e);
+      }
+    }
+    return u;
+  };
+  std::vector<std::vector<std::pair<Index, double>>> eqs;
+  for (int k = uni(1, 3); k > 0; --k) {
+    std::vector<std::pair<Index, double>> c;
+    const bool part = uni(0, 4) == 0;
+    for (int t = uni(2, 5); t > 0; --t) c.push_back({pick(), part ? 1.0 : (uni(0, 1) ? 1.0 : -1.0) * uni(1, 3)});
+    c = unique(c);
+    if (c.size() < 2) continue;
+    const double rhs = part ? 1.0 : act(c);  // feasible at x0 (or a set partitioning row)
+    b.row(rhs, rhs, c);
+    eqs.push_back(c);
+  }
+  if (eqs.empty()) return b.build();
+  for (int i = uni(2, 7); i > 0; --i) {
+    const auto& e = eqs[uni(0, static_cast<int>(eqs.size()) - 1)];
+    const double mult[] = {1.0, -1.0, 2.0, -2.0, 0.5, 3.0};
+    const double s = mult[uni(0, 5)];
+    const int len = static_cast<int>(e.size());
+    const int skip = len > 2 && uni(0, 1) ? uni(0, len - 1) : -1;
+    std::vector<std::pair<Index, double>> c;
+    for (int t = 0; t < len; ++t) {
+      if (t != skip) c.push_back({e[t].first, s * e[t].second + (uni(0, 5) == 0 ? 1.0 : 0.0)});
+    }
+    for (int t = uni(0, 2); t > 0; --t) c.push_back({pick(), static_cast<double>(uni(-3, 4))});
+    c = unique(c);
+    if (c.size() < 2) continue;
+    const double v = act(c);
+    const int sense = uni(0, 4);
+    b.row(sense == 0 ? -kInf : v - uni(0, 2), sense == 1 ? kInf : (sense == 2 ? v : v + uni(0, 2)), c);
+  }
+  return b.build();
+}
+
+}  // namespace
+
+TEST(presolve_sparsify_round_trip_enumerated) {
+  // Presolve with sparsify and the primal reductions (bounds, coefficients, parallel rows, aggregation, substitution,
+  // probing in half of the cases, clique extension), or sparsify alone: the feasible points of the original problem
+  // map exactly onto those of the reduced one (crush), and back (postsolve).
+  std::mt19937 rng(fuzz_seed(24680u));
+  const int iters = fuzz_iters(2000);
+  long long combos = 0, compared = 0;
+  for (int it = 0; it < iters; ++it) {
+    const MipProblem p = random_sparsify_model(rng);
+    const auto pts = enumerate_feasible(p);
+    PresolveOptions o = only(true, true, true, false, true);
+    o.substitution = true;
+    o.probing = it % 2 == 0;
+    if (it % 4 == 1) {
+      o = only(false, false, false, false, false);
+      o.clique_extension = false;
+    }
+    o.sparsify = true;
+    Presolver pre;
+    const PresolveStatus st = pre.run(p, o, kQuiet);
+    if (st == PresolveStatus::Infeasible) {
+      if (!CHECK(pts.empty())) std::fprintf(stderr, "  case %d: presolve infeasible, %zu feasible points\n", it, pts.size());
+      continue;
+    }
+    REQUIRE(st == PresolveStatus::Reduced);
+    combos += pre.stats().sparsify_rows;
+    const MipProblem& q = pre.reduced();
+    std::set<std::vector<double>> image;
+    bool ok = true;
+    for (const auto& x : pts) {
+      const std::vector<double> z = pre.crush(x);
+      ok = ok && q.max_violation(z) <= 1e-9;
+      image.insert(z);
+    }
+    if (!CHECK(ok)) std::fprintf(stderr, "  case %d: presolve cut off a feasible point\n", it);
+    if (q.num_cols() > 14) continue;
+    const auto red = enumerate_feasible(q);
+    ++compared;
+    if (!CHECK_EQ(red.size(), image.size())) {
+      std::fprintf(stderr, "  case %d: %zu reduced vs %zu original points\n", it, red.size(), image.size());
+    }
+    bool back = true;
+    for (const auto& z : red) back = back && p.max_violation(pre.postsolve(z)) <= 1e-9;
+    if (!CHECK(back)) std::fprintf(stderr, "  case %d: a reduced point postsolves to an infeasible one\n", it);
+  }
+  std::printf("  sparsify round trip: %lld rows combined, %lld compared exactly\n", combos, compared);
+  CHECK(combos > iters / 4);
+  CHECK(compared > iters / 2);
+}
+
+namespace {
+
+// Random MILPs around equations shared with other rows: binary, integer and continuous columns (some unbounded),
+// general and fractional coefficients, rows with multiples of most of an equation's entries plus a few others.
+Model random_sparsify_milp(std::mt19937& rng) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  ModelBuilder b;
+  std::vector<Index> cols;
+  std::vector<double> x0;
+  for (int j = uni(4, 12); j > 0; --j) {
+    const int kind = uni(0, 2);
+    const double ub = kind == 0 ? 1.0 : uni(2, 8);
+    cols.push_back(b.add_col("x" + std::to_string(j), uni(-5, 5), 0.0, kind == 0 || uni(0, 6) ? ub : kInf,
+                             kind == 0 ? VarType::Binary : (kind == 1 ? VarType::Integer : VarType::Continuous)));
+    x0.push_back(kind == 2 ? uni(0, 4 * static_cast<int>(ub)) * 0.25 : uni(0, static_cast<int>(ub)));
+  }
+  auto pick = [&] { return uni(0, static_cast<int>(cols.size()) - 1); };
+  int r = 0;
+  // A row around x0: activity - lo <= a x <= activity + hi (infinite: no side).
+  auto row = [&](double lo, double hi, const std::vector<std::pair<int, double>>& c) {
+    std::vector<std::pair<int, double>> u;
+    for (const auto& e : c) {
+      if (e.second != 0.0 && std::none_of(u.begin(), u.end(), [&](const auto& f) { return f.first == e.first; })) {
+        u.push_back(e);
+      }
+    }
+    if (u.size() < 2) return false;
+    double act = 0.0;
+    for (const auto& [j, v] : u) act += v * x0[j];
+    const Index i = b.add_row("r" + std::to_string(r++), is_finite(lo) ? act - lo : -kInf, is_finite(hi) ? act + hi : kInf);
+    for (const auto& [j, v] : u) b.add_coef(i, cols[j], v);
+    return true;
+  };
+  std::vector<std::vector<std::pair<int, double>>> eqs;
+  for (int k = uni(1, 3); k > 0; --k) {
+    std::vector<std::pair<int, double>> c;
+    for (int t = uni(2, 6); t > 0; --t) {
+      c.push_back({pick(), uni(1, 8) * (uni(0, 1) ? 1.0 : -1.0) * (uni(0, 3) ? 1.0 : 0.25)});
+    }
+    if (row(0.0, 0.0, c)) eqs.push_back(c);
+  }
+  if (eqs.empty()) return b.build();
+  for (int i = uni(2, 10); i > 0; --i) {
+    const auto& e = eqs[uni(0, static_cast<int>(eqs.size()) - 1)];
+    const double mult[] = {1.0, -1.0, 2.0, -0.5, 3.0, 0.1};
+    const double s = mult[uni(0, 5)];
+    std::vector<std::pair<int, double>> c;
+    for (const auto& [j, v] : e) {
+      if (uni(0, 4)) c.push_back({j, s * v});
+    }
+    for (int t = uni(0, 3); t > 0; --t) c.push_back({pick(), static_cast<double>(uni(-4, 4))});
+    const int sense = uni(0, 3);
+    row(sense == 0 ? kInf : uni(0, 3), sense == 1 ? kInf : (sense == 2 ? 0.0 : uni(0, 3)), c);
+  }
+  if (uni(0, 1)) b.model().sense = ObjSense::Maximize;
+  return b.build();
+}
+
+}  // namespace
+
+TEST(presolve_random_sparsify_milps_match_no_presolve) {
+  std::mt19937 rng(fuzz_seed(97531u));
+  const int iters = fuzz_iters(1000);
+  int optimal = 0;
+  for (int it = 0; it < iters; ++it) optimal += compare_with_presolve(random_sparsify_milp(rng), it, it % 4 != 3) == Status::Optimal;
+  const long long combos = g_stats.sparsify_rows;
+  std::printf("  sparsify models: %d optimal\n", optimal);
+  print_coverage("sparsify");
+  CHECK(optimal > iters / 3);
+  CHECK(combos > iters / 4);
 }

@@ -167,10 +167,60 @@ bool symmetry_rows(const MipProblem& q, const SolverParams& params, const Timer&
   return true;
 }
 
+// Restart rules (read per solve, so that tests can change them).
+//  - Root restarts: the first one when at least MILP_RESTART_FRAC (10%) of the integer columns, and at
+//    least MILP_RESTART_MIN (10) of them, are newly fixed globally at the root (reduced-cost fixing,
+//    root strong branching, conflicts); further ones at MILP_RESTART_FRAC2 (10%), at most
+//    MILP_MAX_RESTARTS (4) in all. From the second on, only if the presolve after the previous restart
+//    removed at least MILP_RESTART_MINRED (5%) of the integer columns (SCIP's restartminred) and the
+//    restarted roots so far plus the last one's cost again stay within MILP_RESTART_WORK (1) x the first
+//    root's: LP work in deterministic mode, else seconds (the budget then at least 5% of the time limit).
+//    Restarted roots from the second restart on are cheaper: at most MILP_RESTART_ROUNDS (5) cut rounds
+//    (the earlier roots' cut rows are carried as rows), and root dives / RENS / root LNS only when the
+//    search before the restart improved the incumbent. (The first restart at 5%, as in the 2026-11-03
+//    design, cost time on quick roots: binkar10_1, neos-911970 and neos17, 8-9% fixed, restarted only
+//    at 5% and were 0.4-1.4 s slower in both seeds of the core A/B.)
+//  - In-tree restarts: at most MILP_MAX_TREE_RESTARTS (1) (rule in branch_and_bound.cpp).
+//  - Opt-in MILP_RESTART_PC=1 / 2: restarted searches start from the pseudocosts of the search before
+//    (1: as history, counts capped; 2: as estimates only; see kRestartPcDefault). Off by default: on
+//    restarting core instances (deterministic, 2 threads) both modes needed ~15% more LP iterations.
+// The rule before repeated restarts: MILP_MAX_RESTARTS=1 MILP_RESTART_MIN=20.
+struct RestartRule {
+  int max_restarts = 4, max_tree_restarts = 1;
+  double frac = 0.10, frac2 = 0.10, min_removed = 0.05, work = 1.0;
+  Index min_cols = 10;
+  int cheap_rounds = 5;
+  bool pc = true;
+  static RestartRule from_env() {
+    auto env = [](const char* name, double def) {
+      const char* v = std::getenv(name);
+      return v && *v ? std::atof(v) : def;
+    };
+    RestartRule r;
+    r.max_restarts = static_cast<int>(env("MILP_MAX_RESTARTS", r.max_restarts));
+    r.max_tree_restarts = static_cast<int>(env("MILP_MAX_TREE_RESTARTS", r.max_tree_restarts));
+    r.frac = env("MILP_RESTART_FRAC", r.frac);
+    r.frac2 = env("MILP_RESTART_FRAC2", r.frac2);
+    r.min_cols = static_cast<Index>(env("MILP_RESTART_MIN", static_cast<double>(r.min_cols)));
+    r.min_removed = env("MILP_RESTART_MINRED", r.min_removed);
+    r.work = env("MILP_RESTART_WORK", r.work);
+    r.cheap_rounds = static_cast<int>(env("MILP_RESTART_ROUNDS", r.cheap_rounds));
+    r.pc = env("MILP_RESTART_PC", kRestartPcDefault) != 0.0;
+    return r;
+  }
+};
+
+Index count_ints(const MipProblem& q) {
+  Index n = 0;
+  for (char c : q.is_int) n += c != 0;
+  return n;
+}
+
 // Solves the problem with presolve; returns false if the caller should solve
 // the original problem instead (presolve gave up or postsolve failed).
 bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logger& log, const Timer& timer,
                      MipResult* out, const SearchOptions& opts = {}) {
+  const RestartRule rule = RestartRule::from_env();
   Presolver pre;
   const PresolveStatus ps = pre.run(p, PresolveOptions::from_env(), log);
   const PresolveStats& st = pre.stats();
@@ -224,6 +274,16 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
     }
     q_hook = o.on_incumbent;
     if (!o.start.empty()) o.start = pre.crush(o.start);
+    if (!o.pc_init.empty()) o.pc_init = o.pc_init.mapped(pre.col_map());
+    o.allow_restart = opts.allow_restart && opts.restarts_done < rule.max_restarts;
+    o.restart_frac = opts.restarts_done == 0 ? rule.frac : rule.frac2;
+    o.restart_min_cols = rule.min_cols;
+    o.restart_min_removed = rule.min_removed;
+    {
+      // After a restart: the share of the integer columns this presolve removed (incl. the fixings).
+      const Index before = count_ints(p), after = count_ints(q);
+      o.last_restart_removed = before > 0 ? static_cast<double>(before - after) / static_cast<double>(before) : 1.0;
+    }
     if (!o.debug_point.empty()) {
       o.debug_point = pre.crush(o.debug_point);
       if (q.max_violation(o.debug_point) > 1e-6) {
@@ -250,6 +310,7 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
   if (mr.restart) {
     // Root restart: tightened bounds + root cuts, presolved again; the
     // incumbent found so far is the cutoff and the fallback answer.
+    const double t_restart = timer.elapsed();
     MipProblem q2 = q;
     q2.col_lb = mr.restart_lb;
     q2.col_ub = mr.restart_ub;
@@ -278,20 +339,33 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
     o2.on_incumbent = q_hook;  // q2 has q's columns
     o2.sst_done = true;  // symmetry-breaking rows only before the first search
     // Root and in-tree restarts are counted separately (MILP_MAX_RESTARTS / MILP_MAX_TREE_RESTARTS).
+    // The estimation-driven tree restart: once per solve, apart from the fixing-driven ones.
     o2.restarts_done = opts.restarts_done + (mr.tree_restart ? 0 : 1);
     o2.tree_restarts_done = opts.tree_restarts_done + (mr.tree_restart ? 1 : 0);
+    o2.est_restarts_done = opts.est_restarts_done + (mr.est_restart ? 1 : 0);
+    o2.allow_restart = o2.restarts_done < rule.max_restarts;
+    o2.allow_tree_restart =
+        opts.allow_tree_restart && o2.tree_restarts_done - o2.est_restarts_done < rule.max_tree_restarts;
+    o2.allow_est_restart = opts.allow_est_restart && !mr.est_restart;
+    o2.restart_frac = o2.restarts_done == 0 ? rule.frac : rule.frac2;
+    o2.restart_min_cols = rule.min_cols;
+    o2.restart_min_removed = rule.min_removed;
     {
-      static const int max_restarts = [] {
-        const char* v = std::getenv("MILP_MAX_RESTARTS");
-        return v ? std::atoi(v) : 1;
-      }();
-      static const int max_tree_restarts = [] {
-        const char* v = std::getenv("MILP_MAX_TREE_RESTARTS");
-        return v ? std::atoi(v) : 1;
-      }();
-      o2.allow_restart = o2.restarts_done < max_restarts;
-      o2.allow_tree_restart = opts.allow_tree_restart && o2.tree_restarts_done < max_tree_restarts;
+      // Budget of the restarted roots (see RestartRule): the first root's cost, less the restarted roots.
+      const bool first_root = opts.restarts_done == 0 && opts.tree_restarts_done == 0;
+      if (first_root) {
+        o2.restart_work_left = rule.work * mr.root_lp_work;
+        o2.restart_time_left =
+            rule.work * (is_finite(params.time_limit) ? std::max(mr.root_time, 0.05 * params.time_limit) : mr.root_time);
+      } else {
+        o2.restart_work_left = opts.restart_work_left - mr.root_lp_work;
+        o2.restart_time_left = opts.restart_time_left - mr.root_time;
+      }
     }
+    o2.restart_t0 = t_restart;
+    o2.root_cut_rounds = o2.restarts_done >= 2 ? rule.cheap_rounds : -1;
+    o2.root_heuristics = o2.restarts_done < 2 || mr.improved;
+    o2.pc_init = rule.pc ? std::move(mr.pc) : PseudocostSnapshot{};
     if (mr.has_solution) o2.start = mr.x;
     o2.debug_point = mr.debug_point;
     o2.feasibility_jump = false;  // it already ran
@@ -305,6 +379,8 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
     mr2.nodes += mr.nodes;
     mr2.lp_iterations += mr.lp_iterations;
     mr2.root_bound = mr.root_bound;
+    mr2.restarts += mr.restarts + (mr.tree_restart ? 0 : 1);
+    mr2.tree_restarts += mr.tree_restarts + (mr.tree_restart ? 1 : 0);
     if (!mr2.has_solution && mr.has_solution) {
       // Nothing better than the incumbent exists (or was found in time).
       mr2.has_solution = true;
@@ -508,6 +584,7 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
   SearchOptions opts;
   opts.allow_restart = true;
   opts.allow_tree_restart = true;
+  opts.allow_est_restart = true;
   if (reporter) {
     opts.on_incumbent = [reporter](const std::vector<double>& x, double bound) { reporter->report(x, bound); };
   }
@@ -570,6 +647,8 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
   r.stats.nodes = mr.nodes;
   r.stats.lp_iterations = mr.lp_iterations;
   r.stats.root_bound = sense * mr.root_bound;
+  r.stats.restarts = mr.restarts;
+  r.stats.tree_restarts = mr.tree_restarts;
   if (allow_duals && implications.empty() && r.has_solution && !interrupted()) add_duals(p, params, timer, log, r);
   return r;
 }

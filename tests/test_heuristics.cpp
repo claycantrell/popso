@@ -2,6 +2,7 @@
 // mutation and propagating dives. Every reported point must be feasible; FJ
 // must be reproducible.
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <string>
@@ -12,6 +13,7 @@
 #include "milp/heuristics/lmip.hpp"
 #include "milp/heuristics/localsearch.hpp"
 #include "milp/heuristics/submip.hpp"
+#include "milp/search/branch_and_bound.hpp"
 #include "milp/search/mip_problem.hpp"
 #include "test_framework.hpp"
 
@@ -430,6 +432,65 @@ TEST(lmip_stall_restart_mixed_feasible) {
   CHECK(found >= 20);
 }
 
+namespace {
+
+// Lights out on an n x n grid (enlight): pressing a cell toggles it and its neighbours; every light
+// starts on and must end off (press sum over the neighbourhood = 1 + 2 y); minimize the presses. Its
+// LP accepts fixings that are infeasible together.
+MipProblem lights_out(int n) {
+  ModelBuilder b;
+  auto x = [n](int i, int j) { return static_cast<Index>(i * n + j); };
+  for (int k = 0; k < n * n; ++k) b.add_col("x" + std::to_string(k), 1.0, 0.0, 1.0, VarType::Binary);
+  for (int i = 0; i < n; ++i) {
+    for (int j = 0; j < n; ++j) {
+      const Index y = b.add_col("y" + std::to_string(x(i, j)), 0.0, 0.0, 2.0, VarType::Integer);
+      const Index r = b.add_row("c" + std::to_string(x(i, j)), 1.0, 1.0);
+      b.add_coef(r, x(i, j), 1.0);
+      if (i > 0) b.add_coef(r, x(i - 1, j), 1.0);
+      if (i + 1 < n) b.add_coef(r, x(i + 1, j), 1.0);
+      if (j > 0) b.add_coef(r, x(i, j - 1), 1.0);
+      if (j + 1 < n) b.add_coef(r, x(i, j + 1), 1.0);
+      b.add_coef(r, y, -2.0);
+    }
+  }
+  return make_problem(b.build());
+}
+
+}  // namespace
+
+// The root-LP sub-MIP's stop rule (stop_blind): a first sub-MIP that is exhausted ends the call (one
+// sub-MIP); otherwise the same as without it; points found are feasible either way.
+TEST(lp_rens_stop_after_blind_first_attempt) {
+  int stopped = 0;
+  for (int n : {6, 7, 8, 9, 10}) {
+    MipProblem p = lights_out(n);
+    DualSimplex lp;
+    lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
+    REQUIRE(lp.solve(LpOptions{}) == LpStatus::Optimal);
+    SubMipLimits lim;
+    lim.node_limit = 200;
+    lim.time_limit = 1e9;
+    lim.iteration_limit = 200000;
+    std::vector<double> sol, sol_plain;
+    LpRensStats st, plain;
+    const bool ok = lp_rens(p, lp, kInf, lim, sol, 0.7, 4, &st, true);
+    const bool ok_plain = lp_rens(p, lp, kInf, lim, sol_plain, 0.7, 4, &plain, false);
+    if (ok) CHECK(p.max_violation(sol) <= 1e-6);
+    if (ok_plain) CHECK(p.max_violation(sol_plain) <= 1e-6);
+    CHECK(!plain.stopped_blind);
+    if (st.stopped_blind) {
+      ++stopped;
+      CHECK(!ok);
+      CHECK_EQ(st.attempts, 1);
+      CHECK(plain.attempts >= 1);
+    } else {
+      CHECK(ok == ok_plain);  // the first attempt did not end exhausted: the same call
+      CHECK_EQ(st.attempts, plain.attempts);
+    }
+  }
+  CHECK(stopped >= 1);
+}
+
 TEST(lp_rens_feasible_and_deterministic) {
   // The root-LP sub-MIP must only report feasible points below the cutoff, leave the root LP as it
   // was, and (iteration limits only) return the same point on a rerun.
@@ -464,4 +525,131 @@ TEST(lp_rens_feasible_and_deterministic) {
     CHECK(again == sol);
   }
   CHECK(found >= 10);
+}
+
+// Dive outcome: a dive cut by its iteration budget reports limit_hit (and no point); a dive with room
+// either finds a point or ends infeasible / at the cutoff, never at its limit.
+TEST(dive_outcome_limit_hit) {
+  int limited = 0, finished = 0;
+  for (unsigned seed = 1; seed <= 40; ++seed) {
+    MipProblem p = mixed(seed);
+    DualSimplex lp;
+    lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
+    if (lp.solve(LpOptions{}) != LpStatus::Optimal) continue;
+    SimpleRounding rounding(p);
+    for (long long budget : {1LL, 100000LL}) {
+      REQUIRE(lp.solve(LpOptions{}) == LpStatus::Optimal);
+      DiveLimits lim;
+      lim.iteration_budget = budget;
+      std::vector<double> sol;
+      long long its = 0;
+      DiveOutcome out;
+      const bool ok = dive(p, lp, DiveRule::Fractional, rounding, nullptr, lim, sol, &its, nullptr, &out);
+      CHECK(out.steps >= 0);
+      if (ok) {
+        CHECK(p.max_violation(sol) <= 1e-6);
+        CHECK(!out.limit_hit);
+      }
+      if (budget > 1) {
+        CHECK(!out.limit_hit);
+        finished += out.steps > 0;
+      } else if (out.limit_hit) {
+        CHECK(!ok);
+        ++limited;
+      }
+    }
+  }
+  CHECK(limited >= 5);
+  CHECK(finished >= 5);
+}
+
+// Tree dive budget (MILP_DIVE_ADAPT): 10% of the LP iterations without it; with it SCIP's success
+// rule (capped at the old share) and whole dives only.
+TEST(tree_dive_budget_rule) {
+  TreeDiveHistory h;
+  bool wait = true;
+  CHECK_EQ(tree_dive_budget(h, 100000, 0, false, 0.1, &wait), 11000);
+  CHECK(!wait);
+  CHECK_EQ(tree_dive_budget(h, 100000, 12000, false, 0.1), -1000);  // used up
+  CHECK_EQ(tree_dive_budget(h, 100000, 0, true, 0.1), 11000);        // no dives yet: the cap
+  for (int k = 0; k < 99; ++k) h.record(100, false, false);
+  CHECK_EQ(h.calls, 99);
+  CHECK_EQ(h.done, 99);
+  // 99 dives without a new incumbent: 5% x (1 + 10 / 100) = 5.5%.
+  CHECK_EQ(tree_dive_budget(h, 1000000, 0, true, 0.1, &wait), 1000 + 55000);
+  CHECK(!wait);
+  h.record(100, true, false);  // a new incumbent: 5% x (1 + 20 / 101)
+  CHECK_EQ(tree_dive_budget(h, 1000000, 0, true, 1.0), 1000 + static_cast<long long>(0.05 * (1.0 + 20.0 / 101.0) * 1e6));
+  // Whole dives: the budget must cover the mean of the finished dives (100 here) ...
+  CHECK_EQ(tree_dive_budget(h, 0, 950, true, 0.1, &wait), 0);
+  CHECK(wait);
+  CHECK_EQ(tree_dive_budget(h, 0, 900, true, 0.1, &wait), 100);
+  CHECK(!wait);
+  // ... and after a limit hit twice that dive's iterations, until a dive finishes again.
+  h.record(400, false, true);
+  CHECK_EQ(h.need, 800);
+  CHECK_EQ(tree_dive_budget(h, 0, 300, true, 0.1, &wait), 0);
+  CHECK(wait);
+  CHECK_EQ(tree_dive_budget(h, 0, 200, true, 0.1, &wait), 800);
+  h.record(500, false, false);
+  CHECK_EQ(h.need, 0);
+  CHECK_EQ(tree_dive_budget(h, 0, 900, true, 0.1, &wait), 0);  // budget 100, finished mean 103
+  CHECK(wait);
+}
+
+// Sub-MIP statistics: the iterations of the sub-MIPs' own dives and pumps are part of their LP iterations.
+TEST(sub_mip_heuristic_statistics) {
+  int solved = 0;
+  for (unsigned seed = 1; seed <= 12; ++seed) {
+    MipProblem p = seed % 2 ? mixed(seed) : set_cover(seed, 60, 40);
+    DualSimplex lp;
+    lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
+    if (lp.solve(LpOptions{}) != LpStatus::Optimal) continue;
+    SubMipStats ss;
+    SubMipLimits lim;
+    lim.node_limit = 200;
+    lim.time_limit = 1e9;
+    lim.min_fixed_fraction = 0.0;
+    lim.stats = &ss;
+    std::vector<double> sol;
+    rens(p, lp.x(), kInf, lim, sol);
+    CHECK(ss.dive_iterations + ss.fp_iterations <= ss.lp_iterations);
+    CHECK(ss.fp_wins <= ss.fp_runs);
+    solved += ss.solves;
+  }
+  CHECK(solved >= 1);
+}
+
+// A search without its root cut loop (SearchOptions::root_cuts = false, sub-MIPs with MILP_SUB_CUTS) still
+// solves to the same optimum.
+TEST(search_without_root_cuts_keeps_optimum) {
+  int solved = 0;
+  for (unsigned seed = 1; seed <= 16; ++seed) {
+    MipProblem p = seed % 2 ? mixed(seed) : set_cover(seed, 60, 40);
+    SolverParams sp;
+    sp.threads = 1;
+    sp.verbosity = 0;
+    sp.mip_rel_gap = 0.0;
+    sp.mip_abs_gap = 1e-9;
+    Logger log(0);
+    double obj[2] = {kInf, kInf};
+    Status st[2] = {Status::Unknown, Status::Unknown};
+    for (int cuts = 0; cuts < 2; ++cuts) {
+      SearchOptions opts;
+      opts.sub_mip_heuristics = false;
+      opts.check_resident = false;
+      opts.root_cuts = cuts == 1;
+      Timer timer;
+      const MipResult r = branch_and_bound(p, sp, log, timer, opts);
+      st[cuts] = r.status;
+      obj[cuts] = r.objective;
+      if (r.has_solution) CHECK(p.max_violation(r.x) <= 1e-6);
+    }
+    CHECK(st[0] == st[1]);
+    if (st[0] == Status::Optimal && st[1] == Status::Optimal) {
+      CHECK(std::abs(obj[0] - obj[1]) <= 1e-6 * std::max(1.0, std::abs(obj[1])));
+      ++solved;
+    }
+  }
+  CHECK(solved >= 8);
 }

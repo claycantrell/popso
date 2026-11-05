@@ -1,5 +1,304 @@
 # Changelog
 
+## v0.6.0 — 2026-11
+
+MILP: presolve sparsify, probing liftings over repeated passes with kept implications, repeated root
+restarts, cheaper roots, budgets for the heuristics' LPs, a column-scaled cost perturbation in the dual
+simplex, faster Forrest-Tomlin updates and compact open-node storage. Time limits are kept on very large
+models.
+
+**Benchmarks**
+- Full MIPLIB 2017 benchmark set, 240 instances (Intel i7-7700K, Linux, 120 s, 4 threads), first run:
+  75 solved, shifted geometric mean 62.5 s (HiGHS 63 / 76.2 s, SCIP 53 / 77.5 s); 10 solved by popso
+  only, 7 by HiGHS or SCIP but not popso.
+- 63-instance MIPLIB 2017 subset (120 s, 4 threads), seeds 0 / 1 / 2: 59 / 61 / 59 solved, shifted
+  geometric mean 9.0 / 9.2 / 9.0 s (v0.5.0: 58 / 59 / 61, 10.7 / 10.8 / 9.9 s); about 14% faster over
+  the three seeds (all 189 runs: 9.0 s against 10.5 s, 179 against 178 solved).
+- 43 hard MIPLIB 2017 instances (600 s, 4 threads): 18 solved, shifted geometric mean 281.5 s (v0.5.0:
+  15, 324.9 s; HiGHS 12, SCIP 6). Newly solved: app1-2, graphdraw-domain, icir97_tension,
+  neos-3216931-puriri, supportcase18; glass4 534 -> 23 s. neos-1171737 and neos-1456979 are now
+  unsolved at 600 s.
+- Generated models (1 thread, 120 s): 146 of 148 solved, as v0.5.0 (binpack_hard_1 and gap_hard_1).
+- Measured with the release candidate; the fixes since then are listed below (Time limits on large
+  models, Fixes).
+
+**Node-LP incumbents re-solved warm at a tight tolerance**
+- When a node LP point is integral but, rounded, violates the model by more than 1e-9, the node LP is
+  re-solved from its basis with the integer columns fixed and primal tolerance 1e-9. Its 1e-6 slack could
+  grow past the model check after postsolve (dano3_5: 2.7e-6), and the cold fixed-integer re-solves that
+  repaired such points could run out of time on large LPs (dano3_5: 30k iterations), so the solve was
+  repeated without presolve and ended without a solution. `MILP_POLISH_LP=0` turns it off.
+- miplib_wide_core (120 s, 4 threads, seeds 1-2): neutral, 1.026x (90% CI 0.994-1.060), solved 120 -> 121
+  of 126.
+
+**Presolve: sparsify**
+- Equations are added to the rows of their shortest column, `r += lambda e`, when that cancels more
+  entries of r than it adds (two-row nonzero cancellation, as in HiGHS's presolve). Equations of at
+  most 50 entries, |lambda| <= 1e3, a row's coefficient range may not grow beyond 1e6; rows of integer
+  columns with integral coefficients stay integral; set partitioning equations are not used and set
+  packing / covering / partitioning rows are not changed (their cliques). It runs when the other
+  reductions are exhausted, before the clique extension and probing (which find more on the sparser
+  rows), up to 3 times; the following rounds remove the singleton and doubleton rows it creates. Rows
+  only: no postsolve; LP and fixed-MIP duals are computed on the original rows as before.
+- Root gap closed by the presolved LP (presolve only): app1-1 1.2% -> 9.4% (3603 x 1206 / 24.7k ->
+  3332 x 1008 / 22.7k), app1-2 0.4% -> 16.5% (39555 x 13265 / 274k -> 38175 x 12342 / 236k; its
+  presolve 2 -> 5 s, mostly probing), mzzv42z 39.2% -> 46.0%, mzzv11 34.4% -> 35.8%; fewer nonzeros on
+  ran14x18-disj-8 (10.3k -> 8.0k), neos-4954672-berkel, trento1 (947 columns fewer), n5-3,
+  neos-3083819-nubu, dano3_3 / dano3_5.
+- The hard instances it was made for (300 s, 4 threads, one seed): neos-3216931-puriri 116 -> 70 s
+  (202 -> 70 nodes), trento1 gap 0.075% -> 0.028%, neos-4954672-berkel 8.39% -> 8.22%,
+  ran14x18-disj-8 56 -> 54 s; app1-2's dual bound reaches the optimum -41 (main: -43; root bound -239
+  -> -66), its incumbent is worse (-22 vs -30).
+- miplib_wide_core (120 s, 4 threads, seeds 1-2): neutral, 1.010x (90% CI 0.974-1.050), solved 121 ->
+  118 of 126 (near-limit instances whose presolved model it does not change). On the 10 instances
+  whose presolved model it changes 1.07x: rows combined with equations lose knapsack / MIR structure
+  for the cut separators (sp150x300d 0.1 -> 1 s, root bound 69 -> 65; n5-3; neos859080), against
+  neos-3083819-nubu (2-5x faster) and dano3_5. `MILP_PRESOLVE_OFF=sparsify` turns it off.
+- Equations with a continuous column that has a variable bound (an inequality with continuous columns
+  of one sign and integer columns of the other: `x <= u y`, `sum of flows <= 7 y1 + 31 y2`) are not
+  used: the cut separators aggregate through those columns (flow balances with variable upper bounds
+  on sp150x300d, neos-4954672-berkel and ran14x18-disj-8; arc totals cancelled out of n5-3's capacity
+  rows). Their root bounds come back (sp150x300d 65 -> 69, the optimum; n5-3, berkel, ran14x18-disj-8),
+  the presolve gains above stay. miplib_wide_core against sparsify without it: 0.965x (90% CI
+  0.931-0.996), solved 118 -> 119 of 126; sp150x300d 1.0 -> 0.1 s. `MILP_PRESOLVE_OFF=sparsify_protect`
+  turns the rule off.
+- Fixed on the way (also on main): two wrong answers of the presolve on small models: GCD tightening of
+  a row whose upper side lay just below a multiple of the gcd by round-off (declared infeasible), and a
+  round-off coefficient (1.4e-17 on a free integer column) taken as a substitution pivot.
+
+**Heuristic LP budgets**
+- Tree dives get a share of the search's LP iterations that follows their success, as SCIP's diving
+  heuristics: 5% x (1 + 10 (new incumbents + 1) / (dives + 1)) per thread, at most the previous 10%
+  (10% for the first 10 dives, 5.5% after 100 without a new incumbent), and a dive starts only when the
+  budget left covers a whole dive (the mean of the thread's finished dives; after a dive that ended at its
+  limit, twice its iterations): a dive cut off by the budget finds nothing (pg5_34: 13 of 42 tree dives).
+  `MILP_DIVE_ADAPT=0`: the flat 10%.
+- Without an incumbent the guided root dive is skipped: it repeated the fractional dive exactly (same LP,
+  same choices), in every sub-MIP root and in roots without a start point. `MILP_DIVE_DEDUP=0`: both.
+- Sub-MIPs that look for an improvement (RINS, mutation, crossover, local branching, RENS with an
+  incumbent) no longer run the feasibility pump: it ignores their cutoff, and its points were nearly
+  always worse than the incumbent (6 sub-MIP incumbents from 94 pumps on 13 core instances) while it took
+  a quarter to a half of those sub-MIPs' LP iterations (pg5_34, pg, nu25-pr12). `MILP_SUB_FP=1`: the pump.
+- A `Heuristics:` summary line: tree dives (calls, points, new incumbents, limit hits, LP iterations) and
+  tree sub-MIPs (calls, new incumbents, LP iterations, of them in the sub-MIPs' own dives and pumps).
+- miplib_wide_core (120 s, 4 threads, seeds 1-2): solved 121 / 121 of 126, shifted geomean 0.987x (90% CI
+  0.962-1.013), first incumbents and final gaps unchanged; more nodes in the same time where both sides
+  stop at the limit (rocI-4-11 +18% / +79%, swath3 +46%).
+
+**Probing: liftings, repeated passes, kept implications**
+- Probing lifts one-sided rows with what fixing a binary x implies: when the bounds that x = v
+  implies leave a row `a y <= b` a slack delta it can never use, x enters the row (x = 1:
+  `a_x += delta`; x = 0: `a_x -= delta`, `b -= delta`). At most one lifting per row per pass, never
+  equations or ranged rows, new entries capped at 10% of the nonzeros per pass. E.g. `y <= 100 x`
+  becomes `y <= 5 x` when x = 1 forces y <= 5 through other rows.
+- Probing runs up to 3 passes while a pass fixes, substitutes or lifts something, each with half the
+  previous work limit and at most the work the previous one used.
+- Implications between binaries found by probing (x = v forces y = w) are kept and propagated
+  together with the rows by later probes and passes, so they also work backwards (y = 1 - w forces
+  x = 1 - v) where the rows alone do not show it.
+- Binaries are no longer substituted out of equations before the first probing pass: probing may
+  fix them (neos-3216931-puriri: a binary y = sum of 96 binaries cannot be 0, which turns five such
+  rows into partitioning rows).
+- Root gap closed by the presolved LP (presolve only): neos-3216931-puriri 1.0% -> 12.3% (LP 58940
+  -> 60354), mzzv11 19.2% -> 34.4%, mzzv42z 18.4% -> 39.2% (8769 x 9116 / 126k -> 6250 x 6444 / 74k);
+  app1-1, app1-2 and milo-v12-6-r2-40-1 unchanged. At the root (2 threads) the bound after cuts on
+  puriri goes 59231 -> 62214 (optimum 71320); mzzv42z is solved at the root (31 -> 19 s), mzzv11 in
+  2 nodes. The probing work grows (mzzv42z 179M -> 444M units, presolve about 2x; puriri 21M -> 46M).
+- miplib_wide_core (120 s, 4 threads, seeds 1-2, against the same main): solved 119 -> 118 of 126,
+  shifted geomean 0.954x (90% CI 0.873-1.034); faster in every run on neos-950242 (8 -> 1-2 s),
+  piperout-27 (6 -> 2 s), neos-3381206-awhea and drayage-100-23, slower on cbs-cta (2.4 -> 6.0 s: the
+  heuristics find its objective-0 solution later).
+- Knobs: `MILP_PRESOLVE_OFF=probing_lift`, `probing_passes` (one pass), `probing_implications`,
+  `probing_keep` (all four: the previous presolve); `MILP_PROBING_PASSES=<n>`; opt-in
+  `MILP_PRESOLVE_ON=probing_cliques` (the implications x = 1 => y = 0 also extend set-packing rows
+  in the clique extension; no better than the liftings alone, and more nonzeros).
+
+**Cheaper roots**
+- A root whose restart is already due (enough integer columns fixed by reduced-cost fixing before the
+  probes) skips root strong branching; the restarted root probes the smaller problem. The test is the
+  restart rule itself, with the root's cost so far (a restart that would be refused keeps the probes), and
+  it applies only to roots with some LP work (`MILP_RESTART_SKIP_SB_WORK`, 2e7 iterations x (rows +
+  columns)): quick roots keep their probes, which can settle the root (exp-1-500-5-5). h80x6320d (2
+  threads): 34.1 / 42.1 / 34.9 s -> 29.9 / 40.4 / 33.4 s; irp (4 threads) 6.5 / 4.6 -> 2.9 / 2.3 s.
+  `MILP_RESTART_SKIP_SB=0`: probes in every root.
+- With an incumbent known before the root heuristics (from local MIP or FJ), RENS now runs beside the
+  dives with that incumbent as its cutoff, as without one, instead of after them with their best point:
+  when the dives find the optimum, RENS can only fail and ran to its cap (h80x6320d: 10 s). h80x6320d with
+  the above: 29.7 s shifted geomean over 3 seeds (34.3 s without). `MILP_ROOT_MERGE_INC=0`: the old order.
+- Restarted roots from the second restart on run their dives, RENS and root LNS only if the search before
+  improved the incumbent; an improvement below the gap tolerance (copies of the same point) no longer
+  counts (h80x6320d `--deterministic`: 45.2 -> 32.7 s). `MILP_RESTART_IMPROVED_GAP=0`: the old test.
+- The root-LP sub-MIP (runs without an incumbent; the root waits for it) gets a budget relative to the
+  root: at most max(0.5 s, the root's time) (was max(2 s, ...)), deterministic max(5e7, 3x the root LP
+  work) work units (was twice that with a 2e8 floor), and it stops after a first sub-MIP that is
+  infeasible, where the LP accepted the fixings and lower fixing rates are guesses. enlight_hard: root 1.15
+  -> 0.37 s (`--deterministic`, 2.9 -> 2.1 s). `MILP_LP_RENS_REL=0`: the old caps.
+- A root strong-branching pass stops after 4 probes in a row that learn nothing (a child at the iteration
+  limit, no fixing): dano3_3 26k probe iterations in 3 passes -> 3-4k (2 threads, 3 seeds: 42.5 -> 35.7 s
+  shifted geomean); qap10's root 45 -> 40 s. `MILP_ROOT_SB_ABORT=k`: after k (0: off).
+- The root cut loop's cap on flat rounds (the bound not moving on a dual degenerate LP) is now in work units
+  instead of wall-clock time, the same in `--deterministic` mode (which had no cap): LP work plus an
+  estimate of the separation, at most max(2e8, 3x the initial LP's work). The rounds no longer depend on
+  the machine's load (neos-3381206-awhea needs 7 flat rounds, which a loaded machine could cut off), and
+  neos-960392's 12 flat rounds in `--deterministic` mode become 1 (124 -> 89 s). `MILP_FLAT_WORK=0`: the
+  time cap; `MILP_FLAT_WORK_MIN`: the floor.
+- miplib_wide_core (120 s, 4 threads, seeds 1-2, against the code before these changes): solved 120 ->
+  122 of 126, shifted geometric mean 10.48 -> 9.25 s (0.892x, 90% CI 0.850-0.935), on a busy machine: part
+  of it is neos-3381206-awhea (22.8 / 8.7 -> 3.7 / 3.6 s), whose flat cut rounds the time cap had cut off.
+  `MILP_FJ_FIRST=1` stays opt-in (an earlier combined A/B with it: 0.991x; no gain of its own here).
+
+**Dual simplex: column-scaled cost perturbation**
+- The dual simplex's cost perturbation, 5e-7 (1 + |c_j|)(1 + random) times a cost scale, now uses the
+  column's largest entry (after row scaling) in place of the 1, which is what HiGHS's perturbation of
+  its column-scaled LP amounts to. On columns with large entries the old perturbation sat at the level
+  of the dual tolerance, where the ratio test's Harris groups tie: csched008's cold root LP crawled at
+  its optimal value for ~4900 iterations (HiGHS 1458 in all). The DSE weights now also follow the
+  primal simplex pivots that clean up after the perturbation is removed, instead of being reset to 1
+  (every warm start from such a basis had unit weights).
+- miplib_wide_core (120 s, 4 threads, 4 seeds): 241 -> 245 of 252 solved, shifted geomean 0.977x (90%
+  CI 0.946-1.011); root LPs of long degenerate models cheaper (csched008 -24%, dano3 -16%); warm
+  re-solves from the same vertex about as before (+2% iterations). `MILP_LP_PERTURB_COLSCALE=0`,
+  `MILP_LP_PRIMAL_DSE=0` restore the old behaviour. Measured and left off: perturbing the logicals,
+  an objective-stagnation trigger for the cold-solve boost, a signed Harris bound (knobs listed in
+  PLAN.md).
+
+**Repeated root restarts (pseudocost carry-over opt-in)**
+- The root restarts (presolve again with the root's global fixings and cut rows) now chain: after
+  the first one (at 10% of the integer columns newly fixed at the root, as before, at least 10
+  columns, was 20) a restarted root restarts again at 10%, up to 4 times (`MILP_MAX_RESTARTS`, was
+  1). From the second on a restart needs the presolve after the previous one to have removed at
+  least 5% of the integer columns, and the restarted roots so far plus the last one's cost again
+  must stay within the first root's cost: its LP work in `--deterministic` mode (so the decision is
+  reproducible), its time otherwise (at least 5% of the time limit). Restarted roots from the
+  second restart on are cheaper: at most 5 cut rounds (the earlier roots' cuts are carried as
+  rows), and the root dives, RENS and root LNS run only if the search before the restart improved
+  the incumbent.
+- miplib_wide_core + mas74 (120 s, 4 threads, seeds 1-2, both sides on the same main): 122 / 122 of
+  128 solved, shifted geomean 1.000x (90% CI 0.968-1.034), measured with the first restart at 5%;
+  with it back at 10% the three quick instances that restarted only at 5% (binkar10_1, neos-911970,
+  neos17: 0.4-1.4 s slower in both seeds) do not restart, about 0.986x. Chained restarts:
+  drayage-25-23 8.8 / 7.6 -> 6.0 / 5.7 s, swath3 solved on one seed (62 s, both TL before),
+  h80x6320d 31 / 38 -> 32 / 40 s, swath1 6.8 / 6.2 -> 8.7 / 6.9 s.
+- Opt-in `MILP_RESTART_PC`: restarted searches start from the pseudocosts (and inference history)
+  of the search before, mapped through the new presolve: `=1` as history with counts capped at the
+  reliability threshold (`MILP_RESTART_PC_CAP`), `=2` as estimates only for columns without
+  observations of their own. Off by default: on core instances that restart, both needed ~15-25%
+  more LP iterations (deterministic runs; mas76 1.60M -> 2.51M / 2.70M, drayage-25-23 46k -> 63k /
+  97k).
+- Knobs: `MILP_RESTART_FRAC`, `MILP_RESTART_FRAC2`, `MILP_RESTART_MIN`, `MILP_RESTART_MINRED`,
+  `MILP_RESTART_WORK`, `MILP_RESTART_ROUNDS`; the old rule is `MILP_MAX_RESTARTS=1
+  MILP_RESTART_MIN=20` (identical search). The command line prints the number of restarts;
+  `SolveStats` has `restarts` and `tree_restarts`.
+
+**Interrupts and the time limit during the root cut probing**
+- The probing that collects implied bounds and literal conflicts before the root cut loop now
+  checks the interrupt flag (every 64 probes): an interrupt landing there took up to 1.2-2.2 s to
+  stop the solve on cflp_hard_1 (2 threads), now ~0.02 s.
+- It also stops at the time limit: its work budget alone could take 6.5 s (fiball, 1 thread), so
+  short time limits ran over (fiball at a 4 s limit now ends at 4.04 s).
+
+**Compact open-node storage, gradual memory drain**
+- The queue of open nodes keeps a packed 88-byte record per node (was a 112-byte node) with 20-byte
+  heap keys that grow by 1.25x (were 24 bytes, doubling), chunked slots that compact under memory
+  pressure, warm-start bases stored as single allocations with a 16-byte header (were ~144 bytes for
+  a small basis), and the branching bound of an open node inline instead of a bound-path segment of
+  its own. gen-ip054 at ~490k open nodes: 493 -> ~265 bytes per open node (334 -> ~220 without
+  stored bases); in drain mode at a 300 MB cap 375 -> 200 bytes. Node selection and the applied
+  bounds are unchanged: --deterministic runs that stay clear of the memory limit give the same
+  nodes, LP iterations and results as before.
+- Under --mem-limit: the memory states are decided on the bytes the open nodes use (the hard stop on
+  what is allocated); once the limit gets close, queued nodes that an improved incumbent has pruned
+  are dropped; drain mode alternates deepest-first pops with best-bound pops (k : 1, k adapted so that
+  the tree shrinks slowly; all deepest first close to the stop) and ends below 70% of the limit
+  (was 60%), so the bound keeps moving while the tree drains. gen-ip054 at --mem-limit 300 (2
+  threads, 300 s): the bound was frozen at 6794.70 from 122 s on; now 6801.41 at the end, still
+  rising in drain mode.
+
+**Faster Forrest-Tomlin updates on large sparse bases**
+- When the entering column was solved densely, the simplex copied the whole m-row result into the
+  update's spike and the update then tested every row. The dense solve now copies only blocks of 8
+  rows that hold a nonzero and lists them, and the update reads only those (same entries in the same
+  order, so the search is unchanged). Same deterministic work, 2 threads: rmatr100-p10 35.0 ->
+  29.8 s, unitcal_7 (160 nodes) 99 -> 91 s, ns1208400 20.0 -> 19.5 s, h80x6320d unchanged. Profiling
+  the strong-branching probes found no other per-probe overhead (state restore 0.1-1.2% of probe
+  time; a probe iteration costs what an iteration of the root's late cut-round re-solves costs).
+
+**Strong-branching control and score corrections**
+- Dynamic strong-branching reliability, on by default (`MILP_SB_DYN=2`): reliability falls from 4
+  towards 1 as strong-branching iterations exceed half of the node LP iterations. miplib_wide_core
+  (120 s, 4 threads, seeds 1-2, x86-64 Linux machine): solved 109 -> 114 of 126, shifted geomean
+  18.45 -> 17.96 s (0.975x); 30n20b8 now solved on both seeds, neos-3381206-awhea 41.7 -> 16.5 s;
+  slower neos-3627168-kasai (1.39x). `MILP_SB_DYN=0` turns it off, `=3` uses only the probe
+  iteration limit of twice the average node LP, `=1` both.
+- Opt-in (off by default): `MILP_SD` (bits), score corrections after Shah and Dey for reliability and root strong
+  branching: 1 = child gains capped at the node's gap to the incumbent, 2 = `q_min^0.3 q_max^0.7`
+  instead of the product, 4 = an asymmetry factor from the direction of the last branching of the
+  infeasible / integral leaves (`MILP_SD_ETA`, default 0.15).
+- Opt-in: `MILP_PL` (1 exponential, 2 Pareto fit), probabilistic lookahead after Mexi et al.; once the best
+  candidate has not changed for 0.6x the lookahead, probing stops when one more candidate is not
+  expected to shrink the abstract tree implied by the gap and the gains seen at the node.
+- Opt-in: `MILP_APS` (discount factor), ancestral pseudocosts, used at nodes where every candidate is
+  reliable in both its own and its ancestral pseudocosts.
+- Deterministic runs on miplib_wide_core (2 threads, node limit 10000, 90 s) against the v0.5.0 defaults:
+  `MILP_SD=7` and `MILP_PL=1` change nodes by -1.4% / +1.4% and LP iterations by +6% / +0.6% on the
+  instances both solve, with gaps on the unsolved ones better on about as many as worse;
+  `MILP_SB_DYN=2` cuts strong branching from 35% to 28% of the LP iterations for 11% more nodes at
+  the same total iterations and closes more gap on unsolved instances (7 better, 3 worse);
+  `MILP_SB_DYN=1` loses on unitcal_7 and mc11 (longer probes).
+
+**Feasibility jump before local MIP (opt-in, off by default)**
+- `MILP_FJ_FIRST=1`: the helper thread runs its first feasibility-jump attempt before the local-MIP
+  search instead of after it. Local MIP without a solution restarts until its whole budget is used
+  (3e9 effort, 5-10 s, longer on a loaded machine), so on instances where FJ finds points at once and
+  local MIP does not, the root ran without an incumbent: neos-3381206-awhea, FJ's first point at
+  0.2-0.6 s in v0.4.0, none from local MIP in 30 s on a loaded machine (FJ never ran before the
+  thread's deadline). With the knob (2 threads): 4 seeds, shifted geomean 3.86 -> 3.03 s (v0.4.0 3.12 s);
+  on a loaded machine 30.4 -> 9.7 s (v0.4.0 15.8 s). Off: the same search as before.
+
+**Time limits on large models**
+- Phases that ran past the time limit on large MIPLIB 2017 models (bab2 was stopped by the benchmark runner
+  after 144 s at a 120 s limit):
+  - Packing-orbitope detection: one work budget for all symmetry components, checked per hashed column (was
+    per component, between passes): bab2 several minutes -> 0.7 s.
+  - Symmetry-breaking (SST) reductions: the work budget is also checked while the orbits are scored.
+  - Sub-MIP presolve stops with the sub-MIP (its stop flag and time limit; the feasibility-jump repair on
+    supportcase19, 1.4M columns, ended 4 s late).
+  - Probing liftings that add a new entry append it without searching the column: ns1760995's probing 37.6
+    -> 2.8 s (~200k new entries per pass), the same presolved model.
+- Deterministic runs are unchanged.
+
+**Tree-size-estimation restarts (opt-in, off by default)**
+- `MILP_EST_RESTART=1`: the search counts its closed leaves per depth (tree weight: the sum of
+  2^-depth, independent of the order in which leaves close, so `--deterministic` reads the same value)
+  and estimates the tree size from it with HiGHS's windowed secant. When the estimate stays more than
+  20 r times the nodes so far (r from the share of columns fixed) and the gap hardly shrinks, the
+  search restarts once (presolve again with what the tree fixed), within the first half of the time
+  limit. Verbosity 2 prints the tree weight. miplib_wide_core plus 5 larger instances (120 s, 4 threads,
+  seeds 1-2): solved 125 -> 121 of 136, 1.021x (90% CI 0.990-1.055): its restarts are mostly on big
+  trees (mas74) that a restart only sets back. Knobs `MILP_EST_FACTOR`, `MILP_EST_GATE`,
+  `MILP_EST_MIN_NODES`, `MILP_EST_TRACE`.
+
+**Cut management knobs (opt-in, off by default)**
+- Diagnostics: `MILP_CUT_TRACE=1` logs the root cut rounds (candidates, rejections as too parallel or
+  over the round limit, re-added and re-separated cuts, rows removed by age); verbosity 2 adds each
+  search's node time split (LP solves, cut-round re-solves, separation per separator, pool scans) and
+  pool churn; `MILP_POOL_TRACE=1` per progress line.
+- Knobs: `MILP_CUT_AGE=k` (root cut rows stay until k + 1 re-solves in a row found them slack),
+  `MILP_POOL_DEDUP=1` (pool cuts with the coefficients of a live cut map to it),
+  `MILP_POOL_AGE_NEW=k` (pool rows that never bound leave after k slack node LPs), `MILP_POOL_PAR`,
+  `MILP_POOL_SPARSE`, `MILP_NODE_SEP_WORK`. miplib_wide_core (120 s, 4 threads, seeds 1-2): dedup +
+  aging of new rows 1.002x (90% CI 0.968-1.040), root row aging 1.016x (0.961-1.072); unset, the search
+  is unchanged.
+
+**Fixes**
+- Probing could prove a feasible model infeasible: a continuous column whose implied bounds crossed
+  within the tolerance was fixed at the midpoint, which could lie outside its current domain, and over a
+  long row such crossed bounds added up (neos-5104907-jarama: INFEASIBLE after 3 s, optimum 935, in
+  the second probing pass). The column is now fixed inside its domain.
+- The benchmark verifier (`benchmarks/lib/mps.py`) took indented lines starting with `*` for comments
+  and dropped irish-electricity's right-hand sides (its RHS vector is named `*RHS*`), so correct
+  solutions were reported infeasible. Only a `*` in column 1 starts a comment now.
+
 ## v0.5.0 — 2026-11
 
 MILP: root strong branching, network cut-set cuts, a local-search primal heuristic and earlier

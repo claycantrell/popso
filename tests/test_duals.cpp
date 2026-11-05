@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "milp/core/interrupt.hpp"
 #include "milp/core/model.hpp"
 #include "milp/io/mps_reader.hpp"
+#include "milp/presolve/presolve.hpp"
 #include "milp/solver/duals.hpp"
 #include "milp/solver/solver.hpp"
 #include "test_framework.hpp"
@@ -374,6 +376,87 @@ TEST(fixed_mip_duals_match_fixed_lp) {
     ++checked;
   }
   CHECK(checked >= 30);
+}
+
+namespace {
+
+// An equation x0 + 2 x1 + 3 x2 + x3 = b over columns in many rows (no substitution) and rows with multiples of its
+// first three entries plus other columns: presolve's sparsify adds the equation to them.
+Model sparsify_lp(std::mt19937& rng, bool integers) {
+  ModelBuilder b;
+  const Index ne = 4, ny = 6;
+  std::vector<double> x0;
+  for (Index j = 0; j < ne + ny; ++j) {
+    const bool is_int = integers && j >= ne && rng() % 2 == 0;
+    b.add_col("x" + std::to_string(j), static_cast<double>(static_cast<int>(rng() % 11) - 5), 0.0, 6.0,
+              is_int ? VarType::Integer : VarType::Continuous);
+    x0.push_back(static_cast<double>(rng() % 5));
+  }
+  const double a[] = {1.0, 2.0, 3.0, 1.0};
+  auto add = [&](double lo_slack, double hi_slack, const std::vector<std::pair<Index, double>>& c) {
+    double act = 0.0;
+    for (const auto& [j, v] : c) act += v * x0[j];
+    const Index r = b.add_row("r" + std::to_string(b.model().num_rows()), act - lo_slack, act + hi_slack);
+    for (const auto& [j, v] : c) b.add_coef(r, j, v);
+  };
+  add(0.0, 0.0, {{0, a[0]}, {1, a[1]}, {2, a[2]}, {3, a[3]}});
+  // x3 in more rows than the others: no singleton (substituted out of the equation), not the shortest column.
+  for (int i = 0; i < 15; ++i) add(1.0, 1.0, {{3, 1.0}, {ne + static_cast<Index>(rng() % ny), 1.0 + i}});
+  for (int i = 0; i < 12; ++i) {
+    const double k = static_cast<double>(static_cast<int>(rng() % 5) - 2) + 0.5;
+    const Index y1 = ne + static_cast<Index>(rng() % ny), y2 = ne + static_cast<Index>(rng() % ny);
+    std::vector<std::pair<Index, double>> c = {{0, k * a[0]}, {1, k * a[1]}, {2, k * a[2]}, {y1, 1.0}};
+    if (y2 != y1) c.push_back({y2, -2.0});
+    add(static_cast<double>(rng() % 3), rng() % 3 == 0 ? kInf : static_cast<double>(rng() % 3), c);
+  }
+  return b.build();
+}
+
+}  // namespace
+
+TEST(duals_with_sparsify) {
+  // Sparsify combines rows of the presolved problem; the duals come from the original problem (an LP re-solve from
+  // the postsolved point), so they satisfy the KKT conditions of the user's rows. LPs (duals = 1) and MILPs with
+  // fixed-MIP duals (duals = 2).
+  setenv("MILP_PRESOLVE_ON", "sparsify", 1);
+  std::mt19937 rng(23);
+  int checked = 0, sparsified = 0;
+  for (int trial = 0; trial < 40; ++trial) {
+    const bool mip = trial % 2 == 1;
+    const Model md = sparsify_lp(rng, mip);
+    MipProblem p;
+    REQUIRE(MipProblem::from_model(md, &p));
+    Presolver pre;
+    PresolveOptions po = PresolveOptions::from_env();
+    REQUIRE(po.sparsify);
+    sparsified += pre.run(p, po, Logger(0)) == PresolveStatus::Reduced && pre.stats().sparsify_rows > 0;
+    SolverParams sp = quiet_params(mip ? 2 : 1);
+    sp.mip_rel_gap = 0.0;
+    const SolveResult r = solve(md, sp);
+    sp.presolve = false;
+    const SolveResult r0 = solve(md, sp);
+    REQUIRE(r.status == r0.status);
+    if (r.status != Status::Optimal) continue;
+    CHECK_NEAR(r.objective, r0.objective, 1e-7 * (1.0 + std::abs(r0.objective)));
+    REQUIRE(r.has_duals);
+    Model fx = md;
+    for (Index j = 0; j < md.num_cols(); ++j) {
+      if (md.col_type[j] == VarType::Continuous) continue;
+      fx.col_type[j] = VarType::Continuous;
+      fx.col_lb[j] = fx.col_ub[j] = std::round(r.x[j]);
+    }
+    const Kkt k = lp_kkt(fx, r.x, r.row_dual, r.reduced_cost, fx.col_lb, fx.col_ub);
+    if (!CHECK(k.max() <= 1e-7)) {
+      std::printf("  trial %d: stationarity %.3g sign %.3g compl %.3g\n", trial, k.stationarity, k.sign, k.complementarity);
+    }
+    CHECK_NEAR(dual_objective(fx, r.row_dual, r.reduced_cost, fx.col_lb, fx.col_ub), r.objective,
+               1e-7 * (1.0 + std::abs(r.objective)));
+    ++checked;
+  }
+  unsetenv("MILP_PRESOLVE_ON");
+  CHECK(checked >= 20);
+  std::printf("  sparsify: %d of 40 presolves, %d checked\n", sparsified, checked);
+  CHECK(sparsified >= 30);
 }
 
 TEST(dual_objective_check) {

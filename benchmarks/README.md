@@ -295,6 +295,12 @@ neos-3402454-bohle 40 MB; uncompressed it would be several GB).
   come from other settings are re-solved and their solver results replaced
   (as with `--update`).  `--set` works with any list and combines with
   positional paths.  Both reference solvers read `.mps.gz`.
+* **The x86 reference run.** `reference/miplib_benchmark_x86.json` holds
+  HiGHS and SCIP on all 240 instances from the second machine of
+  BENCHMARKS.md (Intel i7-7700K, Linux; 120 s, 4 threads, 8 GB), in the
+  format of `solutions.json`.  `run.py --reference FILE`,
+  `readme_table.py --reference FILE` and `plot_profile.py --reference FILE`
+  use it instead of `solutions.json`.
 
 ## Running our solver
 

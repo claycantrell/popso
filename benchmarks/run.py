@@ -154,9 +154,11 @@ def load_references(ref_path, solu_path):
             refs[n] = {
                 "status": e["status"], "objective": e["objective"], "bound": e.get("bound"),
                 "source": "reference",
-                # a reference solver whose status contradicts the consensus counts as unsolved
+                # a reference solver whose status contradicts the consensus counts as unsolved; the MIQP
+                # references from a Python branch-and-bound on HiGHS QP relaxations are not HiGHS's times
                 "times": {s: (r.get("time"), r.get("status") if _compatible(r.get("status"), e["status"])
-                              else "wrong") for s, r in e.get("solvers", {}).items()},
+                              else "wrong") for s, r in e.get("solvers", {}).items()
+                          if r.get("raw_status") != "python-bnb"},
             }
     if solu_path and Path(solu_path).exists():
         d = json.loads(Path(solu_path).read_text())
@@ -375,6 +377,16 @@ def run_one(path, args, solver_cmd, tmpdir, refs):
     if "verify" in details:
         v = details["verify"]
         rec["max_viol"] = max(v["max_bound_viol"], v["max_row_viol"], v["max_int_viol"], v.get("max_logic_viol", 0.0))
+    try:  # search statistics from the solver log (popso's summary lines)
+        text = log_path.read_text(errors="replace")
+        m = re.search(r"^Nodes: (\d+)$", text, re.M)
+        if m:
+            rec["nodes"] = int(m.group(1))
+        m = re.search(r"^Restarts: (\d+) root, (\d+) in-tree$", text, re.M)
+        if m:
+            rec["restarts"], rec["tree_restarts"] = int(m.group(1)), int(m.group(2))
+    except OSError:
+        pass
     if args.keep_sols:
         rec["sol_file"] = str(sol_path)
     return rec

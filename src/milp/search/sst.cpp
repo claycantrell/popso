@@ -238,6 +238,7 @@ SstResult Sst::run(const Symmetry& sym, const std::vector<char>& skip_gen) {
     size_t best_size = 0;
     bool fixed_more = false;
     for (Index r = 0; r < n_; ++r) {
+      if (work_ > work_limit) break;  // scoring the orbits alone can take long (bab2: long rows, minutes)
       if (uf[r] != r || head[r] < 0 || !p_.is_int[r]) continue;
       members.clear();
       bool has_zero = false;
@@ -274,6 +275,10 @@ SstResult Sst::run(const Symmetry& sym, const std::vector<char>& skip_gen) {
         best_conf = c;
         best_size = members.size();
       }
+    }
+    if (work_ > work_limit) {
+      out.budget = true;
+      break;
     }
     if (best < 0 || (o_.mode == 1 && best_conf <= 0)) {
       for (Index j = 0; j < n_; ++j) head[j] = next[j] = -1;

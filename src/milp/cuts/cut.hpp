@@ -3,6 +3,7 @@
 // interface and the cut pool (numerical cleanup, efficacy, parallelism-based
 // selection).
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -63,8 +64,9 @@ struct CutData {
   // Adds x <= / >= constant + coef y (binary y) unless dominated by a stored bound on the same y.
   bool add_vb(Index x, const VarBound& vb, bool upper);
   void build(const MipProblem& p);
-  // Probes binaries fractional in x first (x may be null), within `work_limit` matrix entries.
-  void probe(const MipProblem& p, const double* x, long long work_limit);
+  // Probes binaries fractional in x first (x may be null), within `work_limit` matrix entries; stops early
+  // (the results so far are valid) once `stop` returns true (checked every 64 probes, e.g. the time limit).
+  void probe(const MipProblem& p, const double* x, long long work_limit, const std::function<bool()>& stop = {});
 };
 
 struct SepaContext {
@@ -76,6 +78,7 @@ struct SepaContext {
   int round = 0;
   Index max_nnz = 0;  // > 0: cuts with more nonzeros are rejected by the pool (separators may skip them)
   bool expensive = true;  // false: skip expensive separation variants (flat bound on a degenerate LP)
+  double work_scale = 1.0;  // factor on the separators' per-call work budgets (node separation: MILP_NODE_SEP_WORK)
 };
 
 class Separator {
@@ -138,12 +141,18 @@ class CutPool {
   // Picks up to max_cuts cuts by score, skipping near-parallel ones. Clears the pool.
   std::vector<Cut> select();
   size_t size() const { return cuts_.size(); }
+  // The last select(): candidates, rejected as too parallel, left over at the max_cuts limit.
+  struct SelectStats {
+    int candidates = 0, parallel = 0, over_limit = 0;
+  };
+  const SelectStats& select_stats() const { return sstats_; }
 
  private:
   const MipProblem& p_;
   CutPoolOptions opt_;
   std::vector<Cut> cuts_;
   double cnorm_ = -1.0;  // ||c||^2, computed on the first add
+  SelectStats sstats_;
 };
 
 }  // namespace milp

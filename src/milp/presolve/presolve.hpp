@@ -11,9 +11,12 @@
 //   - dual fixing (lock-based); dominated columns
 //   - doubleton equations (aggregation; integer pairs when integrality is preserved)
 //   - substitution of (implied) free columns and column singletons out of equations
-//   - probing on binaries: fixings, bound tightening, equivalences x = y / x = 1 - y
+//   - probing on binaries: fixings, bound tightening, equivalences x = y / x = 1 - y, lifted rows
+//     (repeated passes)
+//   - sparsification: equations added to other rows to cancel entries
 // Afterwards implied integers are detected and flagged in reduced().implied_int (their bounds rounded).
 
+#include <atomic>
 #include <utility>
 #include <vector>
 
@@ -42,11 +45,36 @@ struct PresolveOptions {
   // (empirical: neos-3627168-kasai's stocks, cost 0, solve 2-3x faster substituted).
   bool substitution_bounded = false;
   bool probing = true;
+  // Lifting of one-sided rows by probing implications (probing.hpp; MILP_PRESOLVE_OFF=probing_lift).
+  bool probing_lift = true;
+  // Probing passes: another one (half the work limit of the previous) while a pass fixes, substitutes or
+  // lifts something (MILP_PRESOLVE_OFF=probing_passes: a single pass; MILP_PROBING_PASSES=<n>).
+  int probing_passes = 3;
+  // Implications between binaries found by probing are kept and propagated by later probes and passes
+  // (MILP_PRESOLVE_OFF=probing_implications). Opt-in (MILP_PRESOLVE_ON=probing_cliques): those of the form
+  // x = 1 => y = 0 join the conflict graph of the clique extension (puriri: LP 60353 without, 60337 with, and
+  // 72k vs 81k nonzeros; mzzv11 35.8% vs 35.5% of the root gap closed, 112k vs 130k nonzeros: the liftings
+  // already add the members that matter).
+  bool probing_implications = true;
+  bool probing_cliques = false;
+  // No substitution of binaries out of equations before the first probing pass (MILP_PRESOLVE_OFF=probing_keep).
+  bool probing_keep_binaries = true;
+  // Sparsification: equations added to rows that share columns with them when that cancels more entries than it
+  // adds (PresolveWork::sparsify; MILP_PRESOLVE_OFF=sparsify).
+  bool sparsify = true;
+  // ... without equations that contain a continuous column with a variable bound (an inequality with continuous
+  // columns of one sign and integer columns of the other): the cut separators aggregate through them
+  // (MILP_PRESOLVE_OFF=sparsify_protect).
+  bool sparsify_protect = true;
   bool clique_merging = true;
   bool clique_extension = true;  // extend set-packing rows by the conflict graph of all rows
   bool implied_int = true;       // implied-integer detection on the reduced problem (presolve/implied_int.hpp)
   bool implied_int_dual = true;  // ... including the dual rule
   double probing_effort = 1.0;  // scales the probing work limit
+  // Optional (sub-MIPs): no further round or step once *stop is set or time_limit seconds have passed since the
+  // start; the reductions so far are kept. The top-level presolve sets neither (work limits only).
+  const std::atomic<bool>* stop = nullptr;
+  double time_limit = kInf;
 
   // Defaults with switches from MILP_PRESOLVE_OFF, a comma-separated list of option names to disable
   // (e.g. "probing,dominated"); "all" disables every reduction except the basic ones.
@@ -73,6 +101,12 @@ struct PresolveStats {
   long long aggregations = 0;
   long long substitutions = 0;
   long long probes = 0, probing_fixed = 0, probing_bounds = 0, probing_equivs = 0;
+  long long probing_lifts = 0, probing_lift_fill = 0;  // lifted rows; of those, new entries
+  long long probing_conflicts = 0;                     // implications between binaries kept (literal pairs)
+  int probing_passes = 0;
+  long long sparsify_rows = 0, sparsify_removed = 0;  // row combinations; nonzeros removed by them (net)
+  long long sparsify_protected = 0;                    // equations not used for their variable-bound columns
+  int sparsify_runs = 0;
   long long clique_extended = 0, clique_dominated = 0, clique_fixed = 0;
   long long implied_primal = 0, implied_dual = 0, implied_int = 0;  // new by rule; flagged in total
   int rounds = 0;
