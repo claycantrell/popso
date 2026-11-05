@@ -22,6 +22,16 @@ using namespace milp;
 
 namespace {
 
+// Sets (value != nullptr) or removes an environment variable.
+void set_env_value(const char* name, const char* value) {
+#ifdef _WIN32
+  _putenv_s(name, value ? value : "");
+#else
+  if (value) setenv(name, value, 1);
+  else unsetenv(name);
+#endif
+}
+
 SolverParams quiet_params(int duals) {
   SolverParams sp;
   sp.verbosity = 0;
@@ -418,7 +428,7 @@ TEST(duals_with_sparsify) {
   // Sparsify combines rows of the presolved problem; the duals come from the original problem (an LP re-solve from
   // the postsolved point), so they satisfy the KKT conditions of the user's rows. LPs (duals = 1) and MILPs with
   // fixed-MIP duals (duals = 2).
-  setenv("MILP_PRESOLVE_ON", "sparsify", 1);
+  set_env_value("MILP_PRESOLVE_ON", "sparsify");
   std::mt19937 rng(23);
   int checked = 0, sparsified = 0;
   for (int trial = 0; trial < 40; ++trial) {
@@ -453,7 +463,7 @@ TEST(duals_with_sparsify) {
                1e-7 * (1.0 + std::abs(r.objective)));
     ++checked;
   }
-  unsetenv("MILP_PRESOLVE_ON");
+  set_env_value("MILP_PRESOLVE_ON", nullptr);
   CHECK(checked >= 20);
   std::printf("  sparsify: %d of 40 presolves, %d checked\n", sparsified, checked);
   // 31 on macOS and Linux / clang, 29 on Linux / GCC (v0.6.0).
