@@ -2939,7 +2939,10 @@ void Search::root_heuristics(Worker& w) {
         DiveLimits lim;
         lim.cutoff = cut;
         lim.iteration_budget = budget;
-        lim.time_limit = tl;
+        // At most the time left when the dive starts: tl is set before the tasks queue up (--deterministic:
+        // the whole time left, so with more dives than threads a queued dive ran that long again;
+        // ns1116954 2 threads ended 109 s past its limit).
+        lim.time_limit = std::min(tl, remaining());
         std::vector<double> sol;
         const double t0 = timer_.elapsed();
         const bool ok = dive(p_, lp, rule, rounding_, inc.empty() ? nullptr : &inc, lim, sol, &r.iters, prop.get());

@@ -13,6 +13,7 @@
 #include "milp/lp/simplex.hpp"
 #include "milp/search/conflict.hpp"
 #include "milp/search/genres.hpp"
+#include "milp/search/trail.hpp"
 #include "milp/search/mip_problem.hpp"
 #include "milp/search/propagation.hpp"
 #include "milp/solver/solver.hpp"
@@ -262,6 +263,43 @@ TEST(conflict_pool_propagates_and_ages) {
   t.clear();
   REQUIRE(pool.propagate(is_int, glb, gub, lb, ub, {2}, t, 5));
   CHECK_EQ(lb[3], 1.0);  // c2 (used at node 3) survived
+}
+
+TEST(conflict_pool_keeps_trail_reasons_alive) {
+  // A conflict that implied a bound on the trail stays alive while the trail refers to it, also when adding
+  // conflicts shrinks the pool and drops it (neos-2657525-crna: the propagation analysis read a freed conflict).
+  const std::vector<char> is_int(4, 1);
+  const std::vector<double> glb(4, 0.0), gub(4, 1.0);
+  ConflictPool pool(4, 2);
+  std::weak_ptr<const Conflict> weak;
+  {
+    auto c = std::make_shared<Conflict>();
+    c->idx = {0, 1};  // x0 + x1 <= 1
+    c->val = {1.0, 1.0};
+    c->rhs = 1.0;
+    weak = c;
+    pool.add(c, 0);
+  }
+  BoundTrail trail;
+  trail.init(4, 100);
+  std::vector<double> lb = glb, ub = gub;
+  std::vector<Index> t;
+  lb[0] = 1.0;
+  trail.push(0, false, 1.0, BoundTrail::kDecision);
+  REQUIRE(pool.propagate(is_int, glb, gub, lb, ub, {0}, t, 1, &trail));
+  CHECK_EQ(ub[1], 0.0);
+  REQUIRE(trail.e.size() == 2 && trail.e[1].kind == BoundTrail::kConflict);
+  for (int k = 0; k < 4; ++k) {  // newer conflicts: the first one is now the least recently used
+    auto d = std::make_shared<Conflict>();
+    d->idx = {2, 3};
+    d->val = {1.0, 1.0};
+    d->rhs = 1.0;
+    pool.add(d, 10 + k);
+  }
+  CHECK(!weak.expired());
+  CHECK(trail.e[1].conf->idx.size() == 2);
+  trail.clear();
+  CHECK(weak.expired());  // the pool had dropped it
 }
 
 TEST(conflict_end_to_end_same_optimum) {

@@ -6,6 +6,7 @@
 // can be walked back to the decisions (see analyze_propagation_conflict).
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "milp/core/types.hpp"
@@ -34,6 +35,7 @@ struct BoundTrail {
     cap = capacity;
     e.clear();
     e.reserve(64);
+    held.clear();
   }
   void clear() {
     for (const Entry& x : e) last[2 * static_cast<size_t>(x.col) + x.upper] = -1;
@@ -42,6 +44,7 @@ struct BoundTrail {
     level = 0;
     fail = kNone;
     fail_conf = nullptr;
+    held.clear();
   }
   // Records a bound; lvl < 0: the current level. Levels never decrease along
   // the entries of one bound (so the reasons of an entry have lower keys).
@@ -64,6 +67,10 @@ struct BoundTrail {
   void fail_row_at(Index row, bool upper_side) { fail = kFailRow, fail_row = row, fail_upper = upper_side; }
   void fail_conflict(const Conflict* c) { fail = kFailConflict, fail_conf = c; }
   void fail_crossing(Index col) { fail = kFailCrossing, fail_col = col; }
+  // Keeps a conflict alive while entries (or the failure) point to it: the worker's bounded conflict pool may drop
+  // it before the analysis (neos-2657525-crna: a conflict added by the generalized-resolution analysis shrank the
+  // pool, and the propagation analysis that follows read a freed conflict; SIGSEGV in 1 of 24 runs, 4 threads).
+  void hold(std::shared_ptr<const Conflict> c) { held.push_back(std::move(c)); }
   bool usable() const { return !overflow && fail != kNone; }
 
   std::vector<Entry> e;
@@ -77,6 +84,7 @@ struct BoundTrail {
   Index fail_row = -1, fail_col = -1;
   bool fail_upper = false;
   const Conflict* fail_conf = nullptr;
+  std::vector<std::shared_ptr<const Conflict>> held;  // conflicts the entries and fail_conf refer to (hold())
 };
 
 }  // namespace milp

@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.6.1 — 2026-11
+
+Correctness and time-limit fixes on top of v0.6.0. The benchmark numbers of v0.6.0 still apply.
+
+**Fixes**
+- LP row scaling: entries below 1e-9 of a row's largest no longer set its geometric scale. A data-noise
+  coefficient (MIPLIB var-smallemery-m6j6: 8.9e-16 next to 106.75) scaled the row by 2^22, so the dual
+  simplex's 1e-7 tolerance on its logical accepted an unscaled reduced cost of 0.138: the root LP
+  stopped at -139.80 instead of -156.06, and a run claimed OPTIMAL at -141.53 (optimum -149.38).
+- Node tableau c-MIR cuts dropped tableau entries below 1e-11 of the row's largest without their
+  bounds, which is not a relaxation where a column has a huge range (MIPLIB neos-4413714-turia: a
+  budget row with right-hand side 9e8; cuts violated by the optimum, a reported bound 46.47 above the
+  optimum 45.37). A tiny entry now leaves only with its bound.
+- Conflict analysis could read conflicts already freed by the bounded per-worker conflict pool: adding
+  a learned conflict could drop conflicts the node's bound trail still referred to (MIPLIB
+  neos-2657525-crna: a crash in 1 of 24 runs at 4 threads; none in 48 runs now).
+- Root cut loop: when the root cuts do not move the bound and are removed, the LP continues from the
+  initial LP's optimal basis. Removing a cut row whose slack was nonbasic dropped the whole basis and
+  the LP was re-solved from scratch (MIPLIB triptim1: that re-solve ran for the rest of a 300 s run).
+- Time limits: root dives are capped by the time left when each dive starts, not when it is queued
+  (`--deterministic`, 2 threads: ns1116954 ended at 235 s with a 120 s limit, now at 122 s), and
+  feasibility jump checks the time limit before publishing each point (savsched1 ran 6 s past it).
+- Deterministic runs give different node counts than v0.6.0 where the changed cuts or LP scaling apply.
+
 ## v0.6.0 — 2026-11
 
 MILP: presolve sparsify, probing liftings over repeated passes with kept implications, repeated root

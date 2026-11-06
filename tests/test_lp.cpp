@@ -167,3 +167,47 @@ TEST(lp_tableau_row_sparse_matches_dense) {
     }
   }
 }
+
+TEST(lp_negligible_entries_do_not_skew_row_scaling) {
+  // Min-max LPs (min t s.t. t + sum_k a_ik x_k >= 0, x in [0, 1], sum_k x_k = K) as in var-smallemery-m6j6, where a
+  // coefficient of 8.9e-16 next to ~100 in a row scaled it by 2^22 and the dual tolerance on its logical let the
+  // root LP stop 16 units above the optimum. The same LPs with such entries added must have the same optimum.
+  std::mt19937 rng(97);
+  int checked = 0;
+  for (int t = 0; t < 60; ++t) {
+    const Index rows = 5 + static_cast<Index>(rng() % 20), nx = 8 + static_cast<Index>(rng() % 30);
+    const Index n = nx + 1, m = rows + 1;
+    std::vector<Index> J, I, Jt, It;
+    std::vector<double> V, Vt;
+    for (Index i = 0; i < rows; ++i) {
+      J.push_back(0), I.push_back(i), V.push_back(1.0);  // t
+      for (Index k = 0; k < nx; ++k) {
+        if (rng() % 100 < 60) J.push_back(1 + k), I.push_back(i), V.push_back(static_cast<double>(static_cast<int>(rng() % 4001) - 2000) / 32.0);
+      }
+    }
+    for (Index k = 0; k < nx; ++k) J.push_back(1 + k), I.push_back(rows), V.push_back(1.0);
+    Jt = J, It = I, Vt = V;
+    for (Index i = 0; i < rows; ++i) {  // a negligible entry in every min-max row, on a column not in it yet
+      Index k = 1 + static_cast<Index>(rng() % nx);
+      bool present = false;
+      for (size_t e = 0; e < J.size(); ++e) present = present || (I[e] == i && J[e] == k);
+      if (present) continue;
+      Jt.push_back(k), It.push_back(i), Vt.push_back(8.881784197001252e-16);
+    }
+    std::vector<double> c(n, 0.0), cl(n, 0.0), cu(n, 1.0), rl(m, 0.0), ru(m, kInf);
+    c[0] = 1.0, cl[0] = -kInf, cu[0] = kInf;
+    rl[rows] = ru[rows] = static_cast<double>(1 + rng() % (nx / 2));
+    DualSimplex a, b;
+    a.load(SparseMatrix::from_triplets(n, m, J, I, V), c, cl, cu, rl, ru);
+    b.load(SparseMatrix::from_triplets(n, m, Jt, It, Vt), c, cl, cu, rl, ru);
+    const LpStatus sa = a.solve(LpOptions{}), sb = b.solve(LpOptions{});
+    REQUIRE(sa == LpStatus::Optimal);
+    REQUIRE(sb == LpStatus::Optimal);
+    if (!CHECK_NEAR(a.objective(), b.objective(), 1e-6 * (1.0 + std::abs(a.objective())))) {
+      std::printf("  case %d: %.10g without, %.10g with the negligible entries\n", t, a.objective(), b.objective());
+    }
+    ++checked;
+  }
+  CHECK(checked == 60);
+}
+

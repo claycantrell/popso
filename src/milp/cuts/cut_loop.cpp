@@ -207,6 +207,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   const Index r0 = lp.num_rows();
   // Rows the loop may remove (slack or useless cuts): from the first cut row, or only its own.
   const Index first_removable = opt.keep_rows ? r0 : m0;
+  const Basis basis0 = lp.get_basis();  // optimal for the rows before the loop (restored below)
   std::vector<Cut> row_cuts;  // the cut in LP row r0 + k
   std::vector<Cut> dropped;   // cuts removed for slack, candidates for re-adding
   const size_t max_dropped = 20000;
@@ -615,6 +616,10 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     std::vector<Index> rows;
     for (Index i = first_removable; i < lp.num_rows(); ++i) rows.push_back(i);
     lp.remove_rows(rows);
+    // Back to the rows of the initial LP: its optimal basis is optimal again. remove_rows drops the basis when a
+    // removed row's logical is nonbasic, and the re-solve then started from the slack basis (triptim1: the root
+    // LP took 36 s by barrier, and that dual simplex the remaining 245 s of a 300 s run).
+    if (first_removable == r0) lp.set_basis(basis0);
     log.log(2, "  cuts did not improve the bound; removed\n");
   }
   // Removing basic rows keeps the basis optimal; re-solve cheaply so that the

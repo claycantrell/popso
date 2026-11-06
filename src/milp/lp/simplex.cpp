@@ -121,12 +121,16 @@ void DualSimplex::load(const SparseMatrix& A, const std::vector<double>& cost, c
 
 void DualSimplex::compute_row_scale(Index i, const Index* idx, const double* val, Index len) {
   (void)idx;
-  double mx = 0.0, mn = kInf;
+  double mx = 0.0;
+  for (Index k = 0; k < len; ++k) mx = std::max(mx, std::abs(val[k]));
+  // Entries below 1e-9 of the row's largest do not count as its smallest (HiGHS drops entries below 1e-9 when
+  // it loads a model): var-smallemery-m6j6's row id5828 has 8.9e-16 next to 106.75, which scaled the row by 2^22,
+  // so the 1e-7 dual tolerance on its logical let a reduced cost of 0.138 (unscaled) pass, and the root LP
+  // stopped at -139.80 instead of -156.06 (a wrong OPTIMAL claim at -141.53, optimum -149.38).
+  double mn = kInf;
   for (Index k = 0; k < len; ++k) {
     const double a = std::abs(val[k]);
-    if (a == 0.0) continue;
-    mx = std::max(mx, a);
-    mn = std::min(mn, a);
+    if (a > 1e-9 * mx) mn = std::min(mn, a);
   }
   rscale_[i] = mx > 0.0 ? std::ldexp(1.0, -static_cast<int>(std::lround(std::log2(std::sqrt(mx * mn))))) : 1.0;
 }

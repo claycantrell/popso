@@ -94,7 +94,7 @@ class MirSeparator : public Separator {
   // Lifted knapsack cover from the aggregation sum agg_j x_j <= 0 (SCIP's knapsackcover on
   // aggregated rows): continuous terms are replaced by the (variable) bound that lets them be
   // dropped, non-binary integers bounded out, binaries complemented to positive weights.
-  bool try_knapsack(Cut* cut);
+  bool try_knapsack(Cut* cut, double b0 = 0.0);
   // Lifted simple generalized flow cover (Gu, Nemhauser & Savelsbergh 1999; as SCIP's cuts.c) from
   // the aggregation sum agg_j x_j <= 0: single-node flow relaxation over binary arc variables
   // (variable bounds of continuous columns, binaries of the row; other columns with simple bounds
@@ -501,7 +501,7 @@ bool MirSeparator::try_cut(double b, Cut* cut) {
   return true;
 }
 
-bool MirSeparator::try_knapsack(Cut* cut) {
+bool MirSeparator::try_knapsack(Cut* cut, double b0) {
   const double* xv = ctx_->x;
   const MipProblem& p = ctx_->p;
   for (Index j : inz_) icoef_[j] = 0.0, imark_[j] = 0;
@@ -510,7 +510,7 @@ bool MirSeparator::try_knapsack(Cut* cut) {
     if (!imark_[j]) imark_[j] = 1, inz_.push_back(j);
     icoef_[j] += v;
   };
-  double b = 0.0;
+  double b = b0;
   work_count_ += static_cast<long long>(nz_.size());
   for (Index j : nz_) {
     const double a = agg_[j];
@@ -1052,19 +1052,39 @@ void MirSeparator::separate_tableau(std::vector<Cut>& out) {
     for (Index j : tnz_) amax = std::max(amax, std::abs(tab_[j]));
     for (double sign : {1.0, -1.0}) {
       clear_agg();
+      // The base is the identity sum_j t_j x_j = 0 (structurals and logicals) as sum agg_j x_j
+      // <= b. A tiny entry is left out only with its bound: sum_rest <= -a x_j <= -a l_j (a > 0)
+      // or -a u_j (a < 0); without a finite bound only at the rounding level of the row itself.
+      // Dropping entries up to 1e-11 max |t_j| without the bound made the cuts invalid where a
+      // logical has a huge range (neos-4413714-turia, a budget row with rhs 9e8: node cuts
+      // violated by the known optimum by up to 0.004, the search reported the bound 46.47 above
+      // the optimum 45.37). MILP_TMIR_DROP=1: the old drop.
+      double b = 0.0;
+      static const bool old_drop = std::getenv("MILP_TMIR_DROP") != nullptr;
+      const double tiny = 1e-11 * std::max(1.0, amax);
       for (Index j : tnz_) {
         const double v = tab_[j];
-        if (std::abs(v) <= 1e-11 * std::max(1.0, amax)) continue;
+        if (v == 0.0) continue;
+        if (std::abs(v) <= tiny) {
+          if (old_drop) continue;
+          const double a = sign * v;
+          const double bnd = a > 0 ? lower(j) : upper(j);
+          if (is_finite(bnd)) {
+            b -= a * bnd;
+            continue;
+          }
+          if (std::abs(v) <= 1e-4 * tiny) continue;
+        }
         mark_[j] = 1;
         nz_.push_back(j);
         agg_[j] = sign * v;
       }
       Cut cut;
-      if (try_cut(0.0, &cut)) {
+      if (try_cut(b, &cut)) {
         cut.origin = "tmir";
         out.push_back(std::move(cut));
       }
-      if (knapsack_ && try_knapsack(&cut)) {
+      if (knapsack_ && try_knapsack(&cut, b)) {
         cut.origin = "tcover";
         out.push_back(std::move(cut));
       }

@@ -81,6 +81,9 @@ class Fj {
       }
       if (effort_ - progress_effort > lim_.stall_effort) break;
       if (viol_.empty()) {
+        // Each point is published (an incumbent check of the whole model), so the time limit is checked per point
+        // too: savsched1's 496 improving points ran 6 s past the deadline between the step checks above.
+        if (interrupted() || std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > lim_.time_limit) break;
         if (!found_point(on_solution)) break;
         progress_effort = effort_;
         best_nviol = viol_.size();

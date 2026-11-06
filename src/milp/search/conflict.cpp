@@ -379,6 +379,7 @@ bool ConflictPool::propagate(const std::vector<char>& is_int, const std::vector<
       work += static_cast<long long>(e.c->idx.size()) + 4;
       ok = propagate_conflict(*e.c, is_int, lb, ub, &tightened, &changed, trail);
     }
+    if (trail && (!ok || changed)) trail->hold(e.c);
     if (!ok) {
       e.last_used = now;
       culprit_ = e.c.get();
