@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.2 — 2026-11
+
+A correctness fix on top of v0.6.1. The benchmark numbers of v0.6.0 still apply.
+
+**Fixes**
+- Wrong optimal answer after two root restarts: when the first restarted search found nothing better
+  than the incumbent it started from, the second restart was handed that start in the previous
+  problem's columns; the second restarted root was pruned against the mismatched point and the old
+  incumbent came back as optimal (MIPLIB drayage-25-23 on x86: 101344.27 reported optimal, optimum
+  101282.65). The restart now passes the start in the restarted problem's columns, and a start whose
+  size does not match the problem is ignored with a warning.
+
 ## v0.6.1 — 2026-11
 
 Correctness and time-limit fixes on top of v0.6.0. The benchmark numbers of v0.6.0 still apply.

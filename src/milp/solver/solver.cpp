@@ -252,6 +252,7 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
   }
   MipResult mr;
   std::function<void(const std::vector<double>&, double)> q_hook;  // opts.on_incumbent in q's columns
+  std::vector<double> q_start;  // opts.start in q's columns
   if (q.num_cols() == 0) {
     // Everything was removed; remaining rows (if any) have no columns.
     for (Index i = 0; i < q.num_rows(); ++i) {
@@ -273,7 +274,13 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
       };
     }
     q_hook = o.on_incumbent;
+    if (!o.start.empty() && static_cast<Index>(o.start.size()) != p.num_cols()) {
+      // A start in other columns (a caller's bug; crush would read it as this problem's point) is dropped.
+      log.log(1, "WARNING: start point with %zu values for %d columns ignored\n", o.start.size(), p.num_cols());
+      o.start.clear();
+    }
     if (!o.start.empty()) o.start = pre.crush(o.start);
+    q_start = o.start;
     if (!o.pc_init.empty()) o.pc_init = o.pc_init.mapped(pre.col_map());
     o.allow_restart = opts.allow_restart && opts.restarts_done < rule.max_restarts;
     o.restart_frac = opts.restarts_done == 0 ? rule.frac : rule.frac2;
@@ -366,7 +373,12 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
     o2.root_cut_rounds = o2.restarts_done >= 2 ? rule.cheap_rounds : -1;
     o2.root_heuristics = o2.restarts_done < 2 || mr.improved;
     o2.pc_init = rule.pc ? std::move(mr.pc) : PseudocostSnapshot{};
-    if (mr.has_solution) o2.start = mr.x;
+    // The restarted problem has q's columns: the search's incumbent, else the start it was given (o2 is a copy of
+    // opts, whose start is in p's columns: drayage-25-23 on x86 restarted a second time from a search that had
+    // found nothing better than its start, the stale start was crushed through the wrong presolve, the
+    // restarted root was pruned against it, and the incumbent 101344.27 came back as optimal; the optimum is
+    // 101282.65).
+    o2.start = mr.has_solution ? mr.x : q_start;
     o2.debug_point = mr.debug_point;
     o2.feasibility_jump = false;  // it already ran
     // After a restart from a quick root (set packing/covering: a few hundred LP iterations on a few hundred rows), a second
