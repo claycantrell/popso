@@ -137,8 +137,15 @@ struct SearchOptions {
   SharedIncumbent* shared = nullptr;       // racing: exchange incumbents with other searches
   bool feasibility_jump = true;            // run FJ on a side thread (racing: first search only)
   // Known point (e.g. the incumbent before a restart), tried as the first incumbent. If it is
-  // infeasible here (reductions may cut it off), its objective becomes the cutoff instead.
+  // infeasible here (reductions may cut it off), its objective becomes the cutoff instead:
+  // start_objective (with the offset) when set, the objective of `start` in this problem otherwise.
+  // A caller that crushed the start through a presolve sets start_objective from the point before the
+  // crush: a dual reduction may remove the point, and the crushed point's objective is then not the
+  // start's (neos-3083819-nubu, deterministic, 2 threads, seed 4 on x86: the second root restart's
+  // presolve crushed the incumbent 6315970 to a rejected point of objective 6307737, which became the
+  // cutoff below the optimum 6307996, and 6315970 came back as optimal).
   std::vector<double> start;
+  double start_objective = kInf;
   bool no_zerohalf = false;  // root cut loop without zero-half cuts
   bool root_lns = true;  // root LNS rounds allowed (restart: only if they improved before it)
   std::atomic<long long>* progress = nullptr;  // LP iterations of this search are added here as it goes

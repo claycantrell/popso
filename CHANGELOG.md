@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.6.3 — 2026-11
+
+A correctness fix on top of v0.6.2. The benchmark numbers of v0.6.0 still apply.
+
+**Fixes**
+- Wrong optimal answer after a restart whose presolve removed the incumbent: a restarted search gets the
+  incumbent before the restart as its start, mapped through the restart's presolve. A dual reduction of
+  that presolve may remove the point (another optimal point is kept); the mapped point was then rejected,
+  and its objective, which is not the incumbent's, became the restarted search's cutoff. Below the optimum,
+  the search found nothing better and the old incumbent came back as optimal (MIPLIB neos-3083819-nubu,
+  `--deterministic --threads 2 --seed 4` on x86: 6315970 reported optimal, optimum 6307996). The cutoff of a
+  rejected start is now the start's own objective.
+
 ## v0.6.2 — 2026-11
 
 A correctness fix on top of v0.6.1. The benchmark numbers of v0.6.0 still apply.

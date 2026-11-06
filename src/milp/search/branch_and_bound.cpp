@@ -5623,11 +5623,14 @@ MipResult Search::run() {
     external_cutoff_ = opts_.cutoff - p_.offset;
     cutoff_.store(prune_threshold(external_cutoff_));
   }
+  // A rejected start: the cutoff from its own objective (SearchOptions::start_objective), not from the point.
+  const double start_obj =
+      opts_.start.empty() ? kInf : is_finite(opts_.start_objective) ? opts_.start_objective : p_.objective(opts_.start);
   if (!opts_.start.empty() && !try_incumbent(opts_.start, "restart")) {
-    external_cutoff_ = std::min(external_cutoff_, p_.objective(opts_.start) - p_.offset);
+    external_cutoff_ = std::min(external_cutoff_, start_obj - p_.offset);
     cutoff_.store(prune_threshold(external_cutoff_));
   }
-  if (!opts_.start.empty()) inc_start_ = p_.objective(opts_.start) - p_.offset;
+  if (!opts_.start.empty()) inc_start_ = start_obj - p_.offset;
   if (!opts_.pc_init.empty()) {
     // Restart: the pseudocosts of the search before, counts capped at the reliability threshold.
     // MILP_RESTART_PC=1: the carried entries are history (counts capped at MILP_RESTART_PC_CAP, default

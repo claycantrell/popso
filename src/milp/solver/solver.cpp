@@ -253,6 +253,7 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
   MipResult mr;
   std::function<void(const std::vector<double>&, double)> q_hook;  // opts.on_incumbent in q's columns
   std::vector<double> q_start;  // opts.start in q's columns
+  double q_start_obj = kInf;    // its objective before the crush (SearchOptions::start_objective)
   if (q.num_cols() == 0) {
     // Everything was removed; remaining rows (if any) have no columns.
     for (Index i = 0; i < q.num_rows(); ++i) {
@@ -279,8 +280,12 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
       log.log(1, "WARNING: start point with %zu values for %d columns ignored\n", o.start.size(), p.num_cols());
       o.start.clear();
     }
-    if (!o.start.empty()) o.start = pre.crush(o.start);
+    if (!o.start.empty()) {
+      o.start_objective = p.objective(o.start);  // the start's own objective (its crushed point may differ)
+      o.start = pre.crush(o.start);
+    }
     q_start = o.start;
+    q_start_obj = o.start_objective;
     if (!o.pc_init.empty()) o.pc_init = o.pc_init.mapped(pre.col_map());
     o.allow_restart = opts.allow_restart && opts.restarts_done < rule.max_restarts;
     o.restart_frac = opts.restarts_done == 0 ? rule.frac : rule.frac2;
@@ -379,6 +384,7 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
     // restarted root was pruned against it, and the incumbent 101344.27 came back as optimal; the optimum is
     // 101282.65).
     o2.start = mr.has_solution ? mr.x : q_start;
+    o2.start_objective = mr.has_solution ? q.objective(mr.x) : q_start_obj;
     o2.debug_point = mr.debug_point;
     o2.feasibility_jump = false;  // it already ran
     // After a restart from a quick root (set packing/covering: a few hundred LP iterations on a few hundred rows), a second

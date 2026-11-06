@@ -5,8 +5,10 @@
 #include <string>
 #include <vector>
 
+#include "milp/core/log.hpp"
 #include "milp/core/timer.hpp"
 #include "milp/io/mps_reader.hpp"
+#include "milp/search/branch_and_bound.hpp"
 #include "milp/search/mip_problem.hpp"
 #include "milp/solver/solver.hpp"
 #include "milp/solver/start.hpp"
@@ -136,4 +138,41 @@ TEST(start_is_incumbent_under_node_limit) {
   for (Index j = 0; j < m.num_cols(); j += 2) half[j] = ref.x[j];
   const SolveResult h = solve(m, p, half);
   if (h.has_solution) CHECK(m.violation(h.x).max() <= 1e-6);
+}
+
+TEST(start_rejected_cutoff_from_its_own_objective) {
+  // A restart hands the search the incumbent before it, crushed through the restart's presolve, and its
+  // objective (SearchOptions::start_objective). A dual reduction may remove that point: the crushed point
+  // is then rejected, and the cutoff must come from the start's objective, not from the crushed point's
+  // (here 1, below the optimum 3: nothing would be found, and the caller would return its old incumbent
+  // as optimal; neos-3083819-nubu on x86).
+  // min x + y  s.t.  x + y >= 3,  x, y integer in [0, 10]: optimum 3.
+  MipProblem p;
+  {
+    ModelBuilder b;
+    const Index x = b.add_col("x", 1, 0, 10, VarType::Integer);
+    const Index y = b.add_col("y", 1, 0, 10, VarType::Integer);
+    const Index r = b.add_row("r", 3, kInf);
+    b.add_coef(r, x, 1);
+    b.add_coef(r, y, 1);
+    REQUIRE(MipProblem::from_model(b.build(), &p));
+  }
+  SolverParams sp = quiet_params();
+  Logger log(0);
+  for (const bool with_objective : {true, false}) {
+    SearchOptions opts;
+    opts.check_resident = false;
+    opts.feasibility_jump = false;
+    opts.start = {1.0, 0.0};  // violates the row; its objective here is 1
+    if (with_objective) opts.start_objective = 5.0;  // the incumbent's own objective
+    Timer timer;
+    const MipResult r = branch_and_bound(p, sp, log, timer, opts);
+    if (with_objective) {
+      CHECK(r.status == Status::Optimal);
+      REQUIRE(r.has_solution);
+      CHECK_NEAR(r.objective, 3.0, 1e-9);
+    } else {
+      CHECK(!r.has_solution);  // the point's own objective as the cutoff: below the optimum
+    }
+  }
 }
