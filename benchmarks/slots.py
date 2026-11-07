@@ -15,13 +15,17 @@ scans a second in all.
 
 from __future__ import annotations
 
-import fcntl
 import itertools
 import os
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl  # Unix only: the pool needs it; without it (Windows) POPSO_SLOTS must stay unset
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 _seq = itertools.count()
 _proc_lock = threading.Lock()  # one waiting thread per process
@@ -33,6 +37,8 @@ def config():
     spec = os.environ.get("POPSO_SLOTS")
     if not spec:
         return None
+    if fcntl is None:
+        raise RuntimeError("POPSO_SLOTS needs fcntl (Unix)")
     d, threads, mem = spec.rsplit(":", 2)
     return Path(d), int(threads), int(mem)
 
