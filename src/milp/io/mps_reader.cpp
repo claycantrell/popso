@@ -846,7 +846,7 @@ std::string write_mps_string(const Model& model_in, Index* inexact_ranges) {
   std::vector<char> has_range(m, 0);
   for (Index i = 0; i < m; ++i) {
     const double lo = model.row_lb[i], hi = model.row_ub[i];
-    char t;
+    char t = 'N';  // set below (ranged_row sets it through the pointer)
     if (lo == hi) {
       t = 'E', rhs[i] = lo;
     } else if (lo == -kInf && hi == kInf) {

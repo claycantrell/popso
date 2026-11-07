@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.7.1 — 2026-11
+
+Build and test fixes for the continuous-integration platforms; no solver changes. The benchmark numbers
+of v0.7.0 apply.
+
+**Fixes**
+- Linux, gcc 15: an uninitialized-variable warning in the MPS writer, an error with `-Werror`.
+- Linux, clang with libstdc++ 15: a test's JSON helper (a vector of pairs with an incomplete type) did not
+  compile.
+- Windows: two randomized tests compared objectives at exactly the feasibility tolerance (a point 1e-6
+  better than the optimum at the tolerance's edge) or took a numerical failure of the reference MIQP search
+  as a mismatch.
+
 ## v0.7.0 — 2026-11
 
 MILP: objective propagation with clique implications, a root cut loop that backs off on wide models,
@@ -283,6 +296,19 @@ tangent rows. New tooling to share a model or its profile without its data (`--w
   (MIPLIB gfd-schedulen180f7d50m30k18 with 12 runs at a time: killed at 144 s with a 120 s limit).
 - Time limit on large roots: when the root's dual simplex stopped at the time limit, the concurrent barrier was
   not told to stop, and its crossover ran on (MIPLIB savsched1, 120 s limit: ended at 180-215 s; now 120.3 s).
+
+## v0.6.3 — 2026-11
+
+A correctness fix on top of v0.6.2. The benchmark numbers of v0.6.0 still apply.
+
+**Fixes**
+- Wrong optimal answer after a restart whose presolve removed the incumbent: a restarted search gets the
+  incumbent before the restart as its start, mapped through the restart's presolve. A dual reduction of
+  that presolve may remove the point (another optimal point is kept); the mapped point was then rejected,
+  and its objective, which is not the incumbent's, became the restarted search's cutoff. Below the optimum,
+  the search found nothing better and the old incumbent came back as optimal (MIPLIB neos-3083819-nubu,
+  `--deterministic --threads 2 --seed 4` on x86: 6315970 reported optimal, optimum 6307996). The cutoff of a
+  rejected start is now the start's own objective.
 
 ## v0.6.2 — 2026-11
 

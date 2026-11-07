@@ -27,17 +27,20 @@ struct Json {
   double number = 0.0;
   std::string str;
   std::vector<Json> arr;
-  std::vector<std::pair<std::string, Json>> obj;
+  // An object's members as keys and values side by side: a std::pair<std::string, Json> in the vector would
+  // need Json complete there (libstdc++ 15 with clang rejects it; vectors of an incomplete type are fine).
+  std::vector<std::string> keys;
+  std::vector<Json> vals;
 
   const Json& operator[](const std::string& key) const {
     if (type != Object) throw std::runtime_error("not an object: " + key);
-    for (const auto& [k, v] : obj)
-      if (k == key) return v;
+    for (size_t i = 0; i < keys.size(); ++i)
+      if (keys[i] == key) return vals[i];
     throw std::runtime_error("missing key " + key);
   }
   bool has(const std::string& key) const {
-    for (const auto& kv : obj)
-      if (kv.first == key) return true;
+    for (const std::string& k : keys)
+      if (k == key) return true;
     return false;
   }
 };
@@ -86,7 +89,8 @@ class JsonParser {
         std::string k = string();
         ws();
         expect(':');
-        v.obj.emplace_back(std::move(k), value());
+        v.keys.push_back(std::move(k));
+        v.vals.push_back(value());
         ws();
         if (peek() == ',') {
           ++i_;
@@ -192,9 +196,9 @@ class JsonParser {
 void strings_of(const Json& v, std::set<std::string>& out) {
   if (v.type == Json::String) out.insert(v.str);
   for (const Json& a : v.arr) strings_of(a, out);
-  for (const auto& [k, x] : v.obj) {
-    out.insert(k);
-    strings_of(x, out);
+  for (size_t i = 0; i < v.keys.size(); ++i) {
+    out.insert(v.keys[i]);
+    strings_of(v.vals[i], out);
   }
 }
 
@@ -233,11 +237,11 @@ Json profile_of(const Model& m, const SolverParams& params, SolveResult* result_
   CHECK(model["cols"].number == m.num_cols());
   CHECK(model["nonzeros"].number == m.num_nonzeros());
   double classes = 0.0, types = 0.0;
-  for (const auto& kv : model["row_classes"].obj) classes += kv.second.number;
-  for (const auto& kv : model["col_types"].obj) types += kv.second.number;
+  for (const Json& x : model["row_classes"].vals) classes += x.number;
+  for (const Json& x : model["col_types"].vals) types += x.number;
   CHECK(classes == m.num_rows());
   CHECK(types == m.num_cols());
-  CHECK(model["row_classes"].obj.size() == static_cast<size_t>(kNumRowClasses));
+  CHECK(model["row_classes"].vals.size() == static_cast<size_t>(kNumRowClasses));
   for (const char* sec : {"numerics", "presolve", "run"}) CHECK(js.has(sec));
   const Json& run = js["run"];
   CHECK(run["status"].str == to_string(r.status));

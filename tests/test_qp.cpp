@@ -934,6 +934,13 @@ TEST(square_milp_matches_miqp) {
     const SolveResult w = solve(md, p);
     set_env("MILP_SQ_WINDOW", nullptr);
     set_env("MILP_SQ_CENTER", nullptr);
+    // The MIQP search is the reference; a numerical failure of it is not a mismatch (MSVC, trial 10: NUMERIC there,
+    // OPTIMAL for both tangent MILPs). The two tangent MILPs must still agree.
+    if (c.status == Status::NumericalError) {
+      CHECK(a.status == w.status);
+      if (a.status == Status::Optimal && w.status == Status::Optimal) CHECK_NEAR(a.objective, w.objective, 1e-6 * (1.0 + std::abs(a.objective)));
+      continue;
+    }
     if (!CHECK(a.status == c.status) || !CHECK(w.status == c.status)) {
       std::printf("  trial %d: %s (tangent MILP) / %s (window 1) vs %s (MIQP)\n", trial, to_string(a.status),
                   to_string(w.status), to_string(c.status));

@@ -1132,10 +1132,14 @@ Status compare_with_presolve(const Model& m, int it, int sparsify = -1, const Pr
   if (b.has_solution) b.objective = m.objective_value(b.x);
   const bool ok_status = compatible(a.status, b.status);
   CHECK(ok_status);
+  // 2e-6: a point at the edge of the 1e-6 feasibility tolerance may be 1e-6 better (MSVC: -1.00000000003e-6 for 0).
   const bool same_obj = a.status != Status::Optimal ||
-                        std::abs(a.objective - b.objective) <= 1e-6 * std::max(1.0, std::abs(a.objective));
+                        std::abs(a.objective - b.objective) <= 2e-6 * std::max(1.0, std::abs(a.objective));
   const char* dump = std::getenv("MILP_FUZZ_DUMP");  // directory for failing cases
-  if (dump && (!ok_status || !same_obj)) write_mps(m, std::string(dump) + "/case" + std::to_string(it) + ".mps");
+  const char* dump_case = std::getenv("MILP_FUZZ_DUMP_CASE");  // with MILP_FUZZ_DUMP: also this case (other platforms)
+  if (dump && (!ok_status || !same_obj || (dump_case && std::atoi(dump_case) == it))) {
+    write_mps(m, std::string(dump) + "/case" + std::to_string(it) + ".mps");
+  }
   if (!ok_status) {
     std::fprintf(stderr, "  case %d: status %s (no presolve) vs %s (presolve)\n", it, to_string(a.status),
                  to_string(b.status));
@@ -1143,7 +1147,7 @@ Status compare_with_presolve(const Model& m, int it, int sparsify = -1, const Pr
   }
   if (a.status == Status::Optimal) {
     REQUIRE(b.has_solution);
-    const double tol = 1e-6 * std::max(1.0, std::abs(a.objective));
+    const double tol = 2e-6 * std::max(1.0, std::abs(a.objective));  // see same_obj
     if (!CHECK_NEAR(a.objective, b.objective, tol)) std::fprintf(stderr, "  case %d: objective mismatch\n", it);
     const auto v = m.violation(b.x);
     if (!CHECK(v.max() <= 1e-6)) std::fprintf(stderr, "  case %d: violation %g\n", it, v.max());
