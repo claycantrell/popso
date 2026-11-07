@@ -94,6 +94,7 @@ struct MipResult {
   std::vector<double> cut_value, cut_lb, cut_ub;
   std::vector<double> debug_point;  // the debug point of this search (after canonicalization), for a restart
   PseudocostSnapshot pc;  // with a restart request: the pseudocosts (MILP_RESTART_PC=0: none)
+  PresolveSummary presolve;  // solver.cpp: the first presolve of the problem solved
 };
 
 // Incumbent shared between concurrent (racing) searches.
@@ -150,6 +151,7 @@ struct SearchOptions {
   bool root_lns = true;  // root LNS rounds allowed (restart: only if they improved before it)
   std::atomic<long long>* progress = nullptr;  // LP iterations of this search are added here as it goes
   long long iteration_limit = -1;  // stop (status IterationLimit) after this many LP iterations (-1: none)
+  int solution_limit = 0;          // stop (status Interrupted) after this many new incumbents (0: none)
   // Enforce the memory limit on the resident size of the whole process too. Off in sub-MIPs:
   // the process includes the main search, so a sub-MIP's small limit was always exceeded and
   // every sub-MIP of a large problem stopped after 2 nodes (the main search checks RSS).
@@ -163,6 +165,11 @@ struct SearchOptions {
   // once) with the point in this problem's columns and the current lower bound (internal, incl.
   // the offset). Deterministic mode: at the deterministic merge points. Not passed to sub-MIPs.
   std::function<void(const std::vector<double>& x, double bound)> on_incumbent;
+  // Called for each incumbent the search accepts (under its incumbent lock, possibly from several
+  // racing searches at once) with its objective in the user's sense (display_sense, offset
+  // included), what found it and the timer's time: SolverParams::trace_incumbents. Copied with the
+  // options into restarts and racing searches; sub-MIPs start from fresh options.
+  std::function<void(double objective, const char* source, double time)> on_trace;
 };
 
 // Root restart rule (thresholds and budget in SearchOptions, set by solver.cpp's RestartRule): the

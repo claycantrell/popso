@@ -1,17 +1,288 @@
 # Changelog
 
-## v0.6.3 — 2026-11
+## v0.7.0 — 2026-11
 
-A correctness fix on top of v0.6.2. The benchmark numbers of v0.6.0 still apply.
+MILP: objective propagation with clique implications, a root cut loop that backs off on wide models,
+faster clique and c-MIR separation, the trivial objective bound (zero-objective models end at the first
+feasible point), presolve substitution with bounds implied by other rows and dual aggregation onto
+variable upper bounds, a concurrent barrier on large MIP roots, safe dual bounds, and a faster
+`--deterministic` mode. MIQP: sums of squares of integer variables are solved as a MILP with exact
+tangent rows. New tooling to share a model or its profile without its data (`--write-anon`,
+`--profile`). Several correctness fixes, also released as v0.6.2 and v0.6.3.
+
+**Benchmarks**
+- 63-instance MIPLIB 2017 subset (120 s, 4 threads), seeds 0 / 1 / 2: 61 / 60 / 63 solved, shifted
+  geometric mean 9.4 / 8.7 / 7.9 s (v0.6.0: 59 / 61 / 59, 9.0 / 9.2 / 9.0 s); over all 189 runs 184
+  solved and 8.7 s against 179 and 9.0 s.
+- Full MIPLIB 2017 benchmark set, 240 instances (AMD EPYC 4465P, Linux, 120 s, 4 threads, references
+  measured on the same machine): 89 solved, shifted geometric mean 56.0 s (HiGHS 74 / 66.3 s, SCIP 65 /
+  69.1 s); 11 solved by popso only, 7 by HiGHS or SCIP but not popso. (v0.6.0's run was on an Intel
+  i7-7700K: 75 solved, HiGHS 63, SCIP 53.)
+- 43 hard MIPLIB 2017 instances (600 s, 4 threads): 16 solved, shifted geometric mean 298.5 s (v0.6.0: 18,
+  281.5 s; HiGHS 12, SCIP 6). Solved again: neos-1171737, neos-1456979; not solved in this run: app1-2,
+  csched007, icir97_tension, supportcase26 (seed-dependent: with seed 1, v0.6.3 and v0.7.0 each solve
+  csched007 only).
+- Generated models (1 thread, 120 s): 152 of 153 solved (v0.6.0: 146 of 148), including the new
+  `sqtrack` family (production targets in squares of integers, 0.02-0.14 s each).
+
+**Root cut loop on wide models**
+- Separators back off: one none of whose cuts was selected sits out the next 2^(k-1) - 1 rounds after its
+  k-th such call in a row, and runs every round again once a cut of it is selected. Only calls worth at
+  least 1e7 work units (~10 ms; the separator's own count, at least one pass over the matrix) count, so
+  small models keep their cut loop. On the 41 large-LP MIPLIB roots over a third of the separation time
+  went to calls without a kept or selected cut (opm2-z10-s4: clique cuts, 2.4 s per round, none found;
+  snp-02-004-104 and uccase12: c-MIR ~1 s per round after round 3). `MILP_SEPA_BACKOFF=0`: off.
+- Gomory cuts stop a round after 20 tableau rows in a row too dense for the cut pool, when the previous
+  round's rows gave no cut and the round's work has reached 1e7 units. neos-4413714-turia (190k columns)
+  computed 500 such rows per round from round 5 on: Gomory 11.4 -> 1.5 s, first root LP and cuts 29.6 ->
+  21.8 s with 39 instead of 26 rounds (Mac, 2 threads). `MILP_GOMORY_DENSE_STOP=0`: off.
+- The cut loop's work budgets count the work the separators report (Gomory's tableau rows, c-MIR's
+  aggregations, implied-bound checks, clique graph scans) instead of a Gomory estimate (`MILP_SEPA_WORK=0`:
+  the estimate), and a plateau after the bound moved ends the extra cheap rounds once its work exceeds the
+  cap of the flat rounds at the start (lectsched-5-obj: 17 rounds / 14 s without gain, its root 33 -> 10 s;
+  `MILP_PLATEAU_WORK=0`: off).
+- `MILP_CUT_PROFILE=1` (verbosity 2) logs per round and separator the time, work, candidates, cuts kept,
+  selected and binding, and the re-solve's work and bound gain.
+
+**Objective propagation with clique implications**
+- Once an incumbent is known, a binary whose value 1 (or 0) forces other binaries off their cheaper value
+  through the rows (two items of a row side that cannot both be 1: for a x + C y <= C with C = sum a, y
+  and every item) is fixed when the objective of those forced moves alone exceeds the room between the
+  bound the column bounds give and the incumbent. Applied between the root cut rounds (the fixings stay in
+  the root LP) and with every later incumbent (global bounds; the root is processed again when they cut
+  off its LP solution). Like reduced-cost fixing, it keeps every point better than the incumbent.
+  hypothyroid-k1 (Mac, 4 threads, 3 runs): 83-85 s -> 3-6 s, solved at the root in 2.8-2.9 s (local
+  MIP's incumbent at 1.3 s fixes 74 binaries: root LP -2902.85 -> -2851, the optimum); `--deterministic`
+  2 threads 72 -> 52 s (68 fixings at the root node). `MILP_OBJ_CLIQUES=0`: off.
+
+**Trivial objective bound**
+- The search starts from the bound the column bounds alone give (offset + sum of min(c_j lb_j, c_j ub_j) over
+  the presolved model; the offset for a zero or constant objective), and ends as soon as an incumbent meets
+  it: status OPTIMAL with that bound, after postsolve as usual. In the default (opportunistic) mode the stop
+  also interrupts whatever still runs for the search (root LP, cut loop, heuristics, sub-MIPs).
+  ns1116954 (zero objective): local MIP's point at 3.4 s used to wait for the 131k-row root LP (50 s; 56 s
+  in all, or the time limit with bound -inf); now OPTIMAL at 3.4 s. Smaller gains where the optimum is the
+  trivial bound (the only core instances where it triggers; 4 threads, seeds 0-2): decomp2 0.34 -> 0.14 s,
+  cbs-cta 3.2 -> 3.0 s, neos-3004026-krka 0.29 -> 0.20 s.
+  Runs stopped at a limit report the trivial bound instead of -inf where it is better. `--deterministic`
+  takes incumbents at deterministic points only and stops there (no interrupt), so deterministic runs stay
+  reproducible; they are unchanged where no incumbent meets the bound. `MILP_TRIVIAL_BOUND=0`: off.
+- `--deterministic`: the feasibility-jump / local-MIP helper's points also enter during a long initial root
+  LP, every 5000 simplex iterations (deterministic points; `MILP_DET_ROOT_SYNC=k`: every k, 0: off). The helper
+  used to stop after a few milliseconds of work until the root LP and its cut loop had finished. ns1116954
+  (2 threads): OPTIMAL at 22 s, was the time limit without an incumbent (local MIP's point was taken too
+  late). Runs whose initial root LP needs fewer than 5000 iterations are unchanged.
+
+**Presolve: substitution with bounds implied by other rows**
+- A column substituted out of an equation counts as implied free also when its other rows imply its
+  bounds (given the bounds of their other columns), not only the equation itself: the equation is then
+  removed instead of kept as the column's bounds. Rows whose coefficient is more than 10x smaller than
+  the equation's are not used (postsolve would move their tolerance into the equation).
+  `MILP_PRESOLVE_OFF=subst_implied` turns it off.
+- Such substitutions, and those that keep the equation, may add up to 8 nonzeros (before: none for a
+  kept equation) for continuous columns; a kept equation only after the first probing pass and not for a
+  column with a variable bound (`x <= u y`: the cut separators aggregate through those flows; beasleyC3
+  and mc11 went from ~15 s to the 120 s limit without this rule). `MILP_PRESOLVE_OFF=subst_fill`.
+- Presolved sizes: csched008 294 x 1496 -> 277 x 1466 (rows x columns), csched007 345 x 1749 -> 326 x
+  1712, milo-v12-6-r2-40-1 4045 x 1749 -> 3813 x 1560, neos-4954672-berkel 771 x 672 -> 713 x 634,
+  uct-subprob 1607 x 1824 -> 1268 x 1335, rocI-4-11 2802 x 1246 -> 2473 x 978, mzzv11 8336 -> 7872 rows,
+  mzzv42z 6263 -> 6054.
+- miplib_wide_core (120 s, 4 threads, seeds 1-2; the same binary with both knobs off vs on): 0.950x (90%
+  CI 0.918-0.983), solved 119 -> 123 of 126; roll3000 34 -> 19 s, 30n20b8 TL -> 79 s, n2seq36q 44 -> 30 s,
+  beasleyC3 17 -> 12 s; eil33-2 43 -> 62 s.
+
+**Root cut loop stops when the gap is closed**
+- The root cut loop does no further round once the incumbent closes the gap at the LP bound (incumbents
+  from the helper threads arrive while it runs). cbs-cta: the incumbent 0, equal to the root bound, came
+  at 1.8 s and 13 more flat cut rounds took the root to 8.2 s; now 2.6 s. `--deterministic` compares with
+  the incumbent at the loop's start, so deterministic runs are unchanged. `MILP_CUT_GAP_STOP=0`: off.
+
+**Branching on flat objectives (opt-in, off by default)**
+- `MILP_FLAT_HYBRID=1`: when every candidate's pseudocost score is at the zero-gain floor, the conflict and
+  inference scores decide. On sct2 and csched008 (the plateaus it was made for) the bounds do not move
+  either way; verbosity 2 prints how many nodes branched without pseudocost gains.
+
+**Adaptive large-neighbourhood search (opt-in, off by default)**
+- `MILP_ALNS=1`: the tree's sub-MIP heuristics are chosen by a bandit that scores each neighbourhood by
+  the improvement it finds per unit of LP work, mutation fixing rates adapt after every call, and two
+  neighbourhoods join: proximity search (Fischetti and Monaci: minimize the distance to the incumbent
+  under an objective cutoff, stop at the first point, recentre) and graph-induced mutation (free the
+  integers near a random one in the variable-row graph). A fixing neighbourhood already searched to the
+  end without a better point is not solved again. glass4 reaches its optimum through a chain of
+  proximity steps in 0.3 s. On 79 MIPLIB instances where v0.6.0 ends more than 1% from the best known
+  value, the mean primal gap at 120 s moves 0.316 -> 0.305 (not significant), and the core set is about
+  2% slower, so it stays off. `benchmarks/tools/primal_gap.py` compares final primal gaps of two sides.
+
+**Sharing models and profiles**
+- `--write-anon FILE` writes the model as MPS with generic names (x1.., c1.., s1.., i1..), rows, columns,
+  SOS sets and indicators in a seeded shuffled order (`--anon-seed N`, `--anon-keep-order`) and the numbers
+  unchanged, so a model can be shared for debugging without its meaning; `--anon-map FILE` writes the
+  name mapping for the user only. The exported model has the same optimum (tested on MILP, QP, MIQP, SOS,
+  indicator and semi-continuous models).
+- `--profile FILE` writes a JSON profile of the model and the run, with no names and no data: sizes, column
+  types, row classes (the MIPLIB 2017 constraint classification), coefficient and bound ranges, row
+  lengths, presolved sizes, status / times / nodes / bounds, and the incumbents over time with what found
+  them.
+- The MPS writer now writes ranged rows so that they read back exactly whenever MPS can express them.
+
+**Presolve: dual aggregation onto variable upper bounds**
+- A binary column x with cost <= 0 whose only up-lock is a one-sided row with a binary y, where the row
+  holds at y = 1 whatever its other columns are and admits no x = 1 at y = 0 (sum_S a_k x_k <= (sum_S
+  a_k) y, or x <= y), equals y in some optimal solution and is substituted by y.
+  `MILP_PRESOLVE_OFF=dual_agg` turns it off.
+- neos-787933: 61944 aggregations, presolved 1897 x 236376 -> 131 x 1339 (was 1897 x 63708), optimal
+  in 1.1 s (was the 120 s limit; HiGHS times out too). The rule fires on 3 core and 20 of the 240
+  benchmark instances; on those 21 (120 s, 4 seeds): 0.810x, solved 25 -> 28 of 84.
+
+**Large MIP roots: concurrent barrier**
+- MIP roots with at least 200k nonzeros after presolve run the barrier next to the dual simplex once the
+  simplex has run 2 s (opportunistic mode, 2 or more threads; `--deterministic` stays on the dual
+  simplex), and the first to finish wins. After a barrier root, the root's cut, dive and LNS budgets
+  count the iterations the dual simplex would have needed, the vector-length dive runs first with up to
+  the barrier's time, and the crossover basis gets exact pricing weights. triptim1: no root LP within 120
+  s before; now optimal at the root (50 s on 2 threads). `MILP_CONCURRENT_MIP_NNZ=0`: off.
+- An incumbent equal to the root LP bound ends the search at once, also while root heuristics still
+  run (opportunistic mode; `MILP_ROOT_GAP_STOP=0`: off).
+- A search stopped before the root's children exist reports at least the root LP bound
+  (`MILP_ROOT_BOUND_FLOOR=0`: off).
+- Large-LP MIPLIB set (41 instances with 150k-1.2M nonzeros, 2 seeds): 0.988x, solved 11 -> 12 of 82;
+  rail01 and neos-3988577-wolgan get a root bound within the limit (-84 instead of the trivial -1767, 119
+  instead of 0). Core set unchanged in path (0.989x).
+
+**Safe dual bounds**
+- Each node LP's bound is checked against the Lagrangian bound of the LP's own duals, computed on the
+  unscaled data with rounding error terms (Neumaier and Shcherbina). Where that bound is more than 1e-6
+  relative below the LP objective (a dual infeasibility the scaled tolerances hid), it is used as the
+  node's bound for pruning, the children and the reported bound, and the node is not closed by an
+  integral LP point or used for reduced-cost fixing. The dual simplex's early stop at the cutoff carries
+  the same error terms. It fires on a few MIPLIB models by 1e-6 to 5e-5 relative (app1-1, beasleyC3,
+  neos17, swath1), costs 10-30 us per LP, and with the LP row-scaling fix undone it keeps var-smallemery-m6j6
+  from a wrong OPTIMAL. `MILP_SAFE_BOUND=0`: off.
+- The dual simplex's optimality test holds its dual feasibility tolerance (1e-7) for the row duals in the
+  units of the model's rows, not of the internally scaled ones: on a row scaled up by 2^k the old test let
+  duals of the wrong sign by up to 2^k x 1e-7 through, and the LP stopped with its objective above its
+  optimum (the firings above). Such solves now go on with primal simplex pivots, so the node bounds are
+  both valid and tight: the safe bound fires 4 times on the core set instead of 119 (deterministic, 60 s),
+  at about 1e-6 relative, for under 0.1% more LP iterations. With the row-scaling fix of 0.6.1 undone,
+  var-smallemery-m6j6's root LP reaches its optimum -156.06 (was -139.80). `MILP_LP_UNSCALED_DUAL=0`: off.
+  Together with the next item, miplib_wide_core (120 s, 2 threads, seeds 1-4, both off vs on): 1.016x (90%
+  CI 0.986-1.047), solved 211 -> 209 of 252, within the noise of these runs.
+- An LP reported infeasible (node, strong branching probe, dive step, cut round, sub-MIP) now comes with a
+  dual ray verified on the unscaled data with the same rounding error terms: the rows' sides weighted by
+  the ray must exceed what the ray's combination of columns can reach over the column bounds. A ray that
+  fails is retried once from a fresh factorization; if it fails again the LP counts as unsolved (a node is
+  then branched on without it) instead of pruning. On the core set about 30k infeasible LPs are checked
+  with no failure (5 pass only after the retry). `MILP_FARKAS_CHECK=0`: off.
+
+**Root Gomory cuts keep tiny tableau entries**
+- Gomory mixed-integer cuts left tableau entries below 1e-11 out of the row without their bounds, the
+  same hole as the node tableau cuts fixed in v0.6.1 (no violated root cut was seen). They are now kept
+  and removed later together with their bounds. Core set (120 s, 4 seeds): 0.987x, solved 210 -> 215 of
+  252. `MILP_GOMORY_KEEP_TINY=0`: the old drop.
+
+**Objective cutoff propagated on the global bounds**
+- Each new incumbent propagates c x <= cutoff over the global bounds; the integer tightenings become
+  global like root reduced-cost fixings and count for the restart rules. neos-4413714-turia (min z with
+  z >= sum_k d_ik x_ik): the first incumbent fixes 95.7% of its 190k binaries, the root restarts on a
+  3660 x 8478 model, and the run ends optimal in 74-92 s (was the 120 s limit). `MILP_GLOBAL_OBJPROP=0`:
+  off.
+
+**Zero-objective (feasibility) models**
+- Symmetry: SST rows also on orbits of continuous columns, by default only when the objective is zero
+  (`MILP_SST_CONT=1`: all models, `0`: off); on models with an objective they slowed the search.
+- Branching: the flat-objective hybrid rule (conflict and inference scores) is on by default when the
+  objective is zero, with conflict scores recorded; the inference history counts the node's own branching
+  only.
+- The cut pool's per-node rounds count propagation prunes as evidence on zero objectives (almost every
+  leaf closes by propagation there; 90% of the run went into pool rounds).
+- fhnw-binpack4-4 (infeasible 2D packing): proved infeasible in 3-6 s (was the 120 s limit; SCIP 14-17
+  s). Zero-objective MIPLIB set (7 instances, 4 seeds): solved 12 -> 16 of 28.
+
+**Parallel c-MIR separation at the root (opt-in, off by default)**
+- `MILP_MIR_PAR=1`: the root cut loops' c-MIR start rows run on the search's threads (less the
+  feasibility-jump helper while it runs), in fixed chunks of 64 with the work budgets checked between
+  chunks, so the cuts are the same for any thread count. 4 threads (Mac): app1-1 root 14-15 -> 7-10 s,
+  h80x6320d 17-21 -> 12-13 s. Off: unchanged.
+
+**Faster clique separation**
+- The clique separator's greedy growth tested each candidate literal against its own neighbour list;
+  it now counts, per literal, the clique members it is adjacent to (updated only when a member joins).
+  The same cuts (checked round by round on six MIPLIB models), much cheaper on dense conflict graphs:
+  qap10's clique separation took 0.2-2.5 s per round; its root now fits 25 cut rounds instead of 11
+  in the same time share (bound 335.50 -> 336.13) and the solve takes 37.1 s instead of 42.5 s (4
+  threads). `MILP_CLIQUE_COUNT=0`: the old test.
+
+**ZI rounding at the nodes (opt-in, off by default)**
+- `MILP_ZIROUND=1`: where simple (lock) rounding fails (root, every 8th node), ZI rounding (Wallace 2010, as SCIP's
+  zirounding) shifts each fractional integer variable to an integer within the slack its rows and bounds
+  leave at the current point, up to three passes. It stops in a search thread after 1000 calls with fewer
+  than 1% feasible points (a call is a pass over the matrix). beasleyC3: its optimum 754 from ZI rounding
+  (4 threads, seeds 1-2: 16.6 / 13.1 -> 15.4 / 11.0 s); `2`: at every node. Off by default: no measurable gain
+  on the MIPLIB core set.
+
+**Fewer incumbent updates from local MIP**
+- Local MIP walks through long chains of slightly better feasible points and reported every one: on
+  roll3000 40874 points in 2 s, 25904 of them new incumbents 0.29 apart, each with the incumbent checks,
+  root reduced-cost fixing, and an incumbent callback, trace and log entry. After its first point it now
+  reports the best point at most every 3e7 effort units (~0.1 s) and at its end; the search itself is
+  unchanged (roll3000: the same 40874 points, 112 incumbent updates, local MIP's phase 2.1 -> 0.9 s).
+  Default mode only (`--deterministic` takes the points at its sync points as before).
+  `MILP_LMIP_REPORT=0`: every point.
+
+**Deterministic mode: fewer waits for sub-MIP jobs**
+- `--deterministic` runs sub-MIPs found during the tree beside the tree rounds and lets each result enter at
+  the first round barrier where the tree has done enough LP work for it; the barrier waits while a job may
+  still finish below that point. The job's credit per round is now the round's LP work / threads (was / the
+  threads not running jobs, which credited a running job with several threads' work per round), it enters at
+  2x its LP iterations (`MILP_DET_JOB_FACTOR`, was 1x), and sub-MIP jobs report progress after every root LP
+  of their cut loop. pk1 at 4 threads: barrier waits 2.5 -> 0.5 s, 7.2 -> 6.0 s. MIPLIB core set
+  (deterministic, 4 threads, 2 seeds): time ratio 0.973 [0.955, 0.989], solved 112 -> 111.
+  `MILP_DET_JOB_SHARE=0 MILP_DET_JOB_FACTOR=1`: the old credit.
+
+**Squares of integer columns solved as a MILP**
+- A quadratic objective that is a sum of squares of integer columns (Q diagonal, every column with a
+  nonzero entry integer, or continuous but implied integer by an equality row such as e = sum x - T over
+  integer columns; convex in the model's sense; plus any linear terms) is solved as a MILP: on a
+  binary x^2 = x; on a general integer, with d = x - c around a center c, d^2 = max over integers k of
+  (2k + 1) d - k(k + 1), so a column t >= the tangents for k within 25 of the center (and a coarse grid
+  beyond) stands for d^2. The centers come from the continuous relaxation; each MILP is a relaxation of the
+  model (its bound is valid), its solution is scored with the exact objective, and where a value falls
+  outside its tangents a window is added and the MILP solved again (at most 10 times). The tangents give the
+  convex hull of x^2 on the integers, a much tighter relaxation than the continuous x^2 the MIQP search
+  branches on. A user's model (141637 rows, 137899 integer columns, 265 squared integer errors): no
+  incumbent after 180 s with the MIQP search (its root dive solves a barrier QP per step), optimal at the
+  root in 10.9 s now (relaxation 6.8 s, MILP 4.1 s). `MILP_SQ_MILP=0`: the MIQP search; `MILP_SQ_WINDOW`,
+  `MILP_SQ_ROUNDS`, `MILP_SQ_CENTER=0` (no relaxation, centers at 0).
+- The MIQP search's dives stop after max(2 s, 3x the root relaxation's time) and log their relaxations and
+  time: its root dive solved up to 200 barrier QPs before the tree (on that model 5-12 s each, with no log
+  line); now 5 relaxations, 40 s, then the tree with its progress lines.
+
+**Root heuristics beside the tree (opt-in, off by default)**
+- `MILP_ROOT_HEUR_ASYNC=k`: with at least k threads (default mode), the first root's heuristics (dives,
+  RENS, the root LNS rounds) run on a quarter of the threads (`MILP_ROOT_HEUR_SHARE`) while the tree starts on
+  the others; the heuristic threads join the tree when done, and an in-tree restart is checked as soon as
+  their incumbents have fixed columns. Their time caps (RENS up to 3x the root's time, the LNS rounds at
+  least the root's time) did not shrink with more threads: at 12 threads they were 40-50% of n5-3's and
+  kasai's solve time. Mac, 4 threads: n5-3 19.2 -> 15.5 s, kasai 32.9 -> 25.0 s, mc11 unchanged.
 
 **Fixes**
-- Wrong optimal answer after a restart whose presolve removed the incumbent: a restarted search gets the
-  incumbent before the restart as its start, mapped through the restart's presolve. A dual reduction of
-  that presolve may remove the point (another optimal point is kept); the mapped point was then rejected,
-  and its objective, which is not the incumbent's, became the restarted search's cutoff. Below the optimum,
-  the search found nothing better and the old incumbent came back as optimal (MIPLIB neos-3083819-nubu,
-  `--deterministic --threads 2 --seed 4` on x86: 6315970 reported optimal, optimum 6307996). The cutoff of a
-  rejected start is now the start's own objective.
+- A root that ends past the time limit no longer starts a restart or a tree round (deterministic
+  ns1116954: 123.4 -> 120.0 s with a 120 s limit).
+- Wrong optimal answer after a restart whose presolve removed the incumbent (also in v0.6.3).
+- The final solution no longer profits from the feasibility tolerance: an incumbent accepted within it (LP
+  points and sub-MIP solutions may leave rows up to 1e-6 beyond their sides) could carry an objective a little
+  better than the optimum (MIPLIB map16715-04: -111.00075 with 257 rows exactly 1e-6 beyond their sides, optimum
+  -111; fastxgemm-n2r6s0t2: 229.9997 for 230). The search's final incumbent, if it violates a row or bound by more
+  than 1e-9, has its continuous part re-solved with the integers fixed at a 1e-9 tolerance (once, at most 2 s).
+  `MILP_FINAL_POLISH=0`: off.
+- Memory on large roots: the root's concurrent barrier is not started when the solver already holds 40% of the
+  memory limit, and gives up after its symbolic analysis when its factor would not fit in half the limit less
+  that (MIPLIB gfd-schedulen180f7d50m30k18, neos-5104907-jarama and neos-5114902-kasavu went past 10 GB with an
+  8 GB limit in the barrier).
+- `--deterministic`: the root LP's waits for the feasibility-jump / local-MIP helper end at the time limit
+  (MIPLIB gfd-schedulen180f7d50m30k18 with 12 runs at a time: killed at 144 s with a 120 s limit).
+- Time limit on large roots: when the root's dual simplex stopped at the time limit, the concurrent barrier was
+  not told to stop, and its crossover ran on (MIPLIB savsched1, 120 s limit: ended at 180-215 s; now 120.3 s).
 
 ## v0.6.2 — 2026-11
 

@@ -1,5 +1,6 @@
 // Interrupting a solve (SolverParams::interrupt) and the incumbent callback (SolverParams::on_incumbent).
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -285,6 +286,63 @@ TEST(interrupt_two_flags_and_deadline) {
     DeadlineScope far(100.0);
     CHECK(!deadline_passed());
   }
+}
+
+TEST(search_stop_scope_keeps_the_outer_flag) {
+  std::atomic<bool> outer{false}, inner{false};
+  {
+    SearchStopScope a(&outer);
+    {
+      SearchStopScope b(&inner);  // a search inside another (sub-MIP): the outer search's flag stays
+      inner = true;
+      CHECK(!interrupted());
+      outer = true;
+      CHECK(interrupted());
+      bool in_thread = false;
+      std::thread t(inherit_interrupt([&] { in_thread = interrupted(); }));
+      t.join();
+      CHECK(in_thread);
+      std::atomic<bool> f{false};
+      InterruptScope c(&f);  // solve()'s flags keep the search flag
+      CHECK(interrupted());
+    }
+    outer = false;
+    CHECK(!interrupted());
+  }
+  outer = true;
+  CHECK(!interrupted());
+}
+
+TEST(trivial_bound_ends_the_search) {
+  // A constant objective: the first incumbent meets the trivial objective bound (the offset), and the
+  // solve ends Optimal with that bound in both modes and senses; a feasible start ends it before the
+  // root node.
+  int solved = 0;
+  for (const char* name : {"gap_small_1", "setcover_small_1", "binpack_small_1"}) {
+    Model m;
+    if (!load(name, &m)) continue;
+    std::fill(m.obj.begin(), m.obj.end(), 0.0);
+    m.obj_offset = 7.5;
+    for (int det = 0; det < 2; ++det) {
+      for (ObjSense sense : {ObjSense::Minimize, ObjSense::Maximize}) {
+        m.sense = sense;
+        const SolverParams sp = params2(det != 0);
+        SolveResult r = solve(m, sp);
+        CHECK(r.status == Status::Optimal);
+        if (!r.has_solution) continue;
+        ++solved;
+        CHECK(m.violation(r.x).max() <= 1e-6);
+        CHECK_NEAR(r.objective, 7.5, 1e-9);
+        CHECK_NEAR(r.bound, 7.5, 1e-9);
+        const std::vector<double> x = r.x;
+        r = solve(m, sp, x);
+        CHECK(r.status == Status::Optimal);
+        CHECK(r.stats.nodes == 0);
+        CHECK_NEAR(r.bound, 7.5, 1e-9);
+      }
+    }
+  }
+  CHECK(solved > 0);
 }
 
 TEST(incumbent_callback_stop_leaves_caller_flag_clear) {

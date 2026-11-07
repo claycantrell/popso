@@ -23,6 +23,7 @@ struct Cut {
   double score = 0.0;
   double objpar = 0.0, intsupport = 0.0;  // set by the pool
   int pool_id = -1;         // cut loop bookkeeping: index in the pool of dropped cuts
+  int sepa = -1;            // cut loop bookkeeping: the separator that found it (this round)
 
   double activity(const double* x) const {
     double s = 0.0;
@@ -79,6 +80,9 @@ struct SepaContext {
   Index max_nnz = 0;  // > 0: cuts with more nonzeros are rejected by the pool (separators may skip them)
   bool expensive = true;  // false: skip expensive separation variants (flat bound on a degenerate LP)
   double work_scale = 1.0;  // factor on the separators' per-call work budgets (node separation: MILP_NODE_SEP_WORK)
+  // Threads a separator may use (the caller's included; the main search's root cut loops only). The cuts must
+  // not depend on it (c-MIR start rows with MILP_MIR_PAR=1).
+  int threads = 1;
 };
 
 class Separator {
@@ -87,6 +91,9 @@ class Separator {
   virtual const char* name() const = 0;
   // Appends candidate cuts (not necessarily cleaned or violated) to `out`.
   virtual void separate(const SepaContext& ctx, std::vector<Cut>& out) = 0;
+  // Work of the last separate() call in deterministic units (about the matrix entries it touched; 0: not
+  // counted, a cheap separator).
+  virtual long long work() const { return 0; }
 };
 
 std::unique_ptr<Separator> make_gomory_separator();

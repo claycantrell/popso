@@ -41,6 +41,7 @@
 #include "milp/search/symmetry.hpp"
 #include "milp/search/genres.hpp"
 #include "milp/search/node_store.hpp"
+#include "milp/search/obj_cliques.hpp"
 
 namespace milp {
 
@@ -186,7 +187,7 @@ class Pseudocosts {
   // the other parts are multiplied by it.
   void scores(const std::vector<std::pair<Index, double>>& cands, int reliability, std::vector<Scored>& out,
               double* est_sum, double* ps_scale, double degen = 1.0, const BranchScoreRule& rule = {},
-              bool* used_aps = nullptr) {
+              bool* used_aps = nullptr, bool* used_flat = nullptr) {
     std::lock_guard<std::mutex> lk(mu_);
     const double avg_dn = avg(0), avg_up = avg(1);
     const double avg_inf = inf_tot_cnt_ ? inf_tot_sum_ / inf_tot_cnt_ : 1.0;
@@ -235,15 +236,32 @@ class Pseudocosts {
     }
     // Hybrid score: normalized pseudocost score plus weighted inference / conflict scores. Opt-in
     // (MILP_INF_WEIGHT, MILP_CONF_WEIGHT); probed candidates are scored on the same scale in select_branch.
-    static const double w_inf = knob("MILP_INF_WEIGHT", 0.0), w_conf = knob("MILP_CONF_WEIGHT", 0.0);
-    static const double w_cut = knob("MILP_CUT_WEIGHT", 0.0);
+    static const double w_inf0 = knob("MILP_INF_WEIGHT", 0.0), w_conf0 = knob("MILP_CONF_WEIGHT", 0.0);
+    static const double w_cut0 = knob("MILP_CUT_WEIGHT", 0.0);
+    double w_inf = w_inf0, w_conf = w_conf0, w_cut = w_cut0;
+    // Flat objective (sct2, csched008: every candidate's pseudocost score at the floor of zero gains in
+    // both directions): the order would be the column order. Then the conflict and inference scores
+    // decide (SCIP's hybrid weights relative to each other: conflict 1, inference and cutoff 0.01), in
+    // the bounded form. flat_hybrid (set by the search): by default on zero-objective problems, where
+    // every node is flat (fhnw-binpack4-4 with SST rows, 4 threads: infeasibility proof in 3.4-5.9 s
+    // over 4 seeds, 41-83k nodes at depth ~20; without it TL at 120 s, 2.8M nodes at depth ~50; with
+    // inference scores only 20.6 s); MILP_FLAT_HYBRID=1 on all problems (sct2 / csched008 probes,
+    // 120 s: it scores 5-10% of the branchings, both bounds unchanged at -231.0636 / 171), 0 off.
+    const double floor = branch_score(0.0, 0.0, rule);
+    bool flat = flat_hybrid && !out.empty();
+    for (size_t i = 0; i < out.size() && flat; ++i) flat = out[i].score <= floor * (1.0 + 1e-9);
+    if (flat) {
+      w_conf = std::max(w_conf, 1.0), w_inf = std::max(w_inf, 0.01);
+      if (w_cut0 > 0.0) w_cut = std::max(w_cut, 0.01);
+    }
+    if (used_flat) *used_flat = flat;
     const bool use_inf = w_inf > 0.0 && inf_total > 0.0, use_conf = w_conf > 0.0 && conf_total > 0.0;
     const bool use_cut = w_cut > 0.0 && cut_total > 0.0;
     if ((use_inf || use_conf || use_cut) && ps_total > 0.0) {
       const double n = static_cast<double>(out.size());
       *ps_scale = ps_total / n;
       // MILP_HYBRID=1: SCIP's bounded form, each part v / (v + average) in [0, 1) times its weight.
-      const bool bounded = hybrid_mode() == 1;
+      const bool bounded = hybrid_mode() == 1 || flat;
       auto part = [&](double v, double avg) { return bounded ? v / (v + avg) : v / avg; };
       for (size_t i = 0; i < out.size(); ++i) {
         Scored& o = out[i];
@@ -259,6 +277,7 @@ class Pseudocosts {
     static const int mode = static_cast<int>(knob("MILP_HYBRID", 0));
     return mode;
   }
+  bool flat_hybrid = false;  // conflict / inference scores decide at flat nodes (set by the search)
   // Pseudocost part of the hybrid score (product score sc, average product avg).
   static double ps_part(double sc, double avg) {
     if (avg <= 0.0) return sc;
@@ -283,6 +302,7 @@ class Pseudocosts {
     cut_tot_sum_ = o.cut_tot_sum_;
     cut_tot_cnt_ = o.cut_tot_cnt_;
     std::copy(o.leaf_, o.leaf_ + 4, leaf_);
+    flat_hybrid = o.flat_hybrid;
     anc_sum_ = o.anc_sum_;
     anc_cnt_ = o.anc_cnt_;
     prior_ = o.prior_;
@@ -376,8 +396,9 @@ class Pseudocosts {
   }
 };
 
-// Sub-MIP (large neighbourhood) heuristics chosen adaptively by success.
-enum { kLnsRins, kLnsMutation, kLnsLocalBranching, kLnsRens, kLnsCrossover, kLns };
+// Sub-MIP (large neighbourhood) heuristics chosen adaptively by success. Proximity search and the
+// graph-induced mutation run only with the adaptive selection (MILP_ALNS, run_sub_mips).
+enum { kLnsRins, kLnsMutation, kLnsLocalBranching, kLnsRens, kLnsCrossover, kLnsProximity, kLnsGraph, kLns };
 struct LnsState {
   long long last_node = 0;  // node count at the last call
   long long last_iters = 0;  // search LP iterations at the last call
@@ -394,6 +415,19 @@ struct LnsState {
   int cx_parents = 3;    // crossover: solutions combined (incumbent + others from the pool)
   long long cx_version = -1;  // solution pool version at the last crossover
   int cx_parents_used = 0;
+  // Adaptive selection (MILP_ALNS): discounted reward sums and counts per neighbourhood (bandit arms),
+  // the LP iterations of an average call (effort scale), step sizes of the fixing rates of mutation and
+  // graph mutation (shrinking with each adjustment, as SCIP's ALNS), proximity search's required
+  // improvement as a fraction of the gap, and the incumbent it last proved (nearly) optimal.
+  double rsum[kLns] = {}, rcost[kLns] = {}, rcnt[kLns] = {};
+  double iter_ref = 0.0;
+  double graph_fix = 0.7;
+  double mut_step = 0.1, graph_step = 0.1;
+  double prox_imp = 0.02;
+  double prox_inc = kInf;
+  // Fingerprints of the last 64 fixing neighbourhoods searched completely without a better point: not
+  // solved again (glass4: the same crossover sub-MIP, 3793 iterations, 3-4 times in 60 s).
+  std::vector<std::uint64_t> searched;
   // Primal-limited searches (the bound stalls while a gap remains) get a larger share: the
   // global bound is compared each time the node count doubles.
   long long ref_nodes = 0;
@@ -402,6 +436,66 @@ struct LnsState {
   bool pending = false;  // deterministic mode: a sub-MIP job of this worker has not entered yet
   bool may_start = true;  // deterministic mode: this worker may decide a sub-MIP job this round
 };
+
+// Adaptive LNS (MILP_ALNS=1; Hendel, "Adaptive large neighborhood search for mixed integer programming",
+// MPC 14 (2022) 185-221, SCIP's heur_alns). A call's value is ALNS's success reward, 0.8 for a better point
+// plus 0.2 x the share of the gap (to the root bound) it closed, 0 without one; its cost is a fixed 0.25 for
+// the call plus its LP iterations over those of an average call. A neighbourhood scores its discounted value
+// per unit of cost (discount MILP_ALNS_DECAY per call) plus a UCB term (UCB had the best primal integral in
+// the paper). Not ALNS's per-call reward 0.5 (1 - effort) for failures: here a sub-MIP that fails in presolve
+// (tree RENS on glass4, 0 iterations, again and again) would score 0.5 and beat a neighbourhood that improves
+// on 20% of its calls at average cost (0.2 x 0.78 + 0.8 x 0.25 = 0.36), while popso budgets sub-MIPs by LP
+// iterations. Deterministic for a deterministic history: LP iterations and objective values only.
+//
+// Measured (benchmarks/sets/miplib_primal.txt without var-smallemery-m6j6: 79 instances, 120 s, 2 threads,
+// mean primal gap knob off -> on, 90% bootstrap CI of the difference): the default (UCB term
+// 0.3 sqrt(ln n / n_k), discount 0.95: scores of ~0.05-0.15 against a term of ~0.3, so the choice stays
+// nearly uniform over the 7 neighbourhoods) 0.316 -> 0.305 over 4 runs per side, [-0.029, +0.005], better on
+// 37, worse on 26 (first 2 seeds 0.321 -> 0.287, [-0.061, -0.008], tbfp-network solved on both; again
+// 0.307 -> 0.318, [-0.008, +0.032]: runs ending without any solution, A 11 / B 14, decide the mean; where
+// every run has one, -0.004). A term scaled by the pooled value per cost, c = 1 (MILP_ALNS_UCB_SCALE=1),
+// discount 0.99 and the re-pick (MILP_ALNS_REPICK=1): 0.301 -> 0.314, [-0.010, +0.035], better on 23 of
+// the 69 with a solution in every run, worse on 30: the cheap neighbourhoods took over (crossover 367 of 661
+// calls on mad, graph mutation 141 of 211 on glass4) and proximity search, whose rare successes were the big
+// steps, ran rarely. As in the paper, where Exp.3, spreading the calls over several neighbourhoods, did best
+// in the full solver. miplib_wide_core (4 seeds): time ratio on / off 1.016-1.024 in three A/Bs (CIs
+// include 1), solved -2 / 0 / 0 of 252.
+void alns_reward(LnsState& st, int pick, double value, double iterations, double weight = 1.0) {
+  static const double gamma = knob("MILP_ALNS_DECAY", 0.95);
+  if (st.iter_ref <= 0.0) st.iter_ref = std::max(1000.0, iterations);
+  const double cost = 0.25 + iterations / st.iter_ref;
+  st.iter_ref = 0.9 * st.iter_ref + 0.1 * std::max(100.0, iterations);
+  for (int k = 0; k < kLns; ++k) st.rsum[k] *= gamma, st.rcost[k] *= gamma, st.rcnt[k] *= gamma;
+  st.rsum[pick] += weight * value;
+  st.rcost[pick] += weight * cost;
+  st.rcnt[pick] += weight;
+}
+
+// Proximity search's smallest required improvement (fraction of the gap) for a fractional objective.
+constexpr double kProxMin = 1e-3;
+
+// The available neighbourhood with the best score; untried ones first, in enum order (RINS first). UCB term
+// c sqrt(ln n / n_k), c = MILP_ALNS_UCB (0.3); MILP_ALNS_UCB_SCALE=1: times the pooled value per cost of all
+// neighbourhoods (at least 0.02), which exploits more (see alns_reward).
+int alns_select(const LnsState& st, const bool* avail) {
+  static const double c = knob("MILP_ALNS_UCB", 0.3);
+  static const bool scaled = knob("MILP_ALNS_UCB_SCALE", 0) > 0;
+  double n = 0.0, value = 0.0, cost = 0.0;
+  for (int k = 0; k < kLns; ++k) {
+    if (avail[k]) n += st.rcnt[k], value += st.rsum[k], cost += st.rcost[k];
+  }
+  const double scale = scaled ? std::max(0.02, value / std::max(1e-9, cost)) : 1.0;
+  int pick = -1;
+  double best = -kInf;
+  for (int k = 0; k < kLns; ++k) {
+    if (!avail[k]) continue;
+    if (st.rcnt[k] <= 0.0) return k;
+    const double score =
+        st.rsum[k] / std::max(1e-9, st.rcost[k]) + c * scale * std::sqrt(std::log(1.0 + n) / st.rcnt[k]);
+    if (score > best) best = score, pick = k;
+  }
+  return pick;
+}
 
 // One LNS call (run_lns): inputs fixed when it is decided. Deterministic mode runs it as a job beside
 // the tree search (see run_deterministic) on a copy of the worker's LnsState.
@@ -427,7 +521,7 @@ class Search : public BasisOwner {
  public:
   Search(const MipProblem& p, const SolverParams& params, const Logger& log, const Timer& timer,
          const SearchOptions& opts)
-      : p_(p), params_(params), log_(log), timer_(timer), opts_(opts), rounding_(p), pc_(p.num_cols()) {
+      : p_(p), params_(params), log_(log), timer_(timer), opts_(opts), rounding_(p), zi_rounding_(p), pc_(p.num_cols()) {
     threads_ = params.threads > 0 ? params.threads : static_cast<int>(std::thread::hardware_concurrency());
     threads_ = std::max(1, threads_);
     // Objective is integral if only integer (or implied integer) variables with integer costs contribute.
@@ -443,8 +537,33 @@ class Search : public BasisOwner {
       const std::vector<char> impl = detect_implied_integers(p);
       for (Index j : cont_costs) obj_integral_ = obj_integral_ && impl[j];
     }
+    zero_obj_ = true;
+    for (Index j = 0; j < p.num_cols() && zero_obj_; ++j) zero_obj_ = p.cost[j] == 0.0;
+    {
+      // MILP_FLAT_HYBRID: 1 all problems, 0 none, unset: zero-objective ones (see Pseudocosts::scores).
+      const double fh = knob("MILP_FLAT_HYBRID", -1);
+      pc_.flat_hybrid = fh > 0 || (fh < 0 && zero_obj_);
+    }
+    // Proximity search needs binaries (at least 10, and 10% of the integers: as heuristics/localsearch.cpp).
+    {
+      Index bins = 0, ints = 0;
+      for (Index j = 0; j < p.num_cols(); ++j) {
+        ints += p.is_int[j];
+        bins += p.is_int[j] && p.col_lb[j] == 0.0 && p.col_ub[j] == 1.0;
+      }
+      prox_ok_ = bins >= 10 && 10 * bins >= ints;
+    }
     // Implications (logical constraints kept out of the LP) fix bounds outside the propagation trail.
     if (!p.implications.empty()) conflicts_ = false;
+    static const bool trivial = knob("MILP_TRIVIAL_BOUND", 1) > 0;
+    if (trivial) {
+      double b = 0.0;
+      for (Index j = 0; j < p.num_cols() && b > -kInf; ++j) {
+        const double c = p.cost[j];
+        if (c != 0.0) b += c > 0.0 ? c * p.col_lb[j] : c * p.col_ub[j];
+      }
+      trivial_lb_ = b;
+    }
   }
   MipResult run();
   void load_debug_solution() {
@@ -569,6 +688,7 @@ class Search : public BasisOwner {
     double obj_calls = 0.0, obj_useful = 0.0;    // the same for the objective cutoff row
     double t_dive = 0.0, t_sub = 0.0;  // wall time in tree dives / sub-MIPs (statistics only)
     long long sub_runs = 0;            // sub-MIP heuristic calls that ran
+    long long zi_calls = 0, zi_found = 0;  // ZI rounding calls / feasible points (its stop rule, per worker)
     // Strong branching budget (per worker, so deterministic mode stays reproducible): LP iterations
     // of the node solves (incl. cut rounds) and of the strong branching probes; probe_limit is the
     // iteration limit of the current node's probes.
@@ -577,6 +697,9 @@ class Search : public BasisOwner {
     // (-inf when the probe stopped early), valid as the children's bounds.
     Index sb_var = -1;
     double sb_dn = -kInf, sb_up = -kInf;
+    // The node LP's objective is not confirmed by its safe bound (lp_bound): gains relative to it are no
+    // bounds (root strong branching's bound, MILP_SB_BOUNDS).
+    bool lp_unsafe = false;
   };
 
   double cutoff(const Worker& w) const { return w.det ? w.cutoff : cutoff_.load(); }
@@ -598,14 +721,22 @@ class Search : public BasisOwner {
   void run_deterministic();
 
   void run_dives(Worker& w);
-  // Root start heuristics (dives, then feasibility pump and RENS) on up to
-  // threads_ threads; results enter in task order (deterministic).
-  void root_heuristics(Worker& w);
+  // Root start heuristics (dives, then feasibility pump and RENS) on up to nthreads (0: threads_)
+  // threads; results enter in task order (deterministic). t_root: the root's time (< 0: until now).
+  void root_heuristics(Worker& w, int nthreads = 0, double t_root = -1.0);
+  // MILP_ROOT_HEUR_ASYNC = k (opt-in; 0: off): opportunistic mode with at least k threads runs the root
+  // heuristics beside the tree instead of before it, on async_heur_threads() of the threads (the tree starts on
+  // the others, which the heuristic threads join when done). heur_w_: the root LP and point they start from.
+  std::unique_ptr<Worker> heur_w_;
+  double heur_t_root_ = 0.0;
+  bool prompt_restart_check_ = false;  // restart_check_due_ honoured (set with heur_w_)
+  std::atomic<bool> heur_stop_{false};  // the tree has ended: stops the heuristics (LocalStopScope)
+  int async_heur_threads() const;
   bool root_lns_ran_ = false, root_lns_improved_ = false;  // root LNS rounds (reported for restarts)
   double t_start_ = 0.0;                                   // timer at the start of run()
   double inc_start_ = kInf;  // objective (without offset) of the start point (MipResult::improved)
   void run_sub_mips(Worker& w);
-  void run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<std::mutex>* lk);
+  int run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<std::mutex>* lk);
   bool async_jobs_ = false;  // deterministic mode: sub-MIPs run as jobs beside the tree search
   // Feasibility Jump on a side thread from the start of the solve. Opportunistic
   // mode publishes its solutions directly. Deterministic mode lets it pause
@@ -617,6 +748,9 @@ class Search : public BasisOwner {
   // running during the round, so the search rarely waits for it); otherwise wait for all released effort.
   void fj_sync(long long release, bool lag = false);
   void fj_finish();
+  // Threads for the root cut loop's separation (SepaContext::threads): the search's, less the FJ / local-MIP
+  // helper's while it runs (opportunistic mode; deterministic FJ waits for its next release then).
+  int root_sep_threads();
   // Fix-propagate-repair (heuristics/fpr.hpp): the LP-free portfolio on the FJ thread before FJ,
   // and the LP-guided one among the root heuristics while there is no incumbent.
   bool fpr_run_lp_free(const std::function<void(const std::vector<double>&, const char*)>& publish, double deadline,
@@ -628,6 +762,9 @@ class Search : public BasisOwner {
   std::mutex fj_mu_;
   std::condition_variable fj_cv_;
   long long fj_allowed_ = 0, fj_effort_ = 0, fj_iters_mark_ = 0, fj_prev_allowed_ = 0;
+  long long root_fj_syncs_ = 0;  // deterministic FJ syncs during the initial root LP (MILP_DET_ROOT_SYNC)
+  long long root_progress_ = 0;  // root LP iterations already added to opts_.progress
+  double root_fj_wait_ = 0.0;     // their wall-clock wait (statistics only)
   long long fj_post_stamp_ = -1;  // effort stamp of solutions found after the FJ runs (repair, polish)
   bool fj_done_ = false;
   struct FjFound {
@@ -646,8 +783,11 @@ class Search : public BasisOwner {
   // Reliability branching. Returns the branching variable, or -1 if strong
   // branching proved the node infeasible.
   Index select_branch(Worker& w, double obj, const Basis& basis);
-  // Strong-branching probe: LP gain of bounds [lb, ub] on j (kInf if infeasible).
-  double probe(Worker& w, Index j, double lb, double ub, double obj, const Basis& basis, bool* exact);
+  // Strong-branching probe: LP gain of bounds [lb, ub] on j (kInf if infeasible). bound: the gain of an
+  // optimal probe is used as a bound (root strong branching, MILP_SB_BOUNDS), so it comes from the probe's
+  // safe bound (lp_bound); otherwise only a cutoff verdict is checked that way.
+  double probe(Worker& w, Index j, double lb, double ub, double obj, const Basis& basis, bool* exact,
+               bool bound = false);
   // Root strong branching rounds (see the definition): 0 = continue with branching, 1 = global
   // fixings applied (the root is processed again), 2 = the root is infeasible / cut off.
   int root_strong_branching(Worker& w, double obj, const Basis& basis);
@@ -681,6 +821,15 @@ class Search : public BasisOwner {
   // root): the same basis with a fresh factorization, then a slack basis, without and with cost
   // perturbation. Returns the last status.
   LpStatus recover_lp(Worker& w, const LpOptions& opt, long long node_id);
+  // Bound from an LP solved to optimality: its objective, or its safe dual bound when that is lower
+  // (DualSimplex::safe_objective: a dual infeasibility hidden by row scaling or the tolerances; *below
+  // set). Counted for the statistics; node_id < 0: a strong branching probe.
+  double lp_bound(const DualSimplex& lp, bool* below, long long node_id);
+  std::atomic<long long> safe_checks_{0}, safe_below_{0}, safe_ns_{0};
+  // DualSimplex::check_counts at the start of run() (Farkas proof checks, unscaled dual feasibility): process-wide
+  // counts, so the summary shows the difference (it includes heuristics' LPs and sub-MIPs, and concurrent
+  // searches if any).
+  DualSimplex::CheckCounts checks0_;
   // Testing: every k-th node LP (by id, not the root) fails and cannot be recovered (MILP_DEBUG_LP_FAIL=k).
   const long long debug_lp_fail_ = static_cast<long long>(knob("MILP_DEBUG_LP_FAIL", 0));
   bool debug_fail(long long id) const { return debug_lp_fail_ > 0 && id != 0 && id % debug_lp_fail_ == 0; }
@@ -692,6 +841,14 @@ class Search : public BasisOwner {
   // subtree stays in the search (bound: the node's). Returns the number of children (0: pruned or,
   // if nothing can be branched on, dropped with its bound recorded as lost).
   int unsolved_branch(Worker& w, Node& node, Node* children);
+  // An integral node LP point (objective lp_obj) closes its node: it is offered as an incumbent, and the node
+  // closes if its LP bound then reaches the cutoff, or if the point is feasible at the LP's objective (within
+  // 1e-6 relative): the subtree's optimum. A point feasible only after repairing what the LP's tolerance
+  // allowed, at a clearly worse objective, does not: the LP gained by the tolerance and better points may
+  // remain below (a node LP gaining by its tolerance, e.g. through big-M rows; found reviewing the path of the
+  // drayage-25-23 wrong answer, which had another cause).
+  // *feasible: false if the point is not feasible even after the repair.
+  bool integral_point_closes(Worker& w, const std::vector<double>& sol, double lp_obj, bool* feasible = nullptr);
   // Implications: an unfixed z whose implication the point x violates (-1 if none), and the
   // branching on it (children z = 0 / z = 1 with the given bound).
   Index violated_implication(const Worker& w, const double* x) const;
@@ -716,9 +873,12 @@ class Search : public BasisOwner {
   // The LP over the continuous columns with the integer columns fixed at round(x_int) (others within
   // [lb, ub]), cold, unperturbed, at primal tolerance primal_tol; on Optimal, out is its point with
   // exact integers.
+  // time_cap >= 0: that many seconds (opportunistic mode), also past the time limit; else min(5 s, time left).
   LpStatus solve_fixed_ints(const std::vector<double>& x_int, const std::vector<double>& lb,
                             const std::vector<double>& ub, double primal_tol, double cutoff,
-                            std::vector<double>& out) const;
+                            std::vector<double>& out, double time_cap = -1.0) const;
+  // The final incumbent re-solved in its continuous part (see the definition).
+  void final_polish(MipResult& res) const;
   // An integral node LP point (w.sol) whose rounded point violates the model by more than 1e-9: the
   // node LP warm with the integer columns fixed at their rounded values, at primal tolerance 1e-9;
   // replaces w.sol when that point violates less. The LP's state and bounds are restored.
@@ -737,8 +897,8 @@ class Search : public BasisOwner {
     if (obj_integral_) return integral_value(inc) - 1.0 + 1e-6;
     return inc - std::max(1e-9, 1e-9 * std::abs(inc));
   }
-  bool gap_closed(double lb) const {
-    const double inc = incumbent_.load();
+  bool gap_closed(double lb) const { return gap_closed_at(lb, incumbent_.load()); }
+  bool gap_closed_at(double lb, double inc) const {
     if (!is_finite(inc)) return false;
     if (obj_integral_ && lb > integral_value(inc) - 1.0 + 1e-6) return true;
     const double gap = inc - lb;
@@ -760,10 +920,26 @@ class Search : public BasisOwner {
   // Root LP by barrier + crossover (SolverParams::lp_method): leaves an optimal basis in lp.
   bool use_barrier_root() const;
   void barrier_root(DualSimplex& lp);
-  // Auto for large pure LPs: dual simplex and barrier run at the same time, the first to finish
-  // wins (opportunistic mode only: the winner depends on timing).
+  // Auto for large pure LPs (and large MIP roots, MILP_CONCURRENT_MIP_NNZ): dual simplex and barrier run at
+  // the same time, the first to finish wins (opportunistic mode only: the winner depends on timing).
   bool use_concurrent_root() const;
   void concurrent_root(DualSimplex& lp);
+  // MILP_BARRIER_DSE (default 1; 0: off): the crossover basis gets exact dual steepest-edge weights for the
+  // re-solves after it (set_basis: computed at the next solve, one unit btran per row). The weights the
+  // crossover's primal cleanup leaves made the root cut rounds slow: uccase9, 23217 cleanup iterations, its
+  // first cut round re-solve took 16159 iterations and ran into the cut loop's time limit (no round), 4672
+  // with exact weights (3 rounds as from the simplex's own root, bound 10819.58 -> 10880.85).
+  static void barrier_basis_weights(DualSimplex& lp) {
+    static const bool on = knob("MILP_BARRIER_DSE", 1) > 0;
+    if (on) lp.set_basis(lp.get_basis());
+  }
+  // MILP_BARRIER_EQUIV (default 1; 0: off): a root LP solved by the barrier counts as the dual simplex
+  // iterations it stands for (root_lp_equiv_iters_) in the budgets relative to the root LP's effort (cut
+  // loop, root dives).
+  static bool barrier_equiv() {
+    static const bool on = knob("MILP_BARRIER_EQUIV", 1) > 0;
+    return on;
+  }
   // Adds the LP iterations since the last report to opts_.progress (sub-MIP jobs, see SubMipJob).
   std::atomic<long long> progress_reported_{0};
   std::atomic<long long> prop_work_total_{0}, lp_work_total_{0};  // statistics (opportunistic workers)
@@ -797,9 +973,14 @@ class Search : public BasisOwner {
   SearchOptions opts_;
   double external_cutoff_ = kInf;  // opts_.cutoff without offset
   SimpleRounding rounding_;
+  ZiRounding zi_rounding_;
   Pseudocosts pc_;
   int threads_ = 1;
   bool obj_integral_ = false;
+  bool prox_ok_ = false;  // enough binaries for proximity search (MILP_ALNS)
+  const bool alns_ = knob("MILP_ALNS", 0) > 0;  // adaptive LNS selection (alns_select); off: as before
+  const bool alns_repick_ = alns_ && knob("MILP_ALNS_REPICK", 0) > 0;  // see run_sub_mips
+  std::atomic<long long> arm_calls_[kLns] = {}, arm_found_[kLns] = {}, arm_iters_[kLns] = {};  // MILP_ALNS statistics
   DualSimplex root_lp_;
 
   // Global bounds: root bounds tightened by root reduced-cost fixing. Workers
@@ -883,13 +1064,30 @@ class Search : public BasisOwner {
   void set_child_change(Node& c, const PathRef& base, const BoundChange& bc, const std::vector<uint8_t>* extra);
   std::atomic<bool> root_rc_ready_{false};  // set once root_d_/root_at_ are final (FJ thread reads it)
   void root_rc_fixing(double cutoff);
+  // Global objective-cutoff propagation (in root_rc_fixing, under gfix_mu_): the propagator of the
+  // global bounds and the columns with a nonzero cost (its seeds).
+  std::unique_ptr<DomainPropagator> gprop_;
+  std::vector<Index> obj_cols_;
+  // Objective propagation with clique implications (search/obj_cliques.hpp) on bounds that hold for improving
+  // points: in root_rc_fixing and between the root cut rounds. Built at the first call (under gfix_mu_; null
+  // when the rows give no conflicts). MILP_OBJ_CLIQUES=0: off.
+  std::unique_ptr<ObjectiveCliques> ocl_;
+  bool ocl_built_ = false;
+  long long ocl_calls_ = 0, ocl_fixed_ = 0;
+  double ocl_time_ = 0.0;
+  double ocl_cut_cutoff_ = kInf;  // the cutoff of the last call between the root cut rounds
+  Index obj_clique_fix(double cutoff, std::vector<double>& lb, std::vector<double>& ub, std::vector<Index>& changed);
+  std::vector<Index> ocl_new_;  // columns root_rc_fixing fixed by it since the root's last check (ocl_root_redo)
+  int ocl_redos_ = 0;
+  bool ocl_root_redo(Worker& w);
   void record_lurking(const DualSimplex& lp);
   void dbg_global(const char* what);  // debug: report global bounds excluding the debug point
   // In-tree restart: once enough integer columns are fixed globally during the tree (root
   // reduced-cost fixing with a better incumbent, conflict propagation), stop the tree and hand the
   // problem with these fixings, the root cut rows and the most recently used pool cuts back for a
   // fresh presolve and root (SCIP's restarts). Checked by worker 0 every 128 nodes, or at the round
-  // barriers in deterministic mode (from deterministic data only).
+  // barriers in deterministic mode (from deterministic data only), and once the root heuristics beside
+  // the tree are done (MILP_ROOT_HEUR_ASYNC; under tree_restart_mu_).
   // Estimation-driven restart (v0.6 R2, opt-in MILP_EST_RESTART=1): also when the tree-size estimate says
   // the tree is huge and it fixed at least a few columns (est_restart_vote).
   void check_tree_restart(bool det);
@@ -903,6 +1101,10 @@ class Search : public BasisOwner {
   void fill_restart(MipResult& res, bool with_pool);
   Index count_global_fixed();
   std::atomic<bool> tree_restart_{false};
+  std::mutex tree_restart_mu_;
+  // Set by root reduced-cost fixing; with MILP_ROOT_HEUR_ASYNC the next worker to finish a node checks for
+  // an in-tree restart (not only worker 0 every 128 of its nodes: mc11's nodes are slow, ~4 s).
+  std::atomic<bool> restart_check_due_{false};
   bool est_restart_ = false;  // the tree restart came from the estimate
   Index tree_fixed0_ = 0;  // integer columns fixed globally (not by the problem) when the tree started
   TreeWeight tw_;          // leaves closed so far (worker loops, det task loop, pool drops)
@@ -1000,6 +1202,7 @@ class Search : public BasisOwner {
   std::atomic<long long> sb_probes_{0}, sb_iters_{0};  // strong branching statistics
   std::atomic<long long> sb_pl_stops_{0};               // probabilistic lookahead stops (MILP_PL)
   std::atomic<long long> sb_aps_nodes_{0};              // branchings scored with ancestral pseudocosts
+  std::atomic<long long> sb_flat_nodes_{0};             // branchings scored without pseudocost gains (flat objective)
   std::atomic<long long> sb_calls_{0};  // branching decisions (select_branch calls)
   std::atomic<long long> sb_fixed_{0};  // strong branching domain reductions
   std::atomic<long long> sb_degen_skips_{0};  // branchings without strong branching (dual degenerate LP)
@@ -1062,6 +1265,7 @@ class Search : public BasisOwner {
   std::atomic<long long> tdive_calls_{0}, tdive_found_{0}, tdive_wins_{0}, tdive_limit_{0}, tdive_iters_{0}, fp_iters_{0};
   std::atomic<long long> hsub_calls_{0}, hsub_wins_{0}, hsub_iters_{0}, hsub_dive_iters_{0}, hsub_fp_iters_{0};
   std::atomic<long long> hsub_dive_wins_{0}, hsub_fp_runs_{0}, hsub_fp_wins_{0};
+  std::atomic<long long> zi_calls_{0}, zi_found_{0}, zi_wins_{0};  // ZI rounding at nodes (statistics)
   // New incumbents of this search from dives / the feasibility pump, and pumps run (MipResult).
   std::atomic<int> dive_wins_{0}, fp_runs_{0}, fp_wins_{0};
   void count_win(const char* source) {
@@ -1072,6 +1276,26 @@ class Search : public BasisOwner {
   std::atomic<bool> stop_{false};
   Status stop_reason_ = Status::Unknown;
   std::mutex stop_mu_;
+  // SearchOptions::solution_limit: incumbents accepted so far (guarded by inc_mu_), and the limit was hit.
+  int solutions_ = 0;
+  std::atomic<bool> sol_limit_hit_{false};
+  // Trivial objective bound: sum over the columns of min(c_j lb_j, c_j ub_j) (without the offset; -inf
+  // if a column with a nonzero cost is unbounded in its improving direction; 0 for a zero objective),
+  // the search's initial global dual bound. An incumbent that meets it (gap test) solves the problem:
+  // trivial_solved ends the search, and its status is Optimal whatever stopped it meanwhile (an LP that
+  // returned at the interrupt, a time limit). MILP_TRIVIAL_BOUND=0: off (-inf).
+  double trivial_lb_ = -kInf;
+  bool zero_obj_ = false;  // every cost is zero (a feasibility problem): node LP bounds never move
+  std::atomic<bool> solved_{false};
+  // The search's interrupt flag (core/interrupt.hpp, SearchStopScope), opportunistic mode only:
+  // trivial_solved sets it to stop the LPs, cut loop and heuristics running for the search at once
+  // (ns1116954: local MIP finds an optimal point of its zero objective at 3 s, the 131k-row root LP
+  // then ran for 50 s). Deterministic mode accepts incumbents at deterministic points only, so stop_
+  // and solved_ are set there; the flag would cut concurrent work (sub-MIP jobs, FJ) at
+  // timing-dependent points.
+  std::atomic<bool> solved_stop_{false};
+  // Under inc_mu_. root: the incumbent meets the root LP bound instead (opportunistic mode, MILP_ROOT_GAP_STOP).
+  void trivial_solved(double obj, bool root = false);
   std::atomic<bool> root_unbounded_{false}, numerical_{false};
   std::atomic<long long> lp_failed_{0}, lp_recovered_{0}, lp_unsolved_{0}, fixed_recovered_{0};
   std::atomic<long long> impl_branches_{0};  // branchings on violated implications
@@ -1081,7 +1305,14 @@ class Search : public BasisOwner {
   double lost_bound_ = kInf;  // min bound of subtrees dropped for numerical reasons
   std::atomic<double> root_bound_{-kInf};  // also read by try_incumbent (incumbent callback) on other threads
   double root_cs_before_ = -kInf;  // root LP bound before cuts (ROOTSTAT line)
+  double root_lp_lb_ = -kInf;  // best objective of the root cut loop's optimal LPs (a global bound)
   long long root_lp0_iters_ = -1;  // LP iterations of the root LP's first solve (before cuts; -1: not recorded)
+  // Root LP solved by the barrier: dual simplex iterations that stand for its effort (w.lp.iterations() then
+  // counts the crossover cleanup and the cut loop only); 0 otherwise.
+  long long root_lp_equiv_iters_ = 0;
+  // Concurrent root won by the dual simplex: its iterations, for the cut loop (its warm initial solve takes none).
+  long long root_lp_race_iters_ = 0;
+  double root_barrier_time_ = 0.0;  // seconds of a root LP solved by the barrier (0: the simplex solved it)
   int root_cs_rounds_ = 0, root_cs_cuts_ = 0;
   double det_lb_ = -kInf;  // deterministic mode: global bound after the last round's merge
   std::atomic<bool> det_running_{false};  // run_deterministic() runs (try_incumbent is then called by its thread only)
@@ -1092,7 +1323,7 @@ class Search : public BasisOwner {
 
 LpStatus Search::solve_fixed_ints(const std::vector<double>& x_int, const std::vector<double>& lb_in,
                                   const std::vector<double>& ub_in, double primal_tol, double cutoff,
-                                  std::vector<double>& out) const {
+                                  std::vector<double>& out, double time_cap) const {
   std::vector<double> lb = lb_in, ub = ub_in;
   for (Index j = 0; j < p_.num_cols(); ++j) {
     if (p_.is_int[j]) lb[j] = ub[j] = std::round(x_int[j]);
@@ -1106,7 +1337,9 @@ LpStatus Search::solve_fixed_ints(const std::vector<double>& x_int, const std::v
   o.perturb = false;
   o.objective_cutoff = cutoff;
   o.iteration_limit = 20000 + 2 * static_cast<long long>(p_.num_rows() + p_.num_cols());
-  if (!params_.deterministic) o.time_limit = std::max(0.0, std::min(5.0, params_.time_limit - timer_.elapsed()));
+  if (!params_.deterministic) {
+    o.time_limit = time_cap >= 0.0 ? time_cap : std::max(0.0, std::min(5.0, params_.time_limit - timer_.elapsed()));
+  }
   const LpStatus st = lp.solve(o);
   polish_iters_ += lp.iterations();
   if (st == LpStatus::Optimal) {
@@ -1116,6 +1349,32 @@ LpStatus Search::solve_fixed_ints(const std::vector<double>& x_int, const std::v
     }
   }
   return st;
+}
+
+void Search::final_polish(MipResult& res) const {
+  // The incumbent may use the feasibility tolerance (rows up to 1e-6 beyond their sides: LP points and sub-MIP
+  // solutions are accepted within it), and its objective may profit from it: map16715-04 (2 threads, seed 1)
+  // ended at -111.00075 with 257 rows exactly 1e-6 beyond their sides (optimum -111; the fixed-integer LP gives
+  // -111), fastxgemm-n2r6s0t2 at 229.9997 (optimum 230). The search's own result (not in sub-MIPs): its continuous
+  // part re-solved with the integers fixed at a 1e-9 primal tolerance, taken if it violates less; its objective
+  // may be a little worse, the honest one. Once, under a short time cap that may pass the time limit (at most
+  // max(0.5 s, 1% of it), 2 s; deterministic mode: the LP's iteration limit). MILP_FINAL_POLISH=0: off.
+  static const bool on = knob("MILP_FINAL_POLISH", 1) > 0;
+  if (!on || !opts_.sub_mip_heuristics || res.x.empty()) return;
+  bool cont = false;
+  for (Index j = 0; j < p_.num_cols() && !cont; ++j) cont = !p_.is_int[j];
+  const double v0 = p_.max_violation(res.x);
+  if (!cont || v0 <= 1e-9) return;
+  const double cap = std::min(2.0, std::max(0.5, 0.01 * (is_finite(params_.time_limit) ? params_.time_limit : 200.0)));
+  std::vector<double> y;
+  if (solve_fixed_ints(res.x, p_.col_lb, p_.col_ub, 1e-9, kInf, y, cap) != LpStatus::Optimal) return;
+  const double v1 = p_.max_violation(y);
+  if (!(v1 < v0) || v1 > kFeasTol) return;
+  const double obj = p_.objective(y);
+  log_.log(2, "  final polish: violation %.3g -> %.3g, objective %.12g -> %.12g\n", v0, v1,
+           p_.display_sense * res.objective, p_.display_sense * obj);
+  res.x = std::move(y);
+  res.objective = obj;
 }
 
 void Search::polish_integral_lp(Worker& w, const LpOptions& opt) {
@@ -1270,7 +1529,7 @@ bool Search::try_incumbent(const std::vector<double>& x_in, const char* source) 
       plb = std::min(plb, lost_bound_);
     }
     const double rb = root_bound_.load();
-    const double lb = is_finite(plb) ? std::max(plb, rb) : rb;
+    const double lb = std::max(is_finite(plb) ? std::max(plb, rb) : rb, trivial_lb_);
     opts_.on_incumbent(reported, std::min(lb, obj) + p_.offset);
     return true;
   }
@@ -1297,7 +1556,30 @@ bool Search::accept_incumbent(std::vector<double>& x, double obj, const char* so
   inc_x_ = std::move(x);
   count_win(source);
   log_.log(2, "  new incumbent %.10g (%s) at %.2fs\n", p_.display_sense * (obj + p_.offset), source, timer_.elapsed());
+  if (opts_.on_trace) opts_.on_trace(p_.display_sense * (obj + p_.offset), source, timer_.elapsed());
+  // MILP_ROOT_GAP_STOP (default 1; 0: off): opportunistic mode, an incumbent at the root LP bound ends the search
+  // at once, also while root heuristics still run (triptim1: after the vector-length dive found the optimum, the
+  // coefficient dive ran on for 3.3 s to its 25 s cap). Deterministic mode: the root node's own test.
+  static const bool root_gap_stop = knob("MILP_ROOT_GAP_STOP", 1) > 0;
+  if (gap_closed_at(trivial_lb_, obj)) trivial_solved(obj);
+  else if (root_gap_stop && !params_.deterministic && gap_closed_at(root_bound_.load(), obj)) trivial_solved(obj, true);
+  if (opts_.solution_limit > 0 && ++solutions_ >= opts_.solution_limit) {
+    sol_limit_hit_ = true;  // reported as Interrupted (search())
+    stop_ = true;
+  }
   return true;
+}
+
+void Search::trivial_solved(double obj, bool root) {
+  if (solved_.exchange(true)) return;
+  const double bound = root ? root_bound_.load() : trivial_lb_;
+  log_.log(1, "Incumbent %.10g meets the %s %.10g: optimal (%.2fs)\n", p_.display_sense * (obj + p_.offset),
+           root ? "root LP bound" : "trivial objective bound", p_.display_sense * (bound + p_.offset), timer_.elapsed());
+  stop_ = true;
+  if (!params_.deterministic) {
+    fj_stop_ = true;
+    solved_stop_ = true;
+  }
 }
 
 void Search::maybe_log(bool force) {
@@ -1306,7 +1588,7 @@ void Search::maybe_log(bool force) {
   const double t = timer_.elapsed();
   if (!force && t - last_log_ < 2.0) return;
   last_log_ = t;
-  double lb = std::min(pool_->lower_bound(), incumbent_.load());
+  double lb = std::max(std::min(pool_->lower_bound(), incumbent_.load()), trivial_lb_);
   if (obj_integral_ && is_finite(lb)) lb = std::ceil(lb - 1e-6);
   const double inc = incumbent_.load();
   const double gap = is_finite(inc) ? std::abs(inc - lb) / std::max(std::abs(inc + p_.offset), 1e-10) * 100.0 : kInf;
@@ -2083,6 +2365,9 @@ LpStatus Search::pool_strip(Worker& w, const LpOptions& opt) {
 void Search::record_lurking(const DualSimplex& lp) {
   const double z = lp.objective();
   if (!is_finite(z)) return;
+  bool unsafe = false;
+  lp_bound(lp, &unsafe, 0);
+  if (unsafe) return;  // z + d is no bound if the LP's safe bound does not confirm z
   for (Index j = 0; j < p_.num_cols(); ++j) {
     if (!p_.is_int[j]) continue;
     const VarStatus vs = lp.status(j);
@@ -2136,8 +2421,115 @@ void Search::root_rc_fixing(double cutoff) {
       }
     }
   }
-  if (fixed > 0) log_.log(2, "  root reduced-cost fixing: %d bounds tightened\n", fixed);
+  // Objective cutoff propagation on the global bounds: c x <= cutoff and the rows (continuous bounds
+  // only as intermediate steps), integer bounds become global like the reduced-cost fixings above
+  // (valid for improving points). neos-4413714-turia (min z, z >= d_ik x_ik per customer): z <=
+  // cutoff fixes every assignment with d_ik above it, 95.7% of the 190k binaries at the first
+  // incumbent 49.73; node propagation found them per node only, and the root restart counted 195
+  // reduced-cost fixings (19020 needed). HiGHS restarts there with 96.5% of the columns inactive.
+  // With it: restart at 44 s to 8478 columns, two more restarts, optimal 45.3702 at 91 s (Mac, 4
+  // threads; before TL at 120 s, incumbent 46.64). MILP_GLOBAL_OBJPROP=0: off.
+  static const bool objprop = knob("MILP_GLOBAL_OBJPROP", 1) > 0 && std::getenv("MILP_NO_OBJPROP") == nullptr;
+  Index oprop = 0;
+  if (objprop && is_finite(cutoff)) {
+    if (!gprop_) {
+      for (Index j = 0; j < p_.num_cols(); ++j) {
+        if (p_.cost[j] != 0.0) obj_cols_.push_back(j);
+      }
+      gprop_ = std::make_unique<DomainPropagator>(prop_problem());
+      gprop_->enable_objective();
+      gprop_->continuous = true;
+      // Once per new incumbent: a tenth of the node propagation's budget (turia needs ~0.25 nnz).
+      gprop_->work_limit = 2 * static_cast<long long>(p_.A.nnz()) + 10000;
+    }
+    if (!obj_cols_.empty()) {
+      gprop_->set_objective_cutoff(cutoff);
+      std::vector<double> lb = glb_, ub = gub_;
+      std::vector<Index> t;
+      if (gprop_->propagate(lb, ub, obj_cols_, t)) {
+        for (Index j : t) {
+          if (!p_.is_int[j] || (lb[j] <= glb_[j] && ub[j] >= gub_[j])) continue;
+          glb_[j] = std::max(glb_[j], lb[j]);
+          gub_[j] = std::max(glb_[j], std::min(gub_[j], ub[j]));
+          gfix_log_.push_back({j, glb_[j], gub_[j]});
+          ++oprop;
+        }
+      }
+    }
+  }
+  // Objective propagation with clique implications: a literal whose objective increase, with the literals it
+  // forces to 0, exceeds the cutoff's room over the pseudo objective is fixed to 0 (search/obj_cliques.hpp).
+  Index ocl = 0;
+  if (is_finite(cutoff)) {
+    std::vector<double> lb = glb_, ub = gub_;
+    std::vector<Index> t;
+    if (obj_clique_fix(cutoff, lb, ub, t) > 0) {
+      for (Index j : t) {
+        if (lb[j] <= glb_[j] && ub[j] >= gub_[j]) continue;
+        glb_[j] = std::max(glb_[j], lb[j]);
+        gub_[j] = std::max(glb_[j], std::min(gub_[j], ub[j]));
+        gfix_log_.push_back({j, glb_[j], gub_[j]});
+        ocl_new_.push_back(j);
+        ++ocl;
+      }
+    }
+  }
+  if (fixed + oprop + ocl > 0) {
+    log_.log(2, "  root reduced-cost fixing: %d bounds tightened, %d by objective propagation, %d by objective cliques\n",
+             fixed, oprop, ocl);
+    restart_check_due_ = true;
+  }
   dbg_global("root reduced-cost fixing");
+}
+
+Index Search::obj_clique_fix(double cutoff, std::vector<double>& lb, std::vector<double>& ub,
+                             std::vector<Index>& changed) {
+  static const bool on = knob("MILP_OBJ_CLIQUES", 1) > 0;
+  if (!on || !is_finite(cutoff)) return 0;
+  const auto t0 = std::chrono::steady_clock::now();
+  const long long nnz = static_cast<long long>(p_.A.nnz());
+  if (!ocl_built_) {
+    ocl_built_ = true;
+    // At most 3e6 list entries (~100 MB with the scratch arrays; a list entry is a row nonzero).
+    auto oc = std::make_unique<ObjectiveCliques>(p_, 3000000);
+    log_.log(2, "  objective cliques: %d conflict lists, %lld entries%s, %.3fs\n", oc->lists(), oc->entries(),
+             oc->truncated() ? " (truncated)" : "",
+             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    if (oc->lists() > 0) ocl_ = std::move(oc);
+  }
+  if (!ocl_) return 0;
+  // Exact unions of a literal's partners up to about two passes over the matrix per call.
+  const Index k = ocl_->propagate(cutoff, lb, ub, changed, 2 * nnz + 100000);
+  ++ocl_calls_;
+  ocl_fixed_ += k;
+  ocl_time_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  return k;
+}
+
+// Objective-clique fixings since the root LP that cut off its solution (the incumbent arrived after the root cut
+// loop: deterministic mode syncs the FJ / local MIP points there, or a root heuristic found it): the root is
+// processed again with the global bounds (propagation, LP, a few cut rounds; as after root strong branching
+// fixings) instead of heuristics and strong branching on the weaker LP. At most 3 times per search.
+// hypothyroid-k1, deterministic: 68 fixings at the root node; without this, root strong branching (40 s) and its
+// cut rounds came first (67.8 s in all).
+bool Search::ocl_root_redo(Worker& w) {
+  std::vector<Index> cols;
+  std::lock_guard<std::mutex> lk(gfix_mu_);
+  cols.swap(ocl_new_);
+  if (cols.empty() || ocl_redos_ >= 3 || w.xnode.size() != static_cast<size_t>(p_.num_cols())) return false;
+  bool cut = false;
+  for (Index j : cols) cut = cut || w.xnode[j] < glb_[j] - 1e-6 || w.xnode[j] > gub_[j] + 1e-6;
+  if (!cut) return false;
+  ++ocl_redos_;
+  log_.log(2, "  root again: %zu columns fixed by objective cliques cut off the root LP solution\n", cols.size());
+  for (; w.gfix_seen < gfix_log_.size(); ++w.gfix_seen) {
+    const BoundChange& g = gfix_log_[w.gfix_seen];
+    w.glb[g.col] = std::max(w.glb[g.col], g.lb);
+    w.gub[g.col] = std::min(w.gub[g.col], g.ub);
+    w.changed.push_back(g.col);
+  }
+  root_seeds_.insert(root_seeds_.end(), cols.begin(), cols.end());  // propagated on the next pass
+  return true;
 }
 
 void Search::learn_conflict(Worker& w, LpStatus st, bool use_trail) {
@@ -2224,8 +2616,8 @@ void Search::add_conflict(Worker& w, Conflict&& c, const char* what) {
   }
   c.owner = w.tid;
   ++conf_learned_;
-  static const bool conf_score = knob("MILP_CONF_WEIGHT", 0.0) > 0.0;
-  if (conf_score) {
+  static const bool conf_weight = knob("MILP_CONF_WEIGHT", 0.0) > 0.0;
+  if (conf_weight || pc_.flat_hybrid) {  // the flat hybrid score uses them too
     // Literals of a clause; of a linear proof the local bounds it relies on (tightened below the
     // root): a positive coefficient uses the lower bound (up direction), a negative one the upper.
     std::vector<Index> cols;
@@ -2353,7 +2745,8 @@ bool Search::propagate_node_impl(Worker& w, BoundTrail* trail) {
   return true;
 }
 
-double Search::probe(Worker& w, Index j, double lb, double ub, double obj, const Basis& basis, bool* exact) {
+double Search::probe(Worker& w, Index j, double lb, double ub, double obj, const Basis& basis, bool* exact,
+                     bool bound) {
   DualSimplex& lp = w.lp;
   const double old_lb = lp.col_lower(j), old_ub = lp.col_upper(j);
   lp.set_col_bounds(j, lb, ub);
@@ -2370,10 +2763,18 @@ double Search::probe(Worker& w, Index j, double lb, double ub, double obj, const
   sb_iters_ += lp.iterations() - it0;
   ++sb_probes_;
   double gain;
-  if (st == LpStatus::Infeasible || st == LpStatus::CutoffReached) gain = kInf;
-  else if (st == LpStatus::Optimal || st == LpStatus::IterationLimit) gain = std::max(lp.objective() - obj, 0.0);
-  else gain = 0.0;
-  if (st == LpStatus::Optimal && lp.objective() >= cutoff(w)) gain = kInf;
+  if (st == LpStatus::Infeasible || st == LpStatus::CutoffReached) {
+    gain = kInf;
+  } else if (st == LpStatus::Optimal || st == LpStatus::IterationLimit) {
+    double z = lp.objective();
+    // An optimal probe at or above the cutoff prunes its child, and its gain may become a bound: both only as
+    // far as the probe's safe bound confirms its objective.
+    bool below = false;
+    if (st == LpStatus::Optimal && (bound || z >= cutoff(w))) z = lp_bound(lp, &below, -1);
+    gain = st == LpStatus::Optimal && z >= cutoff(w) ? kInf : std::max(z - obj, 0.0);
+  } else {
+    gain = 0.0;
+  }
   *exact = st == LpStatus::Optimal;
   // Opt-in (MILP_SB_CONFLICT=1): dual proof of the pruned child (its bound change is not on the
   // trail: no clause). Like MILP_SB_BOUNDS, neutral on miplib_dev / dev set and no help on the targets.
@@ -2481,8 +2882,10 @@ Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
   const double gap = cutoff(w) - obj;
   const BranchScoreRule rule = w.pc->score_rule(gap);
   bool used_aps = false;
-  w.pc->scores(w.fracs, reliability, w.scored, &w.est_sum, &ps_scale, degen_factor, rule, &used_aps);
+  bool used_flat = false;
+  w.pc->scores(w.fracs, reliability, w.scored, &w.est_sum, &ps_scale, degen_factor, rule, &used_aps, &used_flat);
   if (used_aps) ++sb_aps_nodes_;
+  if (used_flat) ++sb_flat_nodes_;
   static const int tie_rule = static_cast<int>(knob("MILP_TIE", 0));
   if (tie_rule == 0) {
     std::sort(w.scored.begin(), w.scored.end(),
@@ -2525,8 +2928,8 @@ Index Search::select_branch(Worker& w, double obj, const Basis& basis) {
     if (!c.reliable && probes < max_probes && no_improve < kLookahead && !pl_stop) {
       const double v = w.xnode[c.j];
       bool ex_dn = false, ex_up = false;
-      const double dn = probe(w, c.j, w.lp.col_lower(c.j), std::floor(v), obj, basis, &ex_dn);
-      const double up = probe(w, c.j, std::ceil(v), w.lp.col_upper(c.j), obj, basis, &ex_up);
+      const double dn = probe(w, c.j, w.lp.col_lower(c.j), std::floor(v), obj, basis, &ex_dn, sb_bounds);
+      const double up = probe(w, c.j, std::ceil(v), w.lp.col_upper(c.j), obj, basis, &ex_up, sb_bounds);
       probed = true;
       ++probes;
       if (!is_finite(dn) && !is_finite(up)) {
@@ -2642,6 +3045,12 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
   // child at the iteration limit, so no bound; no fixing). dano3_5: 23 of 30 children at the limit, 14k
   // iterations; dano3_3: 3 passes, 26k iterations, 44 of 62 children at the limit.
   static const int kAbort = static_cast<int>(knob("MILP_ROOT_SB_ABORT", 4));
+  // MILP_ROOT_SB_FIXBONUS = b (opt-in; 0: off): each fixing (a child infeasible or cut off) extends the root's
+  // probe budget by b probes at the per-child limit, so passes go on while they keep fixing columns
+  // (app1-1, 4 threads: 16 fixings in 22 probes, then the budget of 0.5 x the root's iterations was gone;
+  // with 20 x it, 135 fixings in 161 probes over 2 passes and the root closed the gap: 20.7 -> 14.2 s,
+  // 434 nodes -> 1; SCIP's root reaches its bound the same way, 78 probes in run 1).
+  static const double kFixBonus = knob("MILP_ROOT_SB_FIXBONUS", 0.0);
   root_sb_var_ = -1;
   if (!on || w.fracs.empty() || (!opts_.sub_mip_heuristics && !in_sub)) return 0;
   // A root whose restart is already due (reduced-cost fixing, the fixings of earlier passes): no probes
@@ -2709,8 +3118,8 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
     }
     const double v = w.xnode[c.j];
     bool ex_dn = false, ex_up = false;
-    const double dn = probe(w, c.j, w.lp.col_lower(c.j), std::floor(v), obj, basis, &ex_dn);
-    const double up = probe(w, c.j, std::ceil(v), w.lp.col_upper(c.j), obj, basis, &ex_up);
+    const double dn = probe(w, c.j, w.lp.col_lower(c.j), std::floor(v), obj, basis, &ex_dn, true);
+    const double up = probe(w, c.j, std::ceil(v), w.lp.col_upper(c.j), obj, basis, &ex_up, true);
     ++probes;
     inexact += (is_finite(dn) && !ex_dn) + (is_finite(up) && !ex_up);
     log_.log(3, "    root probe %d col %d: down %.6g%s, up %.6g%s\n", probes, c.j, dn, is_finite(dn) && !ex_dn ? " (limit)" : "",
@@ -2726,6 +3135,7 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
       ++fixed;
       no_improve = 0;
       idle_run = 0;
+      root_sb_budget_ += static_cast<long long>(kFixBonus * 2.0 * static_cast<double>(limit));
       if (is_finite(dn)) pc_update(w, c.j, -1, dn / c.f);
       else pc_update(w, c.j, 1, up / (1.0 - c.f));
       continue;
@@ -2759,7 +3169,7 @@ int Search::root_strong_branching(Worker& w, double obj, const Basis& basis) {
   root_sb_probes_ += probes;
   root_sb_iters_ += used;
   root_sb_fixed_ += fixed;
-  if (is_finite(maxmin)) root_sb_bound_ = std::max(root_sb_bound_, obj + maxmin);
+  if (is_finite(maxmin) && !w.lp_unsafe) root_sb_bound_ = std::max(root_sb_bound_, obj + maxmin);
   log_.log(2, "  root strong branching pass %d: %d probes, %lld LP iterations (limit %lld per child, %d children at the "
            "limit%s), %d fixings, bound %.10g\n", root_sb_passes_, probes, used, limit, inexact,
            aborted ? ", pass aborted" : "", fixed, p_.display_sense * (std::max(obj, root_sb_bound_) + p_.offset));
@@ -2830,22 +3240,46 @@ void Search::run_dives(Worker& w) {
   w.lp.restore_state(w.state);
 }
 
-void Search::root_heuristics(Worker& w) {
+int Search::async_heur_threads() const {
+  // MILP_ROOT_HEUR_ASYNC = k: with at least k threads (0: off); MILP_ROOT_HEUR_SHARE: the heuristics' share of
+  // the threads (default 1/4: 1 of 4, 3 of 12). The first root only: a restarted root is smaller, its
+  // heuristics are capped at about its own time, and their incumbent decides the next restart at once (mc11,
+  // 4 threads: three root restarts in a row, 23.6 s; with the restarted roots' heuristics beside the tree 27.5 s).
+  static const int min_threads = static_cast<int>(knob("MILP_ROOT_HEUR_ASYNC", 0));
+  static const double share = knob("MILP_ROOT_HEUR_SHARE", 0.25);
+  if (min_threads <= 0 || params_.deterministic || threads_ < std::max(2, min_threads)) return 0;
+  if (opts_.restarts_done > 0 || opts_.tree_restarts_done > 0) return 0;
+  return std::clamp(static_cast<int>(std::lround(share * threads_)), 1, threads_ - 1);
+}
+
+void Search::root_heuristics(Worker& w, int nthreads, double t_root_in) {
   // Time this search spent until the end of the root LP with cuts (after a restart: of the
   // restarted root only).
-  const double t_root = timer_.elapsed() - t_start_;
+  const double t_root = t_root_in >= 0.0 ? t_root_in : timer_.elapsed() - t_start_;
+  const int nthr = nthreads > 0 ? nthreads : threads_;
   // MILP_SUBHEUR_DEBUG: the root heuristic lines of the sub-MIPs too (their log is silent).
   static const bool sub_debug = std::getenv("MILP_SUBHEUR_DEBUG") != nullptr;
   const int hlog = sub_debug && !opts_.sub_mip_heuristics ? 0 : 3;
-  log_.log(hlog, "  root heuristics: root %lld LP iterations (initial LP %lld), %.2fs, %d rows, %d cols, cutoff %s, time"
-           " left %.2fs\n", w.lp.iterations(), root_lp0_iters_, t_root, p_.num_rows(), p_.num_cols(),
-           is_finite(cutoff(w)) ? "yes" : "no", params_.time_limit - timer_.elapsed());
+  log_.log(hlog, "  root heuristics: root %lld LP iterations (initial LP %lld, barrier root as %lld), %.2fs, %d rows, %d"
+           " cols, cutoff %s, time left %.2fs\n", w.lp.iterations(), root_lp0_iters_, root_lp_equiv_iters_, t_root,
+           p_.num_rows(), p_.num_cols(), is_finite(cutoff(w)) ? "yes" : "no", params_.time_limit - timer_.elapsed());
   struct Result {
     std::vector<double> x;
     const char* source = nullptr;
     long long iters = 0, dive_iters = 0;
   };
   using Task = std::function<void(Result&)>;
+  // Opt-in MILP_ROOT_HEUR_SKIP=1 (opportunistic mode): a heuristic task that would start once the root
+  // restart is due (fixings from an incumbent found by an earlier task) is skipped; the restarted
+  // root runs its heuristics on the reduced problem. neos-4413714-turia: the first incumbent at 32 s
+  // fixes 95.6% of the columns, the tasks after it ran another ~12 s on the full 190k columns (optimal
+  // in 79.7 -> 69.4 s, Mac, 4 threads, 1 run each; not A/B tested, hence opt-in).
+  static const bool skip_on_restart = knob("MILP_ROOT_HEUR_SKIP", 0) > 0;
+  auto restart_due = [&] {
+    if (!skip_on_restart || params_.deterministic || !restart_allowed()) return false;
+    Index ints = 0, fixed = 0;
+    return restart_check(root_work(w.lp), root_elapsed(), &ints, &fixed).outcome == RestartDecision::Restart;
+  };
   auto run_tasks = [&](const std::vector<Task>& tasks) {
     std::vector<Result> res(tasks.size());
     std::atomic<size_t> next{0};
@@ -2856,6 +3290,7 @@ void Search::root_heuristics(Worker& w) {
     const bool early = !w.det && !params_.deterministic && !no_early;
     auto loop = [&] {
       for (size_t k; (k = next++) < tasks.size();) {
+        if (restart_due()) continue;
         tasks[k](res[k]);
         if (early && !res[k].x.empty()) {
           early_wins += try_incumbent(res[k].x, res[k].source);
@@ -2864,7 +3299,7 @@ void Search::root_heuristics(Worker& w) {
       }
     };
     std::vector<std::thread> pool;
-    const int nt = std::min(threads_, static_cast<int>(tasks.size()));
+    const int nt = std::min(nthr, static_cast<int>(tasks.size()));
     for (int t = 1; t < nt; ++t) pool.emplace_back(inherit_interrupt(loop));
     loop();
     for (auto& th : pool) th.join();
@@ -2884,9 +3319,14 @@ void Search::root_heuristics(Worker& w) {
   // root's time (>= 2 s): 3x the root LP work, at least 2e8 work units (iterations x (rows +
   // columns), ~2 s on rmatr100-p10 and setpack_large), as LP iterations of this problem.
   const double dims = static_cast<double>(p_.num_rows() + p_.num_cols());
+  // MILP_DET_SUB_FACTOR (default 3): that multiple of the root LP work. A sub-MIP's LP iterations cost several
+  // times the root's (its presolve, cut loop, propagation), so 3x the work runs far beyond opportunistic mode's
+  // 3x the time (Mac, 4 threads, with MILP_DET_LNS_FACTOR=0.25: factor 1 took n5-3 25.1 -> 21.4 s, seymour1
+  // 23.7 -> 17.8, kasai 34.6 -> 28.3; air05 / app1-1 / h80x6320d within 1.5 s; qap10 unchanged). A/B pending.
+  static const double det_sub_factor = knob("MILP_DET_SUB_FACTOR", 3.0);
   const long long det_sub_iters =
       params_.deterministic
-          ? static_cast<long long>(std::max(2e8, 3.0 * static_cast<double>(w.lp.iterations()) * dims) / std::max(1.0, dims))
+          ? static_cast<long long>(std::max(2e8, det_sub_factor * static_cast<double>(w.lp.iterations()) * dims) / std::max(1.0, dims))
           : -1;
 
   // Phase 1: one dive per rule, each on its own copy of the root LP. Restarted roots from the second
@@ -2908,8 +3348,11 @@ void Search::root_heuristics(Worker& w) {
                                    DiveRule::VectorLength};
     auto inc_p = std::make_shared<std::vector<double>>();
     incumbent_x(w, *inc_p);
-    // Each dive may use about twice the root LP effort (the dives run in parallel).
-    long long budget = std::max<long long>(5000, 2 * w.lp.iterations());
+    // Each dive may use about twice the root LP effort (the dives run in parallel). A barrier root counts as
+    // the dual simplex iterations it stands for: w.lp's own are the crossover cleanup and the cut loop only
+    // (triptim1: 995, so 5000 per dive, which ended all three dives at their limit).
+    const long long equiv = barrier_equiv() ? root_lp_equiv_iters_ : 0;
+    long long budget = std::max<long long>(5000, 2 * (w.lp.iterations() + equiv));
     // MILP_ROOT_DIVE_REL = r (default 0: off): at most max(MILP_ROOT_DIVE_MIN (50000), r x the initial root
     // LP's iterations), the cut loop's not counted. --deterministic has no time cap on the dives, and after a
     // long cut loop the 2x above is large: puriri at 600 s 48 rounds, 182400 iterations, so 364800 per dive
@@ -2918,11 +3361,19 @@ void Search::root_heuristics(Worker& w) {
     // LP 25398; successful dives use up to 39x a small initial LP: pg, h80x6320d).
     static const double dive_rel = knob("MILP_ROOT_DIVE_REL", 0.0);
     static const double dive_min = knob("MILP_ROOT_DIVE_MIN", 50000);
-    const long long lp0 = root_lp0_iters_ >= 0 ? root_lp0_iters_ : w.lp.iterations();
+    const long long lp0 = (root_lp0_iters_ >= 0 ? root_lp0_iters_ : w.lp.iterations()) + equiv;
     if (dive_rel > 0.0) {
       budget = std::min(budget, static_cast<long long>(std::max({5000.0, dive_min, dive_rel * static_cast<double>(lp0)})));
     }
+    // Opportunistic mode caps each dive at 5% of the time left. After a barrier root the vector-length dive
+    // (see MILP_BARRIER_VL_FIRST below) gets at least the root LP's own time (MILP_BARRIER_DIVE_TL = f x it,
+    // default 1; 0: off): its dual simplex equivalent is in the budget above, and the 5% cut every dive of
+    // triptim1 at 120 s (4 s, 6-10k iterations); with 25 s, the vector-length dive found the optimum after a
+    // 30 s root LP (155 steps, 45353 iterations, 20 s). Not the other dives: all three at the barrier's time
+    // (uccase9, 21 s, 2 threads, 70 s limit) took the root heuristics to the time limit before the tree.
+    static const double barrier_dive_tl = knob("MILP_BARRIER_DIVE_TL", 1.0);
     const double tl = capped(std::max(2.0, 0.05 * remaining()));
+    const double tl_vl = barrier_equiv() ? capped(std::max(tl, barrier_dive_tl * root_barrier_time_)) : tl;
     const double cut = cutoff(w);
     // MILP_DIVE_DEDUP (default 1; 0: off): no guided dive without an incumbent, where it is the fractional dive
     // again (same LP, same choices: puriri deterministic 21691 iterations each; in the sub-MIPs, which
@@ -2931,7 +3382,8 @@ void Search::root_heuristics(Worker& w) {
     std::vector<Task> tasks;
     for (DiveRule rule : kRules) {
       if (dedup && rule == DiveRule::Guided && inc_p->empty()) continue;
-      tasks.push_back([&, rule, inc_p, budget, tl, cut](Result& r) {
+      const double cap = rule == DiveRule::VectorLength ? tl_vl : tl;
+      tasks.push_back([&, rule, inc_p, budget, cap, cut](Result& r) {
         const std::vector<double>& inc = *inc_p;
         DualSimplex lp = w.lp;
         std::unique_ptr<DomainPropagator> prop;
@@ -2939,17 +3391,19 @@ void Search::root_heuristics(Worker& w) {
         DiveLimits lim;
         lim.cutoff = cut;
         lim.iteration_budget = budget;
-        // At most the time left when the dive starts: tl is set before the tasks queue up (--deterministic:
+        // At most the time left when the dive starts: cap is set before the tasks queue up (--deterministic:
         // the whole time left, so with more dives than threads a queued dive ran that long again;
         // ns1116954 2 threads ended 109 s past its limit).
-        lim.time_limit = std::min(tl, remaining());
+        lim.time_limit = std::min(cap, remaining());
         std::vector<double> sol;
         const double t0 = timer_.elapsed();
-        const bool ok = dive(p_, lp, rule, rounding_, inc.empty() ? nullptr : &inc, lim, sol, &r.iters, prop.get());
+        DiveOutcome out;
+        const bool ok = dive(p_, lp, rule, rounding_, inc.empty() ? nullptr : &inc, lim, sol, &r.iters, prop.get(), &out);
         r.dive_iters = r.iters;
         if (ok) r.x = std::move(sol), r.source = to_string(rule);
-        log_.log(hlog, "  root %s: %s, %lld iters, %.2fs\n", to_string(rule), ok ? "found" : "failed", r.iters,
-                 timer_.elapsed() - t0);
+        log_.log(hlog, "  root %s: %s, %d steps, %lld iters (budget %lld), %.2fs (cap %.2fs)\n", to_string(rule),
+                 ok ? "found" : out.limit_hit ? "failed at its limit" : "failed", out.steps, r.iters, budget,
+                 timer_.elapsed() - t0, lim.time_limit);
       });
     }
     if (merge_phases) dive_tasks = std::move(tasks);
@@ -3065,6 +3519,16 @@ void Search::root_heuristics(Worker& w) {
                ls.attempts, ls.last_rate, ss.nodes, ss.lp_iterations, timer_.elapsed() - t0);
     });
   }
+  // MILP_BARRIER_VL_FIRST (default 1; 0: off): after a barrier root the vector-length dive (the last of
+  // dive_tasks) goes first. Its LP re-solves are as expensive as the root LP is large, and it needs the fewest:
+  // triptim1 76-155 steps (3-20 s) to the optimum, coefficient 367-434 and fractional 1500-3250 failing; with
+  // 2 threads it was queued behind the sub-MIPs and two dives that failed, and started 42 s after the root
+  // (solved at 83 s; first: 47 s).
+  static const bool vl_first = knob("MILP_BARRIER_VL_FIRST", 1) > 0;
+  if (vl_first && barrier_equiv() && root_barrier_time_ > 0.0 && !dive_tasks.empty()) {
+    tasks.insert(tasks.begin(), std::move(dive_tasks.back()));
+    dive_tasks.pop_back();
+  }
   for (Task& t : dive_tasks) tasks.push_back(std::move(t));
   run_tasks(tasks);
 
@@ -3072,9 +3536,11 @@ void Search::root_heuristics(Worker& w) {
   // of its early incumbents this way): rounds of RINS plus mutation sub-MIPs (one per
   // thread), repeated while a round improves.
   static const bool no_root_lns = std::getenv("MILP_NO_ROOT_LNS") != nullptr;
-  // Only after a root of some size (>= 2000 LP iterations incl. the cut loop): on quick roots
-  // the sub-MIP setup costs more than the tree's LNS would.
-  if (no_submip || no_root_lns || !opts_.sub_mip_heuristics || !opts_.root_heuristics || w.lp.iterations() < 2000) return;
+  // Only after a root of some size (>= 2000 LP iterations incl. the cut loop, a barrier root as the iterations
+  // it stands for): on quick roots the sub-MIP setup costs more than the tree's LNS would.
+  const long long root_iters = w.lp.iterations() + (barrier_equiv() ? root_lp_equiv_iters_ : 0);
+  if (no_submip || no_root_lns || !opts_.sub_mip_heuristics || !opts_.root_heuristics || root_iters < 2000) return;
+  if (restart_due()) return;
   // After a restart only if the rounds before it improved the incumbent (neos-1445765: ~2.5 s
   // for a round that never succeeds).
   if (!opts_.root_lns) return;
@@ -3091,18 +3557,21 @@ void Search::root_heuristics(Worker& w) {
                     incumbent(w) - root_bound_ > 1e-2 * std::max(1.0, std::abs(incumbent(w) + p_.offset));
   const double lns_secs = poor ? std::max(t_root, kPoorLnsSecs) : t_root;
   const double lns_end = timer_.elapsed() + std::min({20.0, 0.1 * remaining(), lns_secs});
-  const long long lns_iters = std::max<long long>(50000, 5 * w.lp.iterations()) * (poor && kPoorLnsSecs > 0.0 ? 4 : 1);
+  // MILP_DET_LNS_FACTOR (default 1): factor on that deterministic budget (see MILP_DET_SUB_FACTOR above).
+  static const double det_lns_factor = knob("MILP_DET_LNS_FACTOR", 1.0);
+  const long long lns_iters = static_cast<long long>(
+      det_lns_factor * static_cast<double>(std::max<long long>(50000, 5 * w.lp.iterations()) * (poor && kPoorLnsSecs > 0.0 ? 4 : 1)));
   long long lns_used = 0;
   double fix = 0.7;
   bool rins_ok = true;
-  for (int round = 0; round < 12 && is_finite(incumbent(w)); ++round) {
+  for (int round = 0; round < 12 && is_finite(incumbent(w)) && !solved_.load(); ++round) {
     // Skip when the incumbent is already within 0.5% of the root bound.
     if (incumbent(w) - root_bound_ <= 5e-3 * std::max(1.0, std::abs(incumbent(w) + p_.offset))) break;
     if (params_.deterministic ? lns_used >= lns_iters : timer_.elapsed() >= lns_end) break;
     std::vector<double> inc;
     incumbent_x(w, inc);
     const double before = incumbent(w), cut = before + p_.offset;
-    std::vector<SubMipStats> stats(static_cast<size_t>(std::max(threads_, 2)));
+    std::vector<SubMipStats> stats(static_cast<size_t>(std::max(nthr, 2)));
     std::vector<Task> lns;
     auto limits = [&](SubMipStats* st) {
       SubMipLimits lim;
@@ -3119,7 +3588,7 @@ void Search::root_heuristics(Worker& w) {
         if (rins(p_, w.xnode.data(), inc, cut, limits(&stats[0]), sol)) r.x = std::move(sol), r.source = "root RINS";
       });
     }
-    for (int t = static_cast<int>(lns.size()), k = 0; t < std::max(threads_, 2); ++t, ++k) {
+    for (int t = static_cast<int>(lns.size()), k = 0; t < std::max(nthr, 2); ++t, ++k) {
       const double f = std::min(0.95, fix + 0.1 * k);
       const unsigned seed = params_.seed * 7919u + 15485863u + static_cast<unsigned>(round * 64 + t);
       lns.push_back([&, cut, f, seed, t](Result& r) {
@@ -3307,8 +3776,19 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
       w.obj_useful = 0.999 * w.obj_useful + (w.prop->last_obj_useful ? 1.0 : 0.0);
     }
     if (node.branch_var >= 0) {
-      // A child proven infeasible by propagation counts as many inferences.
-      const double inferences = ok ? static_cast<double>(w.changed.size() - changed_before) : 10.0;
+      // A child proven infeasible by propagation counts as many inferences. The node propagates its
+      // whole path, so the bounds it tightened are mostly those of the ancestors' branchings (the count
+      // grew with the depth: on fhnw-binpack4-4 the inference score favoured columns branched on deep
+      // in the tree). With a trail, only the bounds at the last decision level count: those that
+      // depend on this node's own branching (SCIP's inference history; fhnw-binpack4-4 with the flat
+      // hybrid score: 63k nodes / 5.9 s, all path bounds 103k / 6.9 s). MILP_INFER_PATH=1: all.
+      static const bool infer_path = knob("MILP_INFER_PATH", 0) > 0;
+      double inferences = ok ? static_cast<double>(w.changed.size() - changed_before) : 10.0;
+      if (ok && use_trail && !w.trail.overflow && !infer_path) {
+        long long own = 0;
+        for (const BoundTrail::Entry& e : w.trail.e) own += e.kind != BoundTrail::kDecision && e.level == w.trail.level;
+        inferences = static_cast<double>(own);
+      }
       w.pc->update_inference(node.branch_var, node.branch_dir, inferences);
       if (w.det) w.inf_log.emplace_back(node.branch_var, node.branch_dir, inferences);
     }
@@ -3541,6 +4021,18 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
       }
     }
     if (st == LpStatus::Optimal) pool_age(w);
+    // Zero objective (fhnw-binpack4-4): pool rows cannot raise a node's bound, they only help by making
+    // its LP infeasible. The evidence above samples pruned nodes only, and nearly all of them close by
+    // propagation there, so the pool stayed at every node (40k rounds re-added 1M cuts in 30 s, 166
+    // prunes; 90% of the search time). A node that went through pool rounds and stays open is evidence
+    // of rows not needed (fhnw-binpack4-4 proof 5.9 s / 63k nodes, without this 49.7 s / 154k nodes).
+    // MILP_ZERO_OBJ_POOL_EV=0: off.
+    static const bool zero_ev = knob("MILP_ZERO_OBJ_POOL_EV", 1) > 0;
+    if (zero_ev && zero_obj_ && rounds && st == LpStatus::Optimal && node.depth > kNodeCutDepth && !w.prow.empty()) {
+      const long long share =
+          static_cast<long long>(1000.0 * static_cast<double>(w.prow.size()) / static_cast<double>(lp.num_rows()));
+      pool_evidence_result(w, false, share);
+    }
     const int bad = w.det ? w.ev_bad : ev_bad_.load();
     if (st == LpStatus::Optimal && !rounds && !w.prow.empty() && bad >= 2) {
       st = pool_strip(w, opt);
@@ -3602,8 +4094,14 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   }
 
   const double obj = lp.objective();
+  // The node's bound: obj, or the LP's safe dual bound where that is lower (a dual infeasibility the scaled
+  // tolerances let pass would make obj an invalid bound). Pruning, the children's bounds and the root bound use
+  // it; pseudocosts, estimates and branching scores stay on obj.
+  bool unsafe = false;
+  const double bnd = lp_bound(lp, &unsafe, node.id);
+  w.lp_unsafe = unsafe;
   if (node.id == 0) {
-    root_bound_ = obj;
+    root_bound_ = bnd;
     log_.log(1, "Root LP: objective %.10g, %lld iterations, %.2fs\n", p_.display_sense * (obj + p_.offset), lp.iterations(),
              timer_.elapsed());
   }
@@ -3616,7 +4114,7 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
       if (w.det) w.anc_log.emplace_back(node.anc_var, node.anc_dist > 0.0f ? 1 : -1, g);
     }
   }
-  if (obj >= cutoff(w)) {
+  if (bnd >= cutoff(w)) {
     if (node.id != 0) {
       pool_evidence(w, node.depth);
       learn_conflict(w, LpStatus::CutoffReached);
@@ -3625,12 +4123,12 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     return 0;
   }
   if (node.id == 0) {
-    root_z_ = obj;
+    root_z_ = bnd;
     root_d_.assign(p_.num_cols(), 0.0);
     root_at_.assign(p_.num_cols(), 0);
     glb_ = w.glb;
     gub_ = w.gub;
-    for (Index j = 0; j < p_.num_cols(); ++j) {
+    for (Index j = 0; j < p_.num_cols() && !unsafe; ++j) {  // unsafe: no reduced-cost fixing from this root
       const VarStatus vs = lp.status(j);
       root_d_[j] = vs == VarStatus::Basic ? 0.0 : lp.reduced_cost(j);
       // Root reduced-cost fixing counts from the global bounds: only columns nonbasic at a global bound
@@ -3647,7 +4145,7 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   // Node reduced-cost fixing: bounds beyond which the LP bound would exceed the cutoff.
   static const bool no_rcfix = std::getenv("MILP_NO_RCFIX") != nullptr;
   w.rcfix.clear();
-  if (!no_rcfix && is_finite(cutoff(w))) {
+  if (!no_rcfix && !unsafe && is_finite(cutoff(w))) {
     const double slack = cutoff(w) - obj;
     for (Index j = 0; j < p_.num_cols() && w.rcfix.size() < 256; ++j) {
       if (!p_.is_int[j]) continue;
@@ -3694,41 +4192,79 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   if (w.fracs.empty() && !p_.implications.empty()) {
     // Integral, but a logical implication may still be violated: branch on its binary.
     const Index z = violated_implication(w, x);
-    if (z >= 0) return implication_branch(w, node, children, z, std::max(obj, node.bound));
+    if (z >= 0) return implication_branch(w, node, children, z, std::max(bnd, node.bound));
   }
   if (w.fracs.empty()) {
     w.sol.assign(x, x + p_.num_cols());
     static const bool polish_lp = knob("MILP_POLISH_LP", 1) > 0;
     if (polish_lp) polish_integral_lp(w, opt);
-    std::vector<double> chk;
-    double chk_obj;
-    // Rejected only because it is not better than the incumbent (e.g. found
-    // earlier by a heuristic, LP objective a hair below the cutoff): fine.
-    if (!try_incumbent(w, w.sol, "LP") && obj < cutoff(w) && !verified_point(w.sol, chk, &chk_obj)) {
+    bool feasible = true;
+    if (!integral_point_closes(w, w.sol, obj, &feasible)) {
       double iv = 0.0;
       const double viol = p_.max_violation(w.sol, &iv);
-      // The LP point is integral within tolerance but violates the model: we cannot branch on its
-      // fractionalities, so branch as for an unsolvable node LP (fresh LP, else a domain split).
-      log_.log(2, "  node %lld: integral LP point violates model (viol %.3g, int %.3g), branching without it\n",
-               node.id, viol, iv);
+      // The LP point is integral within tolerance but violates the model, or is feasible only at a clearly
+      // worse objective: we cannot branch on its fractionalities, so branch as for an unsolvable node LP
+      // (fresh LP, else a domain split).
+      log_.log(2, "  node %lld: integral LP point %s (viol %.3g, int %.3g), branching without it\n", node.id,
+               feasible ? "worse than the LP bound once exactly feasible" : "violates model", viol, iv);
+      return unsolved_branch(w, node, children);
+    }
+    if (unsafe && bnd < cutoff(w)) {
+      // Integral, but the LP's optimality is not confirmed (its safe bound is lower): better points may remain
+      // in the subtree. Branch as for an unsolvable node LP (fresh LP, else a domain split).
+      log_.log(3, "  node %lld: integral LP point, safe bound below the cutoff, branching without it\n", node.id);
       return unsolved_branch(w, node, children);
     }
     count_outcome(7, node.depth);
     return 0;
   }
+  // MILP_ZIROUND = 0 (default): off, 1: ZI rounding where simple rounding fails (root, every 8th node), 2: at
+  // every node. Opt-in: server core A/B (4 seeds, 2 threads, 120 s) 1.001 [0.980, 1.025], solved 212 -> 208 (neos5
+  // 4 -> 1, roll3000 3 -> 1: high-variance instances; no gain anywhere measurable). Each call recomputes the row activities (a pass over the matrix): after 1000 calls of a worker
+  // with fewer than 1% feasible points it stops there (as SCIP's zirounding; per worker: deterministic).
+  static const int ziround = static_cast<int>(knob("MILP_ZIROUND", 0));
+  auto zi = [&] {
+    if (w.zi_calls >= 1000 && 100 * w.zi_found < w.zi_calls) return;
+    ++w.zi_calls;
+    ++zi_calls_;
+    if (!zi_rounding_.run(x, w.sol)) return;
+    ++w.zi_found;
+    ++zi_found_;
+    zi_wins_ += try_incumbent(w, w.sol, "ZI rounding");
+  };
   if (node.id == 0 || w.nodes % 8 == 0) {
     if (rounding_.run(x, w.sol)) try_incumbent(w, w.sol, "rounding");
+    else if (ziround > 0) zi();
+  } else if (ziround > 1) {
+    zi();
   }
 
   w.tree_iters += lp.iterations() - it0;  // before dives and probes move the LP
   ++w.tree_lps;
   w.xnode.assign(x, x + p_.num_cols());  // strong branching moves the LP
   if (node.id == 0) root_x_ = w.xnode;
+  if (node.id == 0 && ocl_root_redo(w)) {
+    root_redo_ = true;
+    --nodes_;
+    --w.nodes;
+    return 0;
+  }
   if (node.id == 0 && root_sb_budget_ < 0) root_sb_base_ = lp.iterations();
   auto basis = std::make_shared<const Basis>(lp.get_basis());
   lp.save_state(w.state);
   if (node.id == 0) {
-    if (!root_heur_done_) root_heuristics(w);
+    if (!root_heur_done_ && !solved_.load()) {
+      if (async_heur_threads() > 0) {
+        // Beside the tree (MILP_ROOT_HEUR_ASYNC), from a copy of this root LP and point.
+        heur_w_ = std::make_unique<Worker>();
+        prompt_restart_check_ = true;
+        heur_w_->lp = w.lp;
+        heur_w_->xnode = w.xnode;
+        heur_t_root_ = timer_.elapsed() - t_start_;
+      } else {
+        root_heuristics(w);
+      }
+    }
     root_heur_done_ = true;
   } else {
     const auto c0 = std::chrono::steady_clock::now();
@@ -3736,12 +4272,18 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     w.t_dive += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();  // statistics only
     run_sub_mips(w);
   }
-  if (obj >= cutoff(w)) {
+  if (bnd >= cutoff(w) || solved_.load()) {
     count_outcome(9, node.depth);
     return 0;
   }
   w.node_depth = node.depth;
   Index j = -1;
+  if (node.id == 0 && ocl_root_redo(w)) {  // an incumbent of the root heuristics
+    root_redo_ = true;
+    --nodes_;
+    --w.nodes;
+    return 0;
+  }
   if (node.id == 0) {
     const int r = root_strong_branching(w, obj, *basis);
     if (r == 1) {
@@ -3795,8 +4337,8 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   for (Node* c : {&down, &up}) {
     // A child's region lies within its parent's: never report a bound below the parent's (a node LP
     // can come out lower numerically; roll3000 once ended OPTIMAL with a reported bound 0.7% low).
-    c->bound = std::max(obj, node.bound);
-    c->parent_obj = c->bound;  // before a strong branching bound raises it (pseudocost reference)
+    c->bound = std::max(bnd, node.bound);
+    c->parent_obj = std::max(obj, node.bound);  // pseudocost reference (no strong branching bound)
     if (node.id == 0) c->bound = std::max(c->bound, root_sb_bound_);
     c->depth = node.depth + 1;
     if (keep_basis) c->basis = packed;
@@ -3854,9 +4396,10 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     up.estimate = base_est + c.up;
     break;
   }
-  if (w.sb_var == j) {
+  if (w.sb_var == j && !unsafe) {
     // Opt-in (MILP_SB_BOUNDS=1): strong branching solved the children's LPs to optimality, so their
-    // objectives are valid bounds (an infeasible / cutoff probe prunes the child without an LP).
+    // objectives are valid bounds (an infeasible / cutoff probe prunes the child without an LP; the gains
+    // come from the probes' safe bounds, relative to obj: not with an unconfirmed obj).
     if (is_finite(w.sb_dn)) down.bound = std::max(down.bound, obj + w.sb_dn);
     if (is_finite(w.sb_up)) up.bound = std::max(up.bound, obj + w.sb_up);
   }
@@ -3922,6 +4465,28 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
   return 2;
 }
 
+double Search::lp_bound(const DualSimplex& lp, bool* below, long long node_id) {
+  *below = false;
+  if (!DualSimplex::safe_bound_enabled()) return lp.objective();
+  const long long ns0 = now_ns();
+  const double b = lp.safe_objective(params_.tol.dual_feas, below);
+  safe_ns_ += now_ns() - ns0;
+  ++safe_checks_;
+  if (*below) {
+    const long long k = ++safe_below_;
+    if (k <= 10) {
+      const double z = lp.objective();
+      char where[48];
+      if (node_id >= 0) std::snprintf(where, sizeof(where), "node %lld", node_id);
+      else std::snprintf(where, sizeof(where), "strong branching probe");
+      log_.log(2, "  %s: LP objective %.10g, safe bound %.10g (%.3g below)%s\n", where,
+               p_.display_sense * (z + p_.offset), p_.display_sense * (b + p_.offset), z - b,
+               k == 10 ? "; further ones only counted" : "");
+    }
+  }
+  return b;
+}
+
 LpStatus Search::recover_lp(Worker& w, const LpOptions& opt, long long node_id) {
   DualSimplex& lp = w.lp;
   ++lp_failed_;
@@ -3946,6 +4511,21 @@ LpStatus Search::recover_lp(Worker& w, const LpOptions& opt, long long node_id) 
   return st;
 }
 
+bool Search::integral_point_closes(Worker& w, const std::vector<double>& sol, double lp_obj, bool* feasible) {
+  if (feasible) *feasible = true;
+  try_incumbent(w, sol, "LP");
+  if (lp_obj >= cutoff(w)) return true;  // bound prune (also after the point became the incumbent)
+  std::vector<double> chk;
+  double chk_obj;
+  if (!verified_point(sol, chk, &chk_obj)) {
+    if (feasible) *feasible = false;
+    return false;
+  }
+  // MILP_INT_CLOSE_STRICT=0: feasible closes (the old rule).
+  static const bool strict = knob("MILP_INT_CLOSE_STRICT", 1) > 0;
+  return !strict || chk_obj <= lp_obj + 1e-6 * std::max(1.0, std::abs(chk_obj + p_.offset));
+}
+
 int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
   ++lp_unsolved_;
   const Index n = p_.num_cols();
@@ -3964,8 +4544,9 @@ int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
   double bound = node.bound;
   Index j = -1;
   double v = 0.0;
+  bool unsafe = false;
   if (st == LpStatus::Optimal) {
-    bound = std::max(bound, fresh.objective());
+    bound = std::max(bound, lp_bound(fresh, &unsafe, node.id));
     if (bound >= cutoff(w)) return 0;
     const std::vector<double> x = fresh.col_values();
     double best = 0.0;
@@ -3976,10 +4557,10 @@ int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
       if (score > params_.tol.integrality && score > best) best = score, j = k, v = x[k];
     }
     if (j < 0) {
-      std::vector<double> sol(x.begin(), x.end()), chk;
-      double chk_obj;
-      // Integral: the subtree's optimum is this point if it is feasible.
-      if (try_incumbent(w, sol, "LP") || verified_point(sol, chk, &chk_obj)) return 0;
+      std::vector<double> sol(x.begin(), x.end());
+      // Integral: the subtree's optimum is this point if it is feasible at the LP's objective (and the LP's
+      // optimality is confirmed by its safe bound; else the domain split below).
+      if (integral_point_closes(w, sol, bound) && (!unsafe || bound >= cutoff(w))) return 0;
       if (!p_.implications.empty()) {
         const Index z = violated_implication(w, x.data());
         if (z >= 0) return implication_branch(w, node, children, z, bound);
@@ -4206,27 +4787,38 @@ void Search::run_sub_mips(Worker& w) {
                                                 static_cast<int>(pool.size()) > st.cx_parents);
     st.cx_version = version;
   }
-  double total = 0.0;
-  for (int k = 0; k < kLns; ++k) total += st.calls[k];
-  // Every other call is RINS while it succeeds about as often as the best other neighbourhood
-  // (or has had few calls); otherwise all available neighbourhoods compete by UCB.
-  static const bool rins_alternate = std::getenv("MILP_LNS_RINS_ALWAYS") != nullptr;
-  double best_other = 0.0;
-  for (int k = 0; k < kLns; ++k) {
-    if (k != kLnsRins && st.calls[k] > 0.0) best_other = std::max(best_other, st.wins[k] / st.calls[k]);
-  }
-  const double rins_rate = st.calls[kLnsRins] > 0.0 ? st.wins[kLnsRins] / st.calls[kLnsRins] : 0.0;
-  const bool rins_turn = avail[kLnsRins] && st.rounds++ % 2 == 0 &&
-                         (rins_alternate || st.calls[kLnsRins] < 3.0 || (rins_rate > 0.0 && rins_rate >= 0.5 * best_other));
-  int pick = rins_turn ? kLnsRins : -1;
-  double best = -kInf;
-  // The other calls pick by UCB (before, the loop stopped as soon as RINS, the first entry,
-  // was the provisional best: mutation, local branching and RENS never ran).
-  for (int k = 0; k < kLns && !rins_turn; ++k) {
-    if (!avail[k] || (k == kLnsRins && avail[kLnsMutation] && (rins_alternate || st.calls[kLnsRins] < 3.0))) continue;
-    const double score =
-        (st.wins[k] + 0.5) / (st.calls[k] + 1.0) + 0.5 * std::sqrt(std::log(total + 1.0) / (st.calls[k] + 1.0));
-    if (score > best) best = score, pick = k;
+  int pick = -1;
+  if (alns_) {
+    // Adaptive selection: proximity search (once the incumbent is not known to be within its smallest
+    // step of the optimum) and graph mutation join; all compete by alns_select alone.
+    static const bool no_prox = knob("MILP_ALNS_PROX", 1) <= 0;
+    static const bool no_graph = knob("MILP_ALNS_GRAPH", 1) <= 0;
+    avail[kLnsProximity] = has_inc && prox_ok_ && !no_prox && inc_now != st.prox_inc;
+    avail[kLnsGraph] = has_inc && !no_graph;
+    pick = alns_select(st, avail);
+  } else {
+    double total = 0.0;
+    for (int k = 0; k < kLns; ++k) total += st.calls[k];
+    // Every other call is RINS while it succeeds about as often as the best other neighbourhood
+    // (or has had few calls); otherwise all available neighbourhoods compete by UCB.
+    static const bool rins_alternate = std::getenv("MILP_LNS_RINS_ALWAYS") != nullptr;
+    double best_other = 0.0;
+    for (int k = 0; k < kLns; ++k) {
+      if (k != kLnsRins && st.calls[k] > 0.0) best_other = std::max(best_other, st.wins[k] / st.calls[k]);
+    }
+    const double rins_rate = st.calls[kLnsRins] > 0.0 ? st.wins[kLnsRins] / st.calls[kLnsRins] : 0.0;
+    const bool rins_turn = avail[kLnsRins] && st.rounds++ % 2 == 0 &&
+                           (rins_alternate || st.calls[kLnsRins] < 3.0 || (rins_rate > 0.0 && rins_rate >= 0.5 * best_other));
+    pick = rins_turn ? kLnsRins : -1;
+    double best = -kInf;
+    // The other calls pick by UCB (before, the loop stopped as soon as RINS, the first entry,
+    // was the provisional best: mutation, local branching and RENS never ran).
+    for (int k = 0; k < kLns && !rins_turn; ++k) {
+      if (!avail[k] || (k == kLnsRins && avail[kLnsMutation] && (rins_alternate || st.calls[kLnsRins] < 3.0))) continue;
+      const double score =
+          (st.wins[k] + 0.5) / (st.calls[k] + 1.0) + 0.5 * std::sqrt(std::log(total + 1.0) / (st.calls[k] + 1.0));
+      if (score > best) best = score, pick = k;
+    }
   }
   if (pick < 0) return;
   auto job = std::make_shared<SubMipJob>();
@@ -4249,7 +4841,19 @@ void Search::run_sub_mips(Worker& w) {
   }
   if (!w.det) ++sub_active_;
   const auto t0 = std::chrono::steady_clock::now();
-  run_lns(*job, st, &w, w.det ? nullptr : &lk);
+  for (int k = 0;; ++k) {
+    const int solved = run_lns(*job, st, &w, w.det ? nullptr : &lk);
+    // MILP_ALNS_REPICK=1: a rejected neighbourhood (no sub-MIP: too few fixings, or searched before) does not
+    // use up the call; the next best one runs instead, at most twice (supportcase33, 60 s: 22 of 82 calls
+    // were RENS / crossover rejections, each delaying the next call by kGap nodes). Not the default: measured
+    // only together with the exploiting selection (alns_reward).
+    if (!alns_repick_ || solved > 0 || k >= 2) break;
+    avail[job->pick] = false;
+    const int next = alns_select(st, avail);
+    if (next < 0) break;
+    job->pick = next;
+    if (next == kLnsRins || next == kLnsRens) job->xnode = w.xnode;
+  }
   w.t_sub += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();  // statistics only
   ++w.sub_runs;
   if (!w.det) --sub_active_;
@@ -4258,18 +4862,27 @@ void Search::run_sub_mips(Worker& w) {
 // The sub-MIP attempts of one LNS call (st: the neighbourhood statistics to adapt). With a worker,
 // solutions go to it; without (a deterministic-mode job), they are kept in job.sols and count as
 // improvements (they beat the incumbent the job started from). lk: opportunistic mode's lns_mu_.
-void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<std::mutex>* lk) {
+// Returns the number of sub-MIPs solved (0: every neighbourhood was rejected).
+int Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<std::mutex>* lk) {
   static const bool rins_static = std::getenv("MILP_RINS_STATIC") != nullptr;
   // A neighbourhood that turns out too small (sub-MIP exhausted with almost no LP work, e.g.
   // infeasible after presolve) is retried at once with its adapted size, up to 4 times.
   static const bool no_retry = std::getenv("MILP_NO_LNS_RETRY") != nullptr;
   const int pick = job.pick;
   const std::vector<std::vector<double>>& pool = job.pool;
+  std::vector<double> chain;  // proximity search: this call's last point, the next centre (job mode)
+  int solved = 0;
   for (int attempt = 0; attempt < 4; ++attempt) {
     // Neighbourhood parameters now; the sub-MIP itself runs without the lock.
     const double rins_fix_used = st.rins_fix, rins_max_used = st.rins_max, mut_fix = st.mut_fix;
+    const double graph_fix = st.graph_fix, prox_imp = st.prox_imp;
     const int lb_k = st.lb_k, cx_parents = st.cx_parents;
     const unsigned seq = st.seq++;
+    // MILP_ALNS: fixing neighbourhoods searched completely before are skipped (copied: other threads may add).
+    const bool dedup = alns_ && (pick == kLnsRins || pick == kLnsMutation || pick == kLnsCrossover || pick == kLnsGraph);
+    std::vector<std::uint64_t> searched;
+    if (dedup) searched = st.searched;
+    std::uint64_t fingerprint = 0;
     if (pick == kLnsLocalBranching) st.lb_inc = job.inc_now;
     if (pick == kLnsCrossover) st.cx_parents_used = cx_parents;
     if (lk) lk->unlock();
@@ -4283,10 +4896,15 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
     lim.stats = &ss;
     lim.stop = &job.stop;
     lim.progress = &job.progress;
+    if (dedup) lim.fingerprint = &fingerprint, lim.skip = &searched;
     std::vector<double> sol;
     std::vector<double> inc = job.inc;
     if (w && !w->det && job.has_inc) incumbent_x(*w, inc);  // the incumbent may have improved meanwhile
+    else if (!chain.empty()) inc = chain;
     const double cut = job.inc_now + p_.offset;
+    // Objective the call starts from: the cutoff (proximity search: its centre).
+    double c_old = job.inc_now;
+    bool prox_min = false;  // proximity search asked for its smallest improvement step
     bool found = false;
     const char* source = nullptr;
     switch (pick) {
@@ -4322,11 +4940,33 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
         source = "crossover";
         break;
       }
+      case kLnsProximity: {
+        // Required improvement theta: prox_imp x the gap to the root bound (or to 0 when there is none), at
+        // least 1 for an integral objective. Stops at the first point (the next attempt recentres there).
+        c_old = p_.objective(inc) - p_.offset;
+        const double rb = root_bound_.load();
+        const double scale = is_finite(rb) && rb < c_old ? c_old - rb : std::max(1.0, std::abs(c_old + p_.offset));
+        double theta = prox_imp * scale;
+        theta = obj_integral_ ? std::max(1.0, std::floor(theta + 1e-9)) : std::max(theta, 1e-9 * scale);
+        prox_min = obj_integral_ ? theta <= 1.0 : prox_imp <= kProxMin;
+        if (!job.det) lim.time_limit = std::min(5.0, 0.05 * rem);
+        lim.solution_limit = 1;
+        found = proximity(p_, inc, c_old + p_.offset - theta, lim, sol);
+        source = "proximity";
+        break;
+      }
+      case kLnsGraph:
+        found = graph_mutation(p_, inc, graph_fix, params_.seed * 7919u + 104723u + seq, cut, lim, sol);
+        source = "graph mutation";
+        break;
       default:
         found = rens(p_, job.xnode.data(), cut, lim, sol);
         source = "RENS";
         break;
     }
+    double c_new = kInf;
+    if (found && alns_) c_new = p_.objective(sol) - p_.offset;
+    if (found && pick == kLnsProximity) chain = sol;
     bool win = found;
     if (found && w) {
       win = try_incumbent(*w, sol, source);
@@ -4334,6 +4974,46 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
       job.sols.emplace_back(std::move(sol), source);
     }
     if (lk) lk->lock();
+    solved += ss.solves;
+    double value = 0.0;
+    if (alns_) {
+      // `found`: the neighbourhood held a better point than the one it started from (in opportunistic mode
+      // another thread may have found a still better one meanwhile).
+      if (found) {
+        const double rb = root_bound_.load();
+        const double closed = !is_finite(c_old) ? 1.0 : is_finite(rb) && rb < c_old ? (c_old - c_new) / (c_old - rb) : 0.0;
+        value = 0.8 + 0.2 * std::clamp(closed, 0.0, 1.0);
+      }
+      if (dedup && ss.solves > 0 && ss.exhausted && !found) {
+        st.searched.push_back(fingerprint);
+        if (st.searched.size() > 64) st.searched.erase(st.searched.begin());
+      }
+      // A rejected neighbourhood (too few fixings or searched before, no sub-MIP) counts a quarter call
+      // without iterations and value, as without MILP_ALNS (MILP_ALNS_REPICK: a whole call; a quarter keeps
+      // its UCB term large, so it is picked again and again: supportcase33, see run_sub_mips).
+      alns_reward(st, pick, value, static_cast<double>(ss.lp_iterations), ss.solves > 0 || alns_repick_ ? 1.0 : 0.25);
+      ++arm_calls_[pick];
+      arm_found_[pick] += found;
+      arm_iters_[pick] += ss.lp_iterations;
+      if (ss.solves > 0 && (pick == kLnsMutation || pick == kLnsGraph)) {
+        // Fixing rate from the outcome, with steps shrinking from 0.1 by 0.8 per adjustment (to 0.02; SCIP's ALNS:
+        // 0.2 x 0.75^k): searched completely (better point or not) -> larger neighbourhood, a limit hit without a
+        // better point -> smaller. (Without MILP_ALNS mutation moves by 0.05 after failures only, below.)
+        double& fix = pick == kLnsMutation ? st.mut_fix : st.graph_fix;
+        double& step = pick == kLnsMutation ? st.mut_step : st.graph_step;
+        const double used = pick == kLnsMutation ? mut_fix : graph_fix;
+        if (ss.exhausted) fix = std::max(0.2, used - step);
+        else if (!found) fix = std::min(0.95, used + step);
+        step = std::max(0.02, 0.8 * step);
+      }
+      if (pick == kLnsProximity && ss.solves > 0) {
+        // A point: ask for more next time. None (infeasible: no point improves by theta; or the limits) at the
+        // smallest step: leave this incumbent alone. Otherwise a smaller step.
+        if (found) st.prox_imp = std::min(0.5, prox_imp * 1.5);
+        else if (prox_min) st.prox_inc = c_old;
+        else st.prox_imp = std::max(kProxMin, prox_imp * (ss.exhausted ? 0.25 : 0.5));
+      }
+    }
     if (ss.solves > 0) {
       for (int k = 0; k < kLns; ++k) st.calls[k] *= 0.97, st.wins[k] *= 0.97;  // forget old successes slowly
       st.calls[pick] += 1.0;
@@ -4345,7 +5025,7 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
     }
     // Adapt the neighbourhood sizes: exhausted without improvement -> larger, limit hit -> smaller.
     if (!win && ss.solves > 0) {
-      if (pick == kLnsMutation) {
+      if (pick == kLnsMutation && !alns_) {
         // Finer steps down: the random fixings decide as much as the rate whether the
         // neighbourhood is empty (fiball: 0.6 infeasible or improving depending on the seed).
         st.mut_fix = ss.exhausted ? std::max(0.2, mut_fix - 0.05) : std::min(0.95, mut_fix + 0.05);
@@ -4372,6 +5052,14 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
                " nodes, %s, boost %d, %.2fs\n", source, win ? "improved" : "no", ss.solves, ss.fixed, ss.ints,
                ss.lp_iterations, ss.dive_iterations, ss.dive_wins, ss.fp_runs, ss.fp_iterations, ss.fp_wins, ss.nodes,
                ss.exhausted ? "exhausted" : "limit", st.boost, timer_.elapsed());
+      if (alns_) {
+        log_.log(1, "    ALNS value %.3f, ref %.0f iters; mutation %.2f, graph %.2f, proximity %.4f; scores", value,
+                 st.iter_ref, st.mut_fix, st.graph_fix, st.prox_imp);
+        for (int k = 0; k < kLns; ++k) {
+          if (st.rcnt[k] > 0.0) log_.log(1, " %d:%.3f/%.1f", k, st.rsum[k] / std::max(1e-9, st.rcost[k]), st.rcnt[k]);
+        }
+        log_.log(1, "\n");
+      }
     }
     st.iters += ss.lp_iterations;
     if (w && !w->det) sub_iters_ += ss.lp_iterations;
@@ -4384,6 +5072,12 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
     hsub_fp_runs_ += ss.fp_runs;
     hsub_fp_wins_ += ss.fp_wins;
     const bool cheap_fail = !win && ss.solves > 0 && ss.exhausted && ss.lp_iterations < 1000;
+    if (pick == kLnsProximity) {
+      // Chains (Fischetti and Monaci recentre at each new point): again from the new point, or at once with the
+      // smaller step after a cheap proof that none improves by theta.
+      if (job.stop.load() || !(found || (cheap_fail && st.prox_inc != c_old))) break;
+      continue;
+    }
     if (no_retry || !cheap_fail || pick == kLnsRens || pick == kLnsLocalBranching ||
         (pick == kLnsCrossover && st.cx_parents == cx_parents) ||
         (pick == kLnsRins && st.rins_fix == rins_fix_used && st.rins_max == rins_max_used) ||
@@ -4391,6 +5085,7 @@ void Search::run_lns(SubMipJob& job, LnsState& st, Worker* w, std::unique_lock<s
       break;
     }
   }
+  return solved;
 }
 
 thread_local int Search::last_outcome_ = -1;
@@ -4521,6 +5216,9 @@ void Search::worker_loop(int tid) {
     report_progress();
     poll_race();
     if (tid == 0 && (++restart_poll & 127) == 0) check_tree_restart(false);
+    else if (prompt_restart_check_ && restart_check_due_.load(std::memory_order_relaxed) && restart_check_due_.exchange(false)) {
+      check_tree_restart(false);
+    }
     if ((nodes_.load() & 15) == 0) {
       const double lb = pool_->lower_bound();
       if (gap_closed(lb)) {
@@ -4561,12 +5259,12 @@ void Search::run_deterministic() {
   // Sub-MIP jobs. A sub-MIP decided by a worker during a round is published at the round barrier and
   // run by a helper thread beside the following rounds (at most T - 1 jobs at a time; the main
   // thread never runs one). Its result enters at the first barrier at which the tree search has
-  // done job_factor times the job's LP iterations per thread left for it (each round adds the
-  // round's LP iterations / (T - pending jobs) to the job's credit): a deterministic point at
-  // about the time the job finishes. The barrier waits for a job only while it may still finish
-  // below its credit (it has used fewer iterations so far).
+  // done job_factor (2) times the job's LP iterations per thread (each round adds the round's LP
+  // iterations / T to the job's credit): a deterministic point after the job usually finishes. The
+  // barrier waits for a job only while it may still finish below its credit (it has used fewer
+  // iterations so far).
   static const bool no_jobs = std::getenv("MILP_DET_NO_JOBS") != nullptr;
-  static const double job_factor = knob("MILP_DET_JOB_FACTOR", 1.0);
+  static const double job_factor = knob("MILP_DET_JOB_FACTOR", 2.0);
   async_jobs_ = !no_jobs && T > 1;
   const int max_jobs = T - 1;
   long long round_budget = 2000 * T / V;  // work units (LP iterations) per virtual worker per round
@@ -4579,6 +5277,7 @@ void Search::run_deterministic() {
     w->det = true;
     w->tid = t;
     w->own_pc = std::make_unique<Pseudocosts>(p_.num_cols());
+    w->own_pc->flat_hybrid = pc_.flat_hybrid;
     w->pc = w->own_pc.get();
     ws.push_back(std::move(w));
   }
@@ -4604,6 +5303,8 @@ void Search::run_deterministic() {
   std::vector<double> busy(V, 0.0), tbusy(T, 0.0);
   std::vector<long long> wnodes(V, 0);
   double par_wall = 0.0, serial = 0.0, fj_wait = 0.0, job_wait = 0.0, job_secs = 0.0;
+  long long jw_n[3] = {0, 0, 0};
+  double jw_s[3] = {0.0, 0.0, 0.0};
   static const bool trace = std::getenv("MILP_DET_TRACE") != nullptr;
   std::vector<double> tr_busy(V), tr_sub(V);
   std::vector<long long> tr_nodes(V), tr_iters(V);
@@ -4939,7 +5640,13 @@ void Search::run_deterministic() {
     // published (in worker order; beyond max_jobs pending ones they are dropped).
     if (async_jobs_) {
       const long long clock = tree_clock();
-      const double share = static_cast<double>(clock - last_clock) / std::max<int>(1, T - static_cast<int>(jobs.size()));
+      // The round's LP work / T, at most one thread's rate. A finished job counts as pending until it enters
+      // while its thread does tree work, so the round's work / (T - pending jobs) (MILP_DET_JOB_SHARE=0) can
+      // credit a running job with several threads' work per round, and the barrier then waits for it. With
+      // MILP_DET_JOB_FACTOR 2: server deterministic A/B (4 threads, core, 2 seeds) 0.973 [0.955, 0.989].
+      static const int share_mode = static_cast<int>(knob("MILP_DET_JOB_SHARE", 1));
+      const double share = static_cast<double>(clock - last_clock) /
+                           (share_mode == 1 ? T : std::max<int>(1, T - static_cast<int>(jobs.size())));
       last_clock = clock;
       const Clock::time_point tw = Clock::now();
       std::vector<std::shared_ptr<SubMipJob>> keep;
@@ -4950,9 +5657,17 @@ void Search::run_deterministic() {
         // progress > due settles "not now" without waiting for the end.
         bool enter;
         {
+          const Clock::time_point tj = Clock::now();
           std::unique_lock<std::mutex> lk(mu);
+          const bool waits = !job->done.load() && job->progress.load() <= due;
           while (!job->done.load() && job->progress.load() <= due) cv.wait_for(lk, std::chrono::milliseconds(1));
           enter = job->done.load() && job->progress.load() <= due;
+          if (waits) {
+            // Statistics: the wait ended with the job entering, finished above its due point, or still running.
+            const int k = enter ? 0 : job->done.load() ? 1 : 2;
+            ++jw_n[k];
+            jw_s[k] += secs(tj, Clock::now());
+          }
         }
         if (!enter) {
           keep.push_back(std::move(job));
@@ -5060,6 +5775,8 @@ void Search::run_deterministic() {
              V, rounds, rounds ? static_cast<double>(nodes_.load()) / static_cast<double>(rounds) : 0.0, par_wall,
              cap > 0 ? 100.0 * tot_busy / cap : 0.0, cap > 0 ? 100.0 * (cap - tot_busy) / cap : 0.0, idle_slots, serial,
              fj_wait, job_wait, jobs_run, job_secs, jobs_dropped, jobs_discarded, capped_rounds);
+    log_.log(det_stats ? 0 : 2, "DET   job waits: %lld entered %.2fs, %lld finished above their due point %.2fs, %lld still "
+             "running %.2fs\n", jw_n[0], jw_s[0], jw_n[1], jw_s[1], jw_n[2], jw_s[2]);
     for (int t = 0; t < V; ++t) {
       log_.log(det_stats ? 0 : 2, "DET   worker %d: %lld nodes, busy %.2fs (dives %.2fs, sub-MIPs %.2fs), %lld LP iters\n",
                t, wnodes[t], busy[t], ws[t]->t_dive, ws[t]->t_sub, ws[t]->lp.iterations());
@@ -5148,6 +5865,14 @@ void Search::fj_start() {
     if (lmip_effort > 0 && !fj_stop_.load()) {
       LocalMipLimits ll;
       ll.effort = static_cast<long long>(lmip_effort);
+      // MILP_LMIP_REPORT = e (default 3e7 effort units, ~0.1 s; 0: every point): after the first point, a better
+      // one is reported once e effort has passed since the last report (the best point then, and at the end).
+      // Local MIP walks through long chains of slightly better feasible points: roll3000 reported 40874 points
+      // in 2 s (25904 new incumbents, 0.29 apart), each a pass over the matrix in the search, the incumbent
+      // checks, root reduced-cost fixing and objective propagation, and a callback / trace / log entry.
+      // Opportunistic mode only: in deterministic mode the effort until the next report can be many rounds of a
+      // small model, and the points enter at the syncs anyway.
+      ll.report_effort = fj_sync_ ? 0 : static_cast<long long>(knob("MILP_LMIP_REPORT", 3e7));
       ll.stall_effort = static_cast<long long>(knob("MILP_LMIP_STALL", 5e8));
       ll.stall_restart = true;  // no solution yet: random restarts until the budget is used
       ll.seed = params_.seed;
@@ -5257,6 +5982,7 @@ void Search::fj_start() {
         LocalMipLimits ll;
         ll.effort = static_cast<long long>(knob("MILP_LMIP_TREE_EFFORT", 3e8));
         ll.stall_effort = ll.effort / 3;
+        ll.report_effort = static_cast<long long>(knob("MILP_LMIP_REPORT", 3e7));
         ll.seed = params_.seed + 7919u * seq;
         ll.stop = &fj_stop_;
         ll.start = &inc;
@@ -5328,7 +6054,21 @@ void Search::fj_sync(long long release, bool lag) {
     // Every solution stamped below `target` has been published once FJ passed a checkpoint at or
     // beyond it (or finished): the solutions taken do not depend on thread timing.
     const long long target = lag ? fj_prev_allowed_ : fj_allowed_;
-    fj_cv_.wait(lk, [&] { return fj_done_ || fj_effort_ >= target; });
+    // Up to the time limit (or an interrupt): a run that reaches it is not deterministic anyway, and the helper's
+    // moves can be slow (gfd-schedulen180f7d50m30k18, deterministic, 12 runs at a time: the root LP waited for its
+    // syncs past the limit and was killed at 144 s of 120).
+    // No time limit (or ~30 years): no deadline (an infinite duration would overflow the clock's integer one).
+    const double rem = params_.time_limit - timer_.elapsed();
+    const auto deadline = rem < 1e9 ? std::chrono::steady_clock::now() +
+                                          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                              std::chrono::duration<double>(std::max(0.0, rem)))
+                                    : std::chrono::steady_clock::time_point::max();
+    for (;;) {
+      if (fj_done_ || fj_effort_ >= target) break;
+      // The time limit or an interrupt: no sync (the caller's LP stops at its own limit check).
+      if (interrupted() || std::chrono::steady_clock::now() >= deadline) return;
+      fj_cv_.wait_until(lk, std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(200)));
+    }
     auto keep = std::stable_partition(fj_found_.begin(), fj_found_.end(),
                                       [&](const FjFound& f) { return f.stamp >= target; });
     for (auto it = keep; it != fj_found_.end(); ++it) found.push_back(std::move(*it));
@@ -5339,6 +6079,15 @@ void Search::fj_sync(long long release, bool lag) {
     fj_cv_.notify_all();
   }
   for (auto& f : found) try_incumbent(f.x, f.source);
+}
+
+int Search::root_sep_threads() {
+  int threads = threads_;
+  if (fj_thread_.joinable() && !fj_sync_) {
+    std::lock_guard<std::mutex> lk(fj_mu_);
+    threads -= fj_done_ ? 0 : 1;
+  }
+  return std::max(1, threads);
 }
 
 void Search::fj_finish() {
@@ -5367,10 +6116,22 @@ bool Search::use_barrier_root() const {
 bool Search::use_concurrent_root() const {
   if (params_.lp_method != LpMethod::Auto || params_.deterministic || threads_ < 2) return false;
   if (!opts_.sub_mip_heuristics || opts_.restarts_done > 0 || opts_.tree_restarts_done > 0) return false;
-  if (std::find(p_.is_int.begin(), p_.is_int.end(), 1) != p_.is_int.end()) return false;  // MIP roots: simplex
+  if (p_.num_rows() == 0) return false;
+  const long long nnz = static_cast<long long>(p_.A.nnz());
+  if (std::find(p_.is_int.begin(), p_.is_int.end(), 1) != p_.is_int.end()) {
+    // MIP roots: at least MILP_CONCURRENT_MIP_NNZ (default 200000; 0: off, the dual simplex alone) presolved
+    // nonzeros. A barrier win changes the root vertex and with it the cut loop and the search after it: with
+    // every MIP root concurrent the core set (largest 173k presolved nonzeros, every root LP <= 12 s by the
+    // dual simplex) was 1.095x slower (2 threads, 1 seed; the barrier won 10 of 63 roots, e.g.
+    // neos-3381206-awhea 32 s -> unsolved, mc11 37 -> 65 s). Large roots the barrier wins clearly: triptim1
+    // (466k), uccase9 (259k), rail01 (258k); the simplex wins anyway on app1-2 (236k, 0.3 s),
+    // academictimetablesmall (240k, 2 s), satellites2-40 (263k, 4.7 s), snp-02-004-104 (303k, 6.6 s).
+    static const long long min_mip_nnz = static_cast<long long>(knob("MILP_CONCURRENT_MIP_NNZ", 200000));
+    return min_mip_nnz > 0 && nnz >= min_mip_nnz;
+  }
   // Small LPs take milliseconds with the simplex.
   static const long long min_nnz = static_cast<long long>(knob("MILP_CONCURRENT_NNZ", 10000));
-  return p_.num_rows() > 0 && static_cast<long long>(p_.A.nnz()) >= min_nnz;
+  return nnz >= min_nnz;
 }
 
 void Search::concurrent_root(DualSimplex& lp) {
@@ -5381,12 +6142,37 @@ void Search::concurrent_root(DualSimplex& lp) {
   LpStatus bst = LpStatus::NumericalError;
   double t_barrier = 0.0;
   Logger quiet(0);
+  // The simplex runs on this thread; a MIP root also has the FJ / local-MIP helper thread busy.
+  const int busy = 1 + (fj_thread_.joinable() ? 1 : 0);
+  // MILP_CONCURRENT_DELAY = d (MIP roots; default 2): the barrier starts only once the dual simplex has run
+  // for d seconds: a root LP done by then keeps the simplex's vertex and costs no barrier work, and narrow
+  // barrier wins (fast0507 1.2 s, neos-787933 0.5 s, physiciansched6-2 0.4 s) do not move the search.
+  static const double delay_knob = knob("MILP_CONCURRENT_DELAY", 2.0);
+  const bool mip = std::find(p_.is_int.begin(), p_.is_int.end(), 1) != p_.is_int.end();
+  const double delay = mip ? delay_knob : 0.0;
+  std::mutex mu;
+  std::condition_variable cv;
+  bool simplex_ended = false;
   std::thread tb(inherit_interrupt([&] {
+    if (delay > 0.0) {
+      std::unique_lock<std::mutex> lk(mu);
+      if (cv.wait_for(lk, std::chrono::duration<double>(delay), [&] { return simplex_ended; })) return;
+    }
     BarrierOptions bo;
     bo.log = &quiet;
     bo.stop = &stop;
     bo.time_limit = params_.time_limit - timer_.elapsed();
-    bo.ipm.threads = std::max(1, threads_ - 1);
+    bo.ipm.threads = std::max(1, threads_ - busy);
+    // Memory: gfd-schedulen180f7d50m30k18, neos-5104907-jarama and neos-5114902-kasavu (8 GB limit) went past 10 GB
+    // with the barrier (2.2 / 7.8 / 7.3 GB without it), also with a factor budget checked after the symbolic
+    // analysis (its structures and the frontal work are large too). Not started at all when the process holds
+    // 40% of the memory limit already; else its factor gets half the limit less that, at ~32 bytes per nonzero.
+    if (params_.mem_limit_mb > 0) {
+      const double limit = static_cast<double>(params_.mem_limit_mb) * 1048576.0;
+      const double held = static_cast<double>(resident_bytes());
+      if (held > 0.4 * limit) return;
+      bo.ipm.max_factor_nnz = std::max(1LL, static_cast<long long>((0.5 * limit - held) / 32.0));
+    }
     bst = barrier_solve(blp, p_.A, p_.cost, p_.col_lb, p_.col_ub, p_.row_lb, p_.row_ub, bo, &bs);
     t_barrier = timer_.elapsed() - t0;
     if (bst == LpStatus::Optimal && bs.used) stop.store(true);
@@ -5395,16 +6181,32 @@ void Search::concurrent_root(DualSimplex& lp) {
   so.tol = params_.tol;
   so.time_limit = params_.time_limit - timer_.elapsed();
   so.stop = &stop;
+  const long long it0 = lp.iterations();
   const LpStatus sst = lp.solve(so);
   const double t_simplex = timer_.elapsed() - t0;
   const bool simplex_done = sst == LpStatus::Optimal || sst == LpStatus::Infeasible || sst == LpStatus::Unbounded;
-  if (simplex_done) stop.store(true);
+  // Also at the time limit or an interrupt: the barrier checks its own limit, but its crossover only this flag
+  // (savsched1, 120 s limit: the simplex stopped at 120 s, the join then waited for the crossover's LU
+  // factorizations, ~14 s each, until 180-215 s).
+  if (simplex_done || timer_.elapsed() >= params_.time_limit || interrupted()) stop.store(true);
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    simplex_ended = true;
+  }
+  cv.notify_all();
   tb.join();
   if (!simplex_done && bst == LpStatus::Optimal && bs.used) {
+    // The simplex had not finished after these iterations: a lower bound on its cost of the root LP.
+    root_lp_equiv_iters_ = lp.iterations() - it0;
+    root_barrier_time_ = t_barrier;
     lp = blp;
-    log_.log(1, "Concurrent LP: barrier finished first (%.2fs: %d iterations, crossover and %lld simplex iterations)\n",
-             t_barrier, bs.ipm.iterations, bs.cleanup_iterations);
+    root_lp_lb_ = std::max(root_lp_lb_, lp.objective());  // before set_basis (barrier_basis_weights)
+    if (mip) barrier_basis_weights(lp);
+    log_.log(1, "Concurrent LP: barrier finished first (%.2fs: %d iterations, crossover and %lld simplex iterations;"
+             " dual simplex %lld iterations)\n", t_barrier, bs.ipm.iterations, bs.cleanup_iterations, root_lp_equiv_iters_);
   } else if (simplex_done) {
+    root_lp_race_iters_ = lp.iterations() - it0;
+    if (sst == LpStatus::Optimal) root_lp_lb_ = std::max(root_lp_lb_, lp.objective());
     log_.log(1, "Concurrent LP: dual simplex finished first (%.2fs)\n", t_simplex);
   }
 }
@@ -5418,6 +6220,11 @@ void Search::barrier_root(DualSimplex& lp) {
   bo.ipm.log_sense = p_.display_sense;
   BarrierStats bs;
   const LpStatus st = barrier_solve(lp, p_.A, p_.cost, p_.col_lb, p_.col_ub, p_.row_lb, p_.row_ub, bo, &bs);
+  if (bs.used) root_barrier_time_ = bs.total_time;
+  // The root LP bound also when the cut loop's warm re-solve (a fresh factorization of the crossover basis)
+  // does not finish in time; before set_basis (barrier_basis_weights).
+  if (bs.used && st == LpStatus::Optimal) root_lp_lb_ = std::max(root_lp_lb_, lp.objective());
+  if (bs.used) barrier_basis_weights(lp);
   if (!bs.used) {
     log_.log(1, "Barrier: %s (%s); solving the root LP with the dual simplex\n", to_string(bs.ipm.status),
              to_string(st));
@@ -5470,6 +6277,7 @@ Index Search::count_global_fixed() {
 }
 
 void Search::check_tree_restart(bool det) {
+  std::lock_guard<std::mutex> lk(tree_restart_mu_);
   static const double frac = knob("MILP_TREE_RESTART", 0.1);  // <= 0: off
   // Opt-in MILP_EST_RESTART=1 (A/B against off: 1.021x, 125 -> 121 of 136; mas74 restarted at 9-15k nodes
   // and lost its solve in both seeds, eil33-2 restarted at tree weight 0.645, swath3 gained once).
@@ -5614,19 +6422,25 @@ void Search::fill_restart(MipResult& res, bool with_pool) {
 MipResult Search::run() {
   MipResult res;
   t_start_ = timer_.elapsed();
+  checks0_ = DualSimplex::check_counts();
+  // Everything this search runs stops once it is solved (trivial_solved; opportunistic mode).
+  SearchStopScope stop_scope(params_.deterministic ? nullptr : &solved_stop_);
   debug_root_ = opts_.sub_mip_heuristics;
   // Sub-MIP heuristics keep the old permanent node cut rows (short searches; pool separation at
   // every node would mostly add LP work there).
   if (!opts_.sub_mip_heuristics) use_pool_ = false;
   load_debug_solution();
+  if (is_finite(trivial_lb_)) log_.log(2, "  trivial objective bound %.10g\n", p_.display_sense * (trivial_lb_ + p_.offset));
   if (is_finite(opts_.cutoff)) {
     external_cutoff_ = opts_.cutoff - p_.offset;
     cutoff_.store(prune_threshold(external_cutoff_));
   }
+  // The start is the user's (solver.cpp) or, after a restart, the incumbent before it.
+  const char* start_source = opts_.restarts_done + opts_.tree_restarts_done > 0 ? "restart" : "start";
   // A rejected start: the cutoff from its own objective (SearchOptions::start_objective), not from the point.
   const double start_obj =
       opts_.start.empty() ? kInf : is_finite(opts_.start_objective) ? opts_.start_objective : p_.objective(opts_.start);
-  if (!opts_.start.empty() && !try_incumbent(opts_.start, "restart")) {
+  if (!opts_.start.empty() && !try_incumbent(opts_.start, start_source)) {
     external_cutoff_ = std::min(external_cutoff_, start_obj - p_.offset);
     cutoff_.store(prune_threshold(external_cutoff_));
   }
@@ -5660,8 +6474,10 @@ MipResult Search::run() {
     ~FjGuard() { s->fj_finish(); }
   } fj_guard{this};
 
-  // Root node is processed on the calling thread to keep its log ordered.
-  {
+  // Root node is processed on the calling thread to keep its log ordered (not when the start point
+  // solved the problem: trivial_solved).
+  res.root_bound = trivial_lb_ + p_.offset;
+  if (!solved_.load()) {
     Worker w;
     w.lp = root_lp_;
     w.pc = &pc_;
@@ -5693,6 +6509,26 @@ MipResult Search::run() {
         log_.log(1, "Symmetry: no packing orbitope, %.2fs\n", dt_orb);
       }
       if (!g->gens.empty()) root.sym = std::move(g);
+      // The orbitopes' static fixings (orbitopal fixing on the model bounds: the zeros above the diagonal) on the
+      // root LP before the root LP and cut loop, so that its cuts see them (graph20-20-1rand: a 37 x 37 packing
+      // orbitope, 666 zeros; without them the cut loop stayed at -37, the root node's propagation reached -19).
+      // They hold at every node (node propagation derives them again), so the cuts derived with them are valid
+      // for the representatives the search keeps; they are not global bounds, and a restart's problem (its
+      // global bounds plus these cuts) still contains a representative of every optimum.
+      // Opt-in MILP_ORB_ROOT_FIX=1 (Mac, 4 threads: graph20-20-1rand root -19 -> -17.64 but its tree no shorter in one
+      // run, drayage-25-23 2.7 / 5.4 s vs 3.4 / 3.5 s, neos-911970 1.3 / 1.1 vs 2.3 / 1.2 s: not measured broadly).
+      static const bool orb_root_fix = knob("MILP_ORB_ROOT_FIX", 0) > 0;
+      if (orb_root_fix && !orbs_.empty()) {
+        std::vector<double> lb = p_.col_lb, ub = p_.col_ub;
+        std::vector<Index> tight;
+        std::vector<char> ones;
+        bool ok = true;
+        for (const Orbitope& o : orbs_) ok = ok && orbitope_propagate(o, lb, ub, tight, ones);
+        if (ok) {
+          for (Index j : tight) w.lp.set_col_bounds(j, lb[j], ub[j]);
+          log_.log(2, "  orbitopes: %zu static fixings on the root LP\n", tight.size());
+        }
+      }
     }
     Node children[2];
     pool_->set_worker_bound(0, -kInf);
@@ -5709,6 +6545,18 @@ MipResult Search::run() {
       // The first call comes after the initial LP solve: its iterations (the root dive budget).
       std::function<void(const DualSimplex&)> on_lp = [this, lurk](const DualSimplex& lp) {
         if (root_lp0_iters_ < 0) root_lp0_iters_ = lp.iterations();
+        // Sub-MIP job progress after every LP of the cut loop, not only at the root's end: the deterministic
+        // barrier waits for a running job until its progress passes its due point, and a job reporting nothing
+        // until its root was done kept it waiting through the whole root (pk1, 4 threads: 20-70 ms per wait;
+        // waits 2.32 -> 2.23 s alone, 2.08 -> 1.38 s with MILP_DET_JOB_SHARE=1). The final progress is the same,
+        // so the jobs enter where they did.
+        // MILP_DET_ROOT_PROGRESS=0: at the root's end only.
+        static const bool root_progress = knob("MILP_DET_ROOT_PROGRESS", 1) > 0;
+        if (opts_.progress && root_progress) {
+          opts_.progress->fetch_add(lp.iterations() - root_progress_);
+          root_progress_ = lp.iterations();
+        }
+        root_lp_lb_ = std::max(root_lp_lb_, lp.objective());  // optimal LPs only: a global bound
         if (lurk) record_lurking(lp);
       };
       // Reduced-cost fixing between cut rounds against the current cutoff (deterministic: the one at the start).
@@ -5716,10 +6564,61 @@ MipResult Search::run() {
       std::function<double()> cutoff_fn = [this, cutoff0, det = params_.deterministic]() {
         return det ? cutoff0 : cutoff_.load();
       };
-      const CutLoopStats cs = root_cut_loop(p_, w.lp, params_, log_, timer_, incumbent_.load(), &cut_data_,
+      // Stop the cut rounds once the incumbent closes the gap (deterministic: the incumbent at the start).
+      const double inc0 = incumbent_.load();
+      std::function<bool(double)> gap_fn = [this, inc0, det = params_.deterministic](double lb) {
+        return det ? gap_closed_at(lb, inc0) : gap_closed(lb);
+      };
+      // Deterministic mode: the FJ / local-MIP helper's points also enter during a long initial root LP, every
+      // MILP_DET_ROOT_SYNC iterations (default 5000; 0: at the end of the root cut loop only), each release
+      // paying for those iterations at the tree's rate (iterations x rows, MILP_FJ_RATE). Before, the helper
+      // stopped after 1e6 effort units until then (ns1116954: local MIP's point is optimal by the trivial bound,
+      // but the 131k-row root LP took 53 s and the root node the rest of the time limit: no incumbent). The
+      // solve stops once an incumbent meets the trivial bound.
+      static const long long det_root_sync = static_cast<long long>(knob("MILP_DET_ROOT_SYNC", 5000));
+      std::function<bool(long long)> lp_checkpoint;
+      if (fj_sync_ && det_root_sync > 0) {
+        lp_checkpoint = [this](long long) {
+          static const double fj_rate = knob("MILP_FJ_RATE", 1.0);
+          const double t0 = timer_.elapsed();  // statistics only
+          fj_sync(static_cast<long long>(fj_rate * static_cast<double>(det_root_sync) * p_.num_rows()), true);
+          root_fj_wait_ += timer_.elapsed() - t0;
+          ++root_fj_syncs_;
+          return !solved_.load();
+        };
+      }
+      // Objective propagation with clique implications against the cutoff (deterministic: the one at the start)
+      // after the initial LP and between the rounds, whenever the cutoff improved: global fixings, kept in the LP
+      // and published for the root node (gfix_log_; glb_ is set up there). hypothyroid-k1: local MIP finds the
+      // optimum -2851 at 1.3 s, before the initial LP ends; 74 fixings lift the LP from -2902.85 to -2851, while 29
+      // cut rounds took it to -2861.5 in 27 s.
+      std::function<Index(std::vector<double>&, std::vector<double>&, std::vector<Index>&)> fix_fn =
+          [this, cutoff0, det = params_.deterministic](std::vector<double>& lb, std::vector<double>& ub,
+                                                        std::vector<Index>& changed) -> Index {
+        const double co = det ? cutoff0 : cutoff_.load();
+        if (!is_finite(co) || co >= ocl_cut_cutoff_) return 0;
+        std::lock_guard<std::mutex> lk(gfix_mu_);
+        ocl_cut_cutoff_ = co;
+        const Index k = obj_clique_fix(co, lb, ub, changed);
+        for (Index j : changed) {
+          if (!glb_.empty()) glb_[j] = std::max(glb_[j], lb[j]), gub_[j] = std::min(gub_[j], ub[j]);
+          gfix_log_.push_back({j, lb[j], ub[j]});
+        }
+        return k;
+      };
+      const CutLoopStats cs = root_cut_loop(p_, w.lp, params_, log_, timer_, inc0, &cut_data_,
                                             !opts_.sub_mip_heuristics || opts_.no_zerohalf,
                                             use_pool_ ? &dropped : nullptr, on_lp, opts_.stop_flag, cutoff_fn,
-                                            opts_.root_cut_rounds);
+                                            opts_.root_cut_rounds, gap_fn,
+                                            root_lp_race_iters_ + (barrier_equiv() ? root_lp_equiv_iters_ : 0),
+                                            lp_checkpoint, det_root_sync, root_sep_threads(), fix_fn);
+      if (barrier_equiv() && root_barrier_time_ > 0.0 && root_lp_equiv_iters_ == 0 && !params_.deterministic &&
+          cs.resolve_iterations >= 200 && cs.resolve_time > 0.0) {
+        // --lp-method barrier (no simplex raced it): the barrier's time at the rate of the cut rounds' warm
+        // re-solves (wall clock: opportunistic mode only). triptim1: 18.8 s at ~1500 iterations/s.
+        root_lp_equiv_iters_ = static_cast<long long>(root_barrier_time_ * static_cast<double>(cs.resolve_iterations) /
+                                                      cs.resolve_time);
+      }
       if (!debug_sol_.empty()) {
         const SparseMatrix& RR = w.lp.row_matrix();
         for (Index i = p_.num_rows(); i < w.lp.num_rows(); ++i) {
@@ -5733,14 +6632,15 @@ MipResult Search::run() {
         }
       }
       // Root LP and cut loop work (not in lp_iters_) for sub-MIP job progress.
-      if (opts_.progress) opts_.progress->fetch_add(w.lp.iterations());
+      if (opts_.progress) opts_.progress->fetch_add(w.lp.iterations() - root_progress_);
       if (use_pool_) {
         const long long nnz = static_cast<long long>(p_.A.index.size());
         ncp_max_ = static_cast<size_t>(knob("MILP_POOL_MAX", 20000));
         ncp_max_nnz_ = static_cast<long long>(knob("MILP_POOL_NNZ_MULT", 1.0) * static_cast<double>(std::clamp<long long>(10 * nnz, 200000, 4000000)));
         pool_publish(dropped, nullptr);
       }
-      root_cs_before_ = cs.rounds > 0 ? cs.bound_before : w.lp.objective();
+      // The root LP before cuts and before the objective-clique fixings (ROOTSTAT lp=).
+      root_cs_before_ = cs.rounds > 0 || cs.global_fixed > 0 ? cs.bound_before : w.lp.objective();
       root_cs_rounds_ = cs.rounds;
       root_cs_cuts_ = cs.cuts_added;
       if (cs.rounds > 0) {
@@ -5748,9 +6648,13 @@ MipResult Search::run() {
                  p_.display_sense * (cs.bound_before + p_.offset), p_.display_sense * (cs.bound_after + p_.offset));
       }
     }
-    fj_sync(3 * w.lp.iterations() * p_.num_rows());  // deterministic point: FJ results enter before the root node
+    // Deterministic point: FJ results enter before the root node (after syncs during the root LP: those up to
+    // the previous release, as in the tree, so that the root does not wait for the latest one).
+    if (root_fj_syncs_ > 0) log_.log(2, "  root LP: %lld FJ syncs (waited %.2fs)\n", root_fj_syncs_, root_fj_wait_);
+    fj_sync(3 * w.lp.iterations() * p_.num_rows(), root_fj_syncs_ > 0);
     fj_iters_mark_ = lp_iters_.load();
-    int nc = process(w, root, children);
+    // Solved (deterministic mode: an incumbent at the trivial bound from a sync above): the root LP was stopped.
+    int nc = solved_.load() ? 0 : process(w, root, children);
     while (root_redo_ && !stop_.load()) {
       // Root strong branching fixed variables globally: a few cut rounds on the tightened root LP
       // (global bounds only: the root node's reduced-cost fixings are dropped first), then the root
@@ -5767,6 +6671,7 @@ MipResult Search::run() {
         co.tol = params_.tol;
         co.zerohalf = opts_.sub_mip_heuristics && !opts_.no_zerohalf;
         co.stop = opts_.stop_flag;
+        co.threads = root_sep_threads();
         if (is_finite(params_.time_limit)) co.time_limit = timer_.elapsed() + 0.1 * (params_.time_limit - timer_.elapsed());
         std::vector<Cut> dropped;
         const CutLoopStats cs = cut_loop(p_, w.lp, co, log_, timer_, cutoff(w), nullptr, &cut_data_,
@@ -5821,10 +6726,19 @@ MipResult Search::run() {
     }
     res.root_lp_work = root_work(w.lp);
     res.root_time = root_elapsed();
-    res.root_bound = root_bound_ + p_.offset;
+    res.root_bound = std::max(root_bound_.load(), trivial_lb_) + p_.offset;
     res.root_lns_ran = root_lns_ran_;
     res.root_lns_improved = root_lns_improved_;
     for (int k = 0; k < nc; ++k) pool_->push(std::move(children[k]));
+  }
+
+  // A root that ended past the time limit (its heuristics run up to it) starts no restart and no tree: the
+  // workers check the limit after a node, and a node LP of a large model refactorizes before its own check
+  // (ns1116954 deterministic, 2 threads: root RENS to 121.4 s, then a 2 s tree round, 123.4 s in all).
+  if (!stop_.load() && timer_.elapsed() > params_.time_limit) {
+    std::lock_guard<std::mutex> lk(stop_mu_);
+    if (stop_reason_ == Status::Unknown) stop_reason_ = Status::TimeLimit;
+    stop_ = true;
   }
 
   // Root restart: if the root fixed many integer variables globally (reduced-cost fixing, root strong
@@ -5867,9 +6781,37 @@ MipResult Search::run() {
     if (det) {
       run_deterministic();
     } else {
+      // Root heuristics beside the tree (MILP_ROOT_HEUR_ASYNC): H threads run them while the tree starts on
+      // the others, then become tree workers too.
+      const int H = heur_w_ ? async_heur_threads() : 0;
       std::vector<std::thread> threads;
-      for (int t = 0; t < threads_; ++t) threads.emplace_back(inherit_interrupt([this, t] { worker_loop(t); }));
+      for (int t = 0; t < threads_ - H; ++t) threads.emplace_back(inherit_interrupt([this, t] { worker_loop(t); }));
+      std::thread heur;
+      if (H > 0) {
+        log_.log(2, "  root heuristics beside the tree on %d of %d threads\n", H, threads_);
+        heur = std::thread(inherit_interrupt([this, H] {
+          {
+            LocalStopScope scope(&heur_stop_);
+            root_heuristics(*heur_w_, H, heur_t_root_);
+          }
+          log_.log(2, "  root heuristics done at %.2fs, %lld nodes\n", timer_.elapsed(), nodes_.load());
+          // Their incumbents fix columns globally (root reduced-cost fixing): the restart the root would have
+          // made after them, now (worker 0 checks only every 128 of its nodes).
+          check_tree_restart(false);
+          std::vector<std::thread> late;
+          for (int t = threads_ - H + 1; t < threads_; ++t) late.emplace_back(inherit_interrupt([this, t] { worker_loop(t); }));
+          worker_loop(threads_ - H);
+          for (auto& th : late) th.join();
+        }));
+      }
       for (auto& th : threads) th.join();
+      if (heur.joinable()) {
+        heur_stop_ = true;
+        heur.join();
+        res.root_lns_ran = root_lns_ran_;
+        res.root_lns_improved = root_lns_improved_;
+      }
+      heur_w_.reset();
     }
     maybe_log(true);
     log_.log(2, "Tree weight %.6g from %lld leaves (%.6g open), %lld nodes; last size estimate %.3g nodes\n",
@@ -5937,11 +6879,18 @@ MipResult Search::run() {
       log_.log(2, "  objective propagation: %lld nodes, %lld useful, %lld skipped\n", obj_prop_calls_.load(),
                obj_prop_useful_.load(), obj_prop_skipped_.load());
     }
+    if (ocl_calls_ > 0) {
+      log_.log(2, "  objective cliques: %lld calls, %lld columns fixed, %.3fs\n", ocl_calls_, ocl_fixed_, ocl_time_);
+    }
     if (sb_probes_.load() > 0) {
       log_.log(1, "Strong branching: %lld probes, %lld LP iterations (%.1f%% of all)\n", sb_probes_.load(), sb_iters_.load(),
                100.0 * static_cast<double>(sb_iters_.load()) / static_cast<double>(std::max(1LL, lp_iters_.load())));
       if (sb_pl_stops_.load() > 0) log_.log(1, "Strong branching: %lld early stops (probabilistic lookahead)\n", sb_pl_stops_.load());
       if (sb_aps_nodes_.load() > 0) log_.log(1, "Branching: %lld nodes scored with ancestral pseudocosts\n", sb_aps_nodes_.load());
+      if (sb_flat_nodes_.load() > 0) {
+        log_.log(2, "Branching: %lld of %lld nodes without pseudocost gains (conflict / inference scores)\n",
+                 sb_flat_nodes_.load(), sb_calls_.load());
+      }
     }
     if (tdive_calls_.load() + hsub_calls_.load() > 0) {
       // Sub-MIP iterations are not part of the search's LP iterations (shares relative to them).
@@ -5953,6 +6902,21 @@ MipResult Search::run() {
                100.0 * static_cast<double>(tdive_iters_.load()) / all, hsub_calls_.load(), hsub_wins_.load(),
                hsub_iters_.load(), 100.0 * static_cast<double>(hsub_iters_.load()) / all, hsub_dive_iters_.load(),
                hsub_dive_wins_.load(), hsub_fp_runs_.load(), hsub_fp_iters_.load(), hsub_fp_wins_.load());
+    }
+    if (zi_calls_.load() > 0) {
+      log_.log(2, "  ZI rounding: %lld calls, %lld feasible points, %lld improved\n", zi_calls_.load(), zi_found_.load(),
+               zi_wins_.load());
+    }
+    if (alns_ && hsub_calls_.load() > 0) {
+      static const char* const kArm[kLns] = {"RINS", "mutation", "local branching", "RENS", "crossover", "proximity",
+                                             "graph mutation"};
+      log_.log(1, "ALNS sub-MIPs (calls / better point / LP iterations):");
+      for (int k = 0; k < kLns; ++k) {
+        if (arm_calls_[k].load() > 0) {
+          log_.log(1, " %s %lld / %lld / %lld;", kArm[k], arm_calls_[k].load(), arm_found_[k].load(), arm_iters_[k].load());
+        }
+      }
+      log_.log(1, "\n");
     }
     if (sb_fixed_.load() + sb_degen_skips_.load() > 0) {
       log_.log(2, "  strong branching: %lld domain reductions (one child cut off), %lld of %lld branchings without "
@@ -6012,6 +6976,23 @@ MipResult Search::run() {
     if (orb_fixed_.load() > 0 || orb_pruned_.load() > 0) {
       log_.log(1, "Orbitopes: %lld fixings, %lld nodes pruned\n", orb_fixed_.load(), orb_pruned_.load());
     }
+    if (safe_checks_.load() > 0) {
+      log_.log(safe_below_.load() > 0 ? 1 : 2, "Safe dual bounds: %lld LPs checked, %lld below the LP objective, %.3f s\n",
+               safe_checks_.load(), safe_below_.load(), 1e-9 * static_cast<double>(safe_ns_.load()));
+    }
+    const DualSimplex::CheckCounts ck = DualSimplex::check_counts();
+    if (ck.farkas_checked > checks0_.farkas_checked) {
+      const long long failed = ck.farkas_failed - checks0_.farkas_failed;
+      const long long retried = ck.farkas_retried_ok - checks0_.farkas_retried_ok;
+      log_.log(failed + retried > 0 ? 1 : 2,
+               "Farkas proofs: %lld infeasible LPs checked, %lld failed, %lld passed after a refactorization\n",
+               ck.farkas_checked - checks0_.farkas_checked, failed, retried);
+    }
+    if (ck.unscaled_solves > checks0_.unscaled_solves) {
+      const long long its = ck.unscaled_iterations - checks0_.unscaled_iterations;
+      log_.log(1, "Unscaled dual feasibility: %lld LP solves continued, %lld iterations\n",
+               ck.unscaled_solves - checks0_.unscaled_solves, its);
+    }
     if (lp_failed_.load() > 0 || lp_unsolved_.load() > 0) {
       log_.log(1, "Node LP failures: %lld, recovered %lld, branched without LP %lld, all-integers-fixed re-solves %lld\n",
                lp_failed_.load(), lp_recovered_.load(), lp_unsolved_.load(), fixed_recovered_.load());
@@ -6063,22 +7044,36 @@ MipResult Search::run() {
   if (res.has_solution) {
     res.x = inc_x_;
     res.objective = inc + p_.offset;
+    final_polish(res);
   }
-  double lb = std::min(pool_->lower_bound(), inc);
+  // The root LP bound holds for the whole problem, also when the search stopped before the root node's
+  // children reached the pool (cut loop, root node LP or heuristics at the time limit: the trivial bound was
+  // reported then, triptim1 -2.039 instead of 22.8681). Above the incumbent only through reductions against it:
+  // capped by the incumbent below.
+  static const bool root_floor = knob("MILP_ROOT_BOUND_FLOOR", 1) > 0;  // 0: the trivial bound only (as before)
+  const double floor_lb = root_floor ? std::max({trivial_lb_, root_lp_lb_, root_bound_.load()}) : trivial_lb_;
+  double lb = std::max(std::min(pool_->lower_bound(), inc), floor_lb);
   if (root_unbounded_) {
     res.status = res.has_solution ? Status::Unbounded : Status::InfeasibleOrUnbounded;
     res.bound = -kInf;
     return res;
   }
-  if (stop_reason_ == Status::TimeLimit || stop_reason_ == Status::NodeLimit || stop_reason_ == Status::MemoryLimit ||
-      stop_reason_ == Status::Interrupted || stop_reason_ == Status::IterationLimit) {
+  if (sol_limit_hit_.load() && stop_reason_ == Status::Unknown) stop_reason_ = Status::Interrupted;
+  if (solved_.load()) {
+    // An incumbent met the trivial bound: optimal, whatever stopped the search meanwhile (the root LP
+    // interrupted by solved_stop_ reports a time limit), and no restart.
+    res.status = Status::Optimal;
+    res.restart = false;
+  } else if (stop_reason_ == Status::TimeLimit || stop_reason_ == Status::NodeLimit || stop_reason_ == Status::MemoryLimit ||
+             stop_reason_ == Status::Interrupted || stop_reason_ == Status::IterationLimit) {
     res.status = stop_reason_;
   } else {
     res.status = res.has_solution ? Status::Optimal : Status::Infeasible;
     if (!res.has_solution) lb = kInf;
   }
-  if (lost_bound_ < lb) {
-    lb = lost_bound_;
+  // The trivial bound and the root LP bound hold in dropped subtrees too.
+  if (const double lost = std::max(lost_bound_, floor_lb); lost < lb) {
+    lb = lost;
     if (res.status == Status::Optimal && !gap_closed(lb)) res.status = Status::NumericalError;
     if (res.status == Status::Infeasible) res.status = Status::NumericalError;
   }

@@ -879,3 +879,122 @@ TEST(qp_maros_meszaros_samples) {
   }
   CHECK(solve(read_mps(dir + "VALUES.mps"), quiet()).status == Status::NonConvex);
 }
+
+namespace {
+
+void set_env(const char* name, const char* value) {
+#ifdef _WIN32
+  _putenv_s(name, value ? value : "");
+#else
+  if (value) setenv(name, value, 1);
+  else unsetenv(name);
+#endif
+}
+
+}  // namespace
+
+// Separable convex objectives on integer columns (1/2 q_j x_j^2 + c x on general integers, free integers and
+// binaries, both senses) are solved as a MILP with tangent rows (solver.cpp, solve_square_milp); the MIQP
+// search (MILP_SQ_MILP=0) must agree, also with one-wide tangent windows around 0 (MILP_SQ_WINDOW=1,
+// MILP_SQ_CENTER=0: several tangent rounds).
+TEST(square_milp_matches_miqp) {
+  std::mt19937 rng(11);
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  int checked = 0, infeasible = 0;
+  for (int trial = 0; trial < 40; ++trial) {
+    const bool maximize = trial % 4 == 3;
+    ModelBuilder b;
+    const Index n = static_cast<Index>(uni(4, 8));
+    for (Index j = 0; j < n; ++j) {
+      const int kind = uni(0, 5);
+      const std::string name = "x" + std::to_string(j);
+      if (kind == 0) b.add_col(name, uni(-20, 20), 0.0, 1.0, VarType::Binary);
+      else if (kind == 1) b.add_col(name, uni(-20, 20), -kInf, kInf, VarType::Integer);
+      else b.add_col(name, uni(-20, 20), -uni(0, 15), uni(0, 25), VarType::Integer);
+    }
+    const int m = uni(1, 3);
+    for (int i = 0; i < m; ++i) {
+      const Index r = b.add_row("r" + std::to_string(i), -uni(0, 30), uni(0, 30));
+      for (Index j = 0; j < n; ++j) {
+        if (uni(0, 2) > 0) b.add_coef(r, j, uni(-3, 3));
+      }
+    }
+    Model md = b.build();
+    md.sense = maximize ? ObjSense::Maximize : ObjSense::Minimize;
+    for (Index j = 0; j < n; ++j) md.add_q(j, j, (maximize ? -1.0 : 1.0) * uni(1, 4));
+    SolverParams p = quiet();
+    p.mip_rel_gap = 0.0;
+    p.mip_abs_gap = 1e-9;
+    const SolveResult a = solve(md, p);
+    set_env("MILP_SQ_MILP", "0");
+    const SolveResult c = solve(md, p);
+    set_env("MILP_SQ_MILP", nullptr);
+    set_env("MILP_SQ_WINDOW", "1");
+    set_env("MILP_SQ_CENTER", "0");
+    const SolveResult w = solve(md, p);
+    set_env("MILP_SQ_WINDOW", nullptr);
+    set_env("MILP_SQ_CENTER", nullptr);
+    if (!CHECK(a.status == c.status) || !CHECK(w.status == c.status)) {
+      std::printf("  trial %d: %s (tangent MILP) / %s (window 1) vs %s (MIQP)\n", trial, to_string(a.status),
+                  to_string(w.status), to_string(c.status));
+      continue;
+    }
+    if (c.status == Status::Infeasible) {
+      ++infeasible;
+      continue;
+    }
+    if (c.status != Status::Optimal) continue;
+    ++checked;
+    for (const SolveResult* s : {&a, &w}) {
+      CHECK(md.violation(s->x).max() <= 1e-6);
+      CHECK_NEAR(s->objective, c.objective, 1e-6 * (1.0 + std::abs(c.objective)));
+      CHECK_NEAR(s->objective, md.objective_value(s->x), 1e-9 * (1.0 + std::abs(s->objective)));
+      CHECK_NEAR(s->bound, s->objective, 1e-6 * (1.0 + std::abs(s->objective)));
+    }
+  }
+  CHECK(checked >= 20);
+  if (std::getenv("MILP_TEST_VERBOSE")) std::printf("  square MILP: %d optimal, %d infeasible\n", checked, infeasible);
+}
+
+// Squared errors declared continuous but implied integer (e_p = sum_f x[f,p] - T_p over integer x): the
+// tangent MILP route still applies, with the same optimum as for integer errors and as the MIQP search.
+TEST(square_milp_implied_integer_errors) {
+  for (int trial = 0; trial < 10; ++trial) {
+    double obj[3] = {0.0, 0.0, 0.0};
+    for (int variant = 0; variant < 3; ++variant) {  // integer errors, continuous errors, continuous + MIQP search
+      std::mt19937 r2(static_cast<unsigned>(100 + trial));
+      auto u2 = [&](int lo, int hi) { return lo + static_cast<int>(r2() % static_cast<unsigned>(hi - lo + 1)); };
+      ModelBuilder b;
+      const int plants = u2(2, 4), products = u2(3, 6);
+      std::vector<std::vector<Index>> x(plants, std::vector<Index>(products));
+      for (int f = 0; f < plants; ++f) {
+        const Index cap = b.add_row("cap" + std::to_string(f), -kInf, u2(10, 40));
+        for (int p = 0; p < products; ++p) {
+          x[f][p] = b.add_col("x" + std::to_string(f) + "_" + std::to_string(p), 0, 0, u2(5, 20), VarType::Integer);
+          b.add_coef(cap, x[f][p], u2(1, 4));
+        }
+      }
+      std::vector<Index> e(products);
+      for (int p = 0; p < products; ++p) {
+        e[p] = b.add_col("e" + std::to_string(p), 0, -kInf, kInf, variant == 0 ? VarType::Integer : VarType::Continuous);
+        const double target = u2(5, 40);
+        const Index r = b.add_row("t" + std::to_string(p), target, target);
+        for (int f = 0; f < plants; ++f) b.add_coef(r, x[f][p], 1.0);
+        b.add_coef(r, e[p], -1.0);
+      }
+      Model md = b.build();
+      for (int p = 0; p < products; ++p) md.add_q(e[p], e[p], 2.0);
+      SolverParams prm = quiet();
+      prm.mip_rel_gap = 0.0;
+      prm.mip_abs_gap = 1e-9;
+      if (variant == 2) set_env("MILP_SQ_MILP", "0");
+      const SolveResult s = solve(md, prm);
+      if (variant == 2) set_env("MILP_SQ_MILP", nullptr);
+      REQUIRE(s.status == Status::Optimal);
+      CHECK(md.violation(s.x).max() <= 1e-6);
+      obj[variant] = s.objective;
+    }
+    CHECK_NEAR(obj[1], obj[0], 1e-6 * (1.0 + std::abs(obj[0])));
+    CHECK_NEAR(obj[2], obj[0], 1e-6 * (1.0 + std::abs(obj[0])));
+  }
+}

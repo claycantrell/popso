@@ -3,6 +3,7 @@
 // with a small branch-and-bound (no recursive sub-MIPs).
 
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "milp/lp/simplex.hpp"
@@ -29,6 +30,12 @@ struct SubMipLimits {
   std::atomic<long long>* progress = nullptr;  // optional: LP iterations so far are added here
   long long iteration_limit = -1;  // LP iterations per sub-MIP solve (-1: none); deterministic, unlike time
   int mem_limit_mb = 256;          // search memory cap of the sub-MIP
+  int solution_limit = 0;          // stop after this many incumbents of the sub-MIP (0: none)
+  // Fixing neighbourhoods searched before: the sub-MIP's integer bounds are hashed into *fingerprint, and
+  // one whose hash is in *skip is not solved (no solve counted). Only for neighbourhoods of p itself with
+  // a cutoff that does not grow (an exhausted one holds no better point later either).
+  std::uint64_t* fingerprint = nullptr;
+  const std::vector<std::uint64_t>* skip = nullptr;
 };
 
 // Solves p restricted to column bounds [lb, ub]. Returns true if a solution
@@ -84,6 +91,14 @@ bool repair(const MipProblem& p, const std::vector<double>& x, double cutoff, co
 // fixed already) to their incumbent values.
 bool mutation(const MipProblem& p, const std::vector<double>& incumbent, double fix_fraction, unsigned seed,
               double cutoff, const SubMipLimits& limits, std::vector<double>& sol);
+
+// Graph-induced mutation (GINS, SCIP 4.0; the generic fixing order of adaptive LNS, Hendel, MPC 14
+// (2022)): leave free the 1 - `fix_fraction` of the (not fixed) integer variables closest to a random
+// integer variable (`seed`) in the variable-row graph (breadth first, rows in index order; rows with
+// more than `max_row` entries are not followed, a new random start is taken when the reachable part
+// is used up), fix the others at their incumbent values.
+bool graph_mutation(const MipProblem& p, const std::vector<double>& incumbent, double fix_fraction, unsigned seed,
+                    double cutoff, const SubMipLimits& limits, std::vector<double>& sol, Index max_row = 0);
 
 // Crossover: fix the integer variables on which all the given feasible points agree (their
 // common value); the others keep their bounds. Needs at least two points.

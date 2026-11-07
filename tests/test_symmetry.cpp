@@ -885,6 +885,74 @@ TEST(sst_rows_keep_the_optimum) {
   CHECK(fixed >= 10);
 }
 
+TEST(sst_continuous_leaders_keep_the_optimum) {
+  // SST rows with continuous leaders (SstOptions::mode 3, MILP_SST_CONT): k identical items, each a
+  // binary y_i (open) and a continuous x_i <= U y_i, a demand sum x_i >= D and pair rows
+  // x_i + x_j <= P (the item permutations stay symmetries). Rows only between non-binary columns
+  // of one orbit; solves with and without them agree (optimal value, or infeasible).
+  std::mt19937 rng(29);
+  int with_rows = 0, checked = 0;
+  for (int t = 0; t < scaled(16); ++t) {
+    const int k = 3 + static_cast<int>(rng() % 3);
+    const double U = 4.0 + rng() % 4, P = U + rng() % 3, F = 1.0 + rng() % 5, c = 0.5 * (1 + rng() % 3);
+    const double D = 0.5 * (1 + rng() % static_cast<unsigned>(2 * k * U));  // above k U / 2 often infeasible
+    ModelBuilder b;
+    std::vector<Index> y(k), x(k);
+    for (int i = 0; i < k; ++i) {
+      y[i] = b.add_col("y" + std::to_string(i), F, 0, 1, VarType::Binary);
+      x[i] = b.add_col("x" + std::to_string(i), c, 0, U, VarType::Continuous);
+      const Index r = b.add_row("link" + std::to_string(i), -kInf, 0);
+      b.add_coef(r, x[i], 1);
+      b.add_coef(r, y[i], -U);
+    }
+    const Index d = b.add_row("demand", D, kInf);
+    for (int i = 0; i < k; ++i) b.add_coef(d, x[i], 1);
+    for (int i = 0; i < k; ++i) {
+      for (int j = i + 1; j < k; ++j) {
+        const Index r = b.add_row("pair" + std::to_string(i) + "_" + std::to_string(j), -kInf, P);
+        b.add_coef(r, x[i], 1);
+        b.add_coef(r, x[j], 1);
+      }
+    }
+    const Model m = b.build();
+    const MipProblem p = to_problem(m);
+    const Symmetry s = detect_symmetry(p);
+    CHECK(all_generators_valid(p, s));
+    SstOptions o;
+    o.mode = 3;
+    o.seed = static_cast<uint64_t>(t);
+    const SstResult r = sst_reductions(p, s, {}, o);
+    CHECK(r.fixed_zero.empty());
+    for (const auto& [l, f] : r.rows) {
+      CHECK(l != f && !p.is_int[l] && !p.is_int[f]);
+      CHECK(p.cost[l] == p.cost[f] && p.col_lb[l] == p.col_lb[f] && p.col_ub[l] == p.col_ub[f]);
+    }
+    with_rows += !r.rows.empty();
+    double obj[2] = {0.0, 0.0};
+    Status st[2] = {Status::Unknown, Status::Unknown};
+    for (int v = 0; v < 2; ++v) {
+      set_env_value("MILP_SST_CONT", v == 1 ? "1" : "0");
+      SolverParams sp;
+      sp.verbosity = 0;
+      sp.threads = 1 + v;
+      sp.time_limit = 5;
+      sp.mip_rel_gap = 0.0;
+      sp.mip_abs_gap = 1e-9;
+      const SolveResult res = solve(m, sp);
+      st[v] = res.status;
+      obj[v] = res.objective;
+      if (res.status == Status::Optimal) CHECK(m.violation(res.x).max() <= 1e-6);
+    }
+    set_env("MILP_SST_CONT", false);
+    CHECK(st[0] == Status::Optimal || st[0] == Status::Infeasible);
+    CHECK(st[0] == st[1]);
+    if (st[0] == Status::Optimal && st[1] == Status::Optimal) CHECK_NEAR(obj[0], obj[1], 1e-6);
+    ++checked;
+  }
+  CHECK(with_rows >= scaled(16) / 2);
+  CHECK(checked == scaled(16));
+}
+
 TEST(symmetry_solves_match_enumeration) {
   // End to end with all symmetry handling (SST rows, orbitopal fixing, orbital branching) against
   // enumeration, opportunistic with 1 / 3 threads and deterministic with 2.

@@ -1,8 +1,13 @@
 // Tests for the MPS reader and writer.
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "milp/io/mps_reader.hpp"
 #include "test_framework.hpp"
@@ -480,6 +485,17 @@ void check_same_model(const Model& a, const Model& b) {
   CHECK(a.A.value == b.A.value);
 }
 
+// Uniform in [-1, 1) with 53 random bits, the same on every standard library.
+double signed_unit(std::mt19937_64& rng) { return static_cast<double>(rng() >> 10) * 0x1.0p-53 - 1.0; }
+
+Model one_row(double lo, double hi) {
+  ModelBuilder mb;
+  mb.add_col("x", 1, 0, 1);
+  const Index r = mb.add_row("r", lo, hi);
+  mb.add_coef(r, 0, 1.0);
+  return mb.build();
+}
+
 }  // namespace
 
 TEST(mps_write_read_roundtrip) {
@@ -541,4 +557,38 @@ TEST(mps_write_sanitizes_names) {
   CHECK_EQ(back.row_names[0], "OBJ");
   CHECK_EQ(back.num_rows(), 1);
   CHECK(back.obj == m.obj);
+}
+
+// The writer's ranged rows: both sides exact whenever some MPS range gives them (nearly all pairs
+// here), else within an ulp of the larger side, and counted.
+TEST(mps_ranged_rows_exact) {
+  std::mt19937_64 rng(13);
+  int total = 0, exact_count = 0;
+  for (int t = 0; t < 4000; ++t) {
+    double lo = std::ldexp(signed_unit(rng), static_cast<int>(rng() % 40) - 20);
+    double hi = std::ldexp(signed_unit(rng), static_cast<int>(rng() % 40) - 20);
+    if (lo > hi) std::swap(lo, hi);
+    if (!(lo < hi)) continue;
+    Index inexact = -1;
+    const Model b = read_mps_string(write_mps_string(one_row(lo, hi), &inexact));
+    const bool exact = b.row_lb[0] == lo && b.row_ub[0] == hi;
+    CHECK(exact == (inexact == 0));
+    const double big = std::max(std::abs(lo), std::abs(hi));
+    const double ulp = std::nextafter(big, kInf) - big;
+    CHECK(std::abs(b.row_lb[0] - lo) <= ulp);
+    CHECK(std::abs(b.row_ub[0] - hi) <= ulp);
+    // Same sign within a factor of 2: hi - lo is exact, and so is the old G row.
+    if (lo > 0.0 && hi <= 2.0 * lo) CHECK(exact);
+    ++total;
+    exact_count += exact;
+  }
+  CHECK(exact_count >= total * 95 / 100);  // 97.5% with these magnitudes and signs
+  // Pairs the old writer (G row, R = hi - lo) got wrong.
+  for (const auto& [lo, hi] : std::vector<std::pair<double, double>>{{-5.0, -1.8}, {-5.0, -0.3}, {-5.0, -0.1}}) {
+    CHECK(lo + (hi - lo) != hi);
+    Index inexact = -1;
+    const Model b = read_mps_string(write_mps_string(one_row(lo, hi), &inexact));
+    CHECK(inexact == 0);
+    CHECK(b.row_lb[0] == lo && b.row_ub[0] == hi);
+  }
 }

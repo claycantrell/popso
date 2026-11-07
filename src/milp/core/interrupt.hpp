@@ -11,6 +11,10 @@
 //
 // The flag is per solve (thread-local pointer), so separate models solved concurrently in
 // different threads do not interrupt each other.
+//
+// A third flag belongs to the running branch-and-bound search (SearchStopScope): the search sets it
+// once it has solved the problem (an incumbent meets the trivial objective bound), which stops the
+// LPs, cut loop and heuristics still running for it the same way.
 
 #include <atomic>
 #include <chrono>
@@ -19,10 +23,13 @@ namespace milp {
 
 namespace detail {
 // The current thread's stop state: up to two interrupt flags (solve() combines the caller's flag
-// with its own, which the incumbent callback sets) and a deadline (see DeadlineScope).
+// with its own, which the incumbent callback sets), the search's flag (see SearchStopScope) and a
+// deadline (see DeadlineScope).
 struct InterruptState {
   const std::atomic<bool>* flag = nullptr;
   const std::atomic<bool>* flag2 = nullptr;
+  const std::atomic<bool>* search = nullptr;
+  const std::atomic<bool>* local = nullptr;  // see LocalStopScope
   std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
 };
 inline thread_local InterruptState t_interrupt;
@@ -33,7 +40,9 @@ inline thread_local InterruptState t_interrupt;
 inline bool interrupted() {
   const detail::InterruptState& s = detail::t_interrupt;
   return (s.flag != nullptr && s.flag->load(std::memory_order_relaxed)) ||
-         (s.flag2 != nullptr && s.flag2->load(std::memory_order_relaxed));
+         (s.flag2 != nullptr && s.flag2->load(std::memory_order_relaxed)) ||
+         (s.search != nullptr && s.search->load(std::memory_order_relaxed)) ||
+         (s.local != nullptr && s.local->load(std::memory_order_relaxed));
 }
 
 // True once the current deadline (DeadlineScope) has passed; reads the clock only when a deadline
@@ -48,7 +57,7 @@ inline bool deadline_passed() {
 inline bool interrupted_or_expired() { return interrupted() || deadline_passed(); }
 
 // Makes `flag` (and `flag2`, if any) the current thread's interrupt flags for the scope's
-// lifetime. The deadline is kept.
+// lifetime. The search flag and the deadline are kept.
 class InterruptScope {
  public:
   explicit InterruptScope(const std::atomic<bool>* flag, const std::atomic<bool>* flag2 = nullptr)
@@ -62,6 +71,38 @@ class InterruptScope {
 
  private:
   detail::InterruptState saved_;
+};
+
+// Makes `flag` the current thread's search flag for the scope's lifetime, unless one is set already
+// (a search inside another one, e.g. a sub-MIP, keeps the outer search's flag, which stops it too).
+// The other flags and the deadline are kept.
+class SearchStopScope {
+ public:
+  explicit SearchStopScope(const std::atomic<bool>* flag) : saved_(detail::t_interrupt.search) {
+    if (saved_ == nullptr) detail::t_interrupt.search = flag;
+  }
+  ~SearchStopScope() { detail::t_interrupt.search = saved_; }
+  SearchStopScope(const SearchStopScope&) = delete;
+  SearchStopScope& operator=(const SearchStopScope&) = delete;
+
+ private:
+  const std::atomic<bool>* saved_;
+};
+
+// Makes `flag` the current thread's local stop flag for the scope's lifetime (also inside a search
+// that has a search flag already): stops work a search runs beside its tree (the root heuristics in
+// the background) once the tree has ended. The other flags and the deadline are kept.
+class LocalStopScope {
+ public:
+  explicit LocalStopScope(const std::atomic<bool>* flag) : saved_(detail::t_interrupt.local) {
+    detail::t_interrupt.local = flag;
+  }
+  ~LocalStopScope() { detail::t_interrupt.local = saved_; }
+  LocalStopScope(const LocalStopScope&) = delete;
+  LocalStopScope& operator=(const LocalStopScope&) = delete;
+
+ private:
+  const std::atomic<bool>* saved_;
 };
 
 // Sets the current thread's deadline to `seconds` from now (no later than an enclosing one; an

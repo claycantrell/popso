@@ -104,7 +104,11 @@ class Miqp {
     return !is_finite(inc_obj_) || obj < inc_obj_ - 1e-9 * std::max(1.0, std::abs(inc_obj_));
   }
   double cutoff() const;  // nodes with a bound >= this are pruned
-  void qp_dive(std::vector<double> lb, std::vector<double> ub, std::vector<double> x, WarmPtr warm, int max_solves);
+  // At most max_solves relaxations and max(2 s, 3 x the root relaxation's time) (dive_secs_): on large models a
+  // relaxation is a barrier solve of seconds (a user's 50k x 83k MIQP: 5-12 s each, 200 in the root dive).
+  void qp_dive(std::vector<double> lb, std::vector<double> ub, std::vector<double> x, WarmPtr warm, int max_solves,
+               const char* what);
+  double dive_secs_ = kInf;
   void run_fj(const std::vector<double>& xroot);  // xroot empty: feasibility only
   void simple_rounding(const std::vector<double>& x);
   bool limits_hit();
@@ -277,6 +281,7 @@ bool Miqp::try_point(const std::vector<double>& x_in, const char* source, const 
   inc_obj_ = obj;
   inc_x_ = std::move(x);
   log_.log(2, "MIQP: new incumbent %.10g (%s) at node %lld, %.2fs\n", display(obj), source, nodes_, timer_.elapsed());
+  if (opt_.on_trace) opt_.on_trace(display(obj), source, timer_.elapsed());
   return true;
 }
 
@@ -289,10 +294,21 @@ void Miqp::simple_rounding(const std::vector<double>& x) {
 }
 
 void Miqp::qp_dive(std::vector<double> lb, std::vector<double> ub, std::vector<double> x, WarmPtr warm,
-                   int max_solves) {
+                   int max_solves, const char* what) {
   const Index n = p_.num_cols();
   int solves = 0;
-  while (solves < max_solves && !limits_hit()) {
+  const double t0 = timer_.elapsed();
+  struct DiveLog {
+    const Miqp& s;
+    const char* what;
+    const int& solves;
+    double t0;
+    ~DiveLog() {
+      const double dt = s.timer_.elapsed() - t0;
+      s.log_.log(dt >= 1.0 ? 1 : 2, "MIQP: %s: %d relaxations, %.2fs\n", what, solves, dt);
+    }
+  } dive_log{*this, what, solves, t0};
+  while (solves < max_solves && !limits_hit() && timer_.elapsed() - t0 < dive_secs_) {
     // Least fractional unfixed integer column; integral ones are fixed along with it.
     Index best = -1;
     double best_f = kInf;
@@ -492,7 +508,8 @@ MiqpResult Miqp::run() {
   if (!has_cont_) simple_rounding(root.x);
   if (has_cont_) try_point(root.x, "rounding", rootq.warm);
   if (!limits_hit()) run_fj(root.x);
-  if (!limits_hit()) qp_dive(rlb, rub, root.x, nullptr, std::min<int>(200, 2 * nint + 2));
+  dive_secs_ = std::max(2.0, 3.0 * timer_.elapsed());
+  if (!limits_hit()) qp_dive(rlb, rub, root.x, nullptr, std::min<int>(200, 2 * nint + 2), "root dive");
   if (is_finite(inc_obj_)) {
     log_.log(1, "MIQP: root heuristics: incumbent %.10g (%.2fs)\n", display(inc_obj_), timer_.elapsed());
   }
@@ -861,7 +878,7 @@ MiqpResult Miqp::run() {
     if (!has_cont_) simple_rounding(x);
     if (nodes_ >= next_dive && !limits_hit()) {
       next_dive = 2 * nodes_ + 50;
-      qp_dive(lb, ub, x, warm, std::min<int>(100, nint + 2));
+      qp_dive(lb, ub, x, warm, std::min<int>(100, nint + 2), "dive");
       if (node_bound >= cutoff()) {
         have_cur = false;
         continue;

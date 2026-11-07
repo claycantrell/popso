@@ -132,6 +132,7 @@ class LocalMip {
     while (effort_ < lim_.effort) {
       if (effort_ >= next_check) {
         next_check = effort_ + 100000;
+        if (pending_ && effort_ - last_report_ >= lim_.report_effort) report(on_solution);
         if ((lim_.stop && lim_.stop->load(std::memory_order_relaxed)) || interrupted()) break;
         if (lim_.checkpoint && !lim_.checkpoint(effort_)) break;
         if (lim_.time_limit < kInf &&
@@ -178,6 +179,7 @@ class LocalMip {
     // Budget used in the middle of a chain of lift moves: report the point reached.
     const bool stopped = (lim_.stop && lim_.stop->load(std::memory_order_relaxed)) || interrupted();
     if (!stopped && found_ && unsat_.empty() && obj_ <= obj_bound_) new_best(on_solution);
+    if (pending_) report(on_solution);
     if (stats) {
       stats->effort = effort_;
       stats->steps = step_;
@@ -556,10 +558,18 @@ class LocalMip {
     if (obj < lim_.cutoff) {
       if (first_effort_ < 0) first_effort_ = effort_;
       ++solutions_;
-      on_solution(x_, obj);
+      pending_ = true;
+      if (lim_.report_effort <= 0 || last_report_ < 0 || effort_ - last_report_ >= lim_.report_effort) report(on_solution);
       return 1;
     }
     return 0;
+  }
+
+  // Reports the best point (a new best not reported yet).
+  void report(const std::function<void(const std::vector<double>&, double)>& on_solution) {
+    pending_ = false;
+    last_report_ = effort_;
+    on_solution(best_x_, best_obj_);
   }
 
   void restart() {
@@ -616,6 +626,8 @@ class LocalMip {
   // counters
   long long effort_ = 0, step_ = 0, last_improve_ = 0, lifts_ = 0, restarts_ = 0, min_unsat_ = 0;
   long long moves_since_refresh_ = 0, first_effort_ = -1;
+  long long last_report_ = -1;  // effort at the last report (LocalMipLimits::report_effort)
+  bool pending_ = false;        // a better point than the last reported one
   int solutions_ = 0;
 };
 

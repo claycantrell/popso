@@ -150,6 +150,11 @@ CONFIG = [
     ("miqprand", "large", 1, dict(n=60, m=30)),
     ("miqpport", "hard", 1, dict(n=200, K=12, risk=40.0)),
     ("miqprand", "hard", 1, dict(n=70, m=35)),
+    ("sqtrack", "tiny", 1, dict(products=4, plants=3)),
+    ("sqtrack", "small", 1, dict(products=15, plants=6)),
+    ("sqtrack", "medium", 1, dict(products=40, plants=12)),
+    ("sqtrack", "large", 1, dict(products=120, plants=30)),
+    ("sqtrack", "hard", 1, dict(products=265, plants=60)),
 ]
 
 

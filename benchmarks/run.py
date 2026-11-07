@@ -46,6 +46,8 @@ sys.path.insert(0, str(BENCH))
 
 from lib import mps  # noqa: E402
 from lib.proc import kill_all, run_capped  # noqa: E402
+from lib import primal  # noqa: E402
+import slots  # noqa: E402
 from lib.solfile import (INF_OR_UNBD, INFEASIBLE, OPTIMAL, TIMELIMIT,  # noqa: E402
                          UNBOUNDED, read_sol)
 
@@ -333,9 +335,15 @@ def run_one(path, args, solver_cmd, tmpdir, refs):
         cmd += ["--gap", f"{args.gap:g}"]
     if args.mem_limit and not args.no_solver_mem_flag:
         cmd += ["--mem-limit", str(args.mem_limit)]
+    prof_path = tmpdir / f"{name}.profile.json"
+    if args.trace:
+        if prof_path.exists():
+            prof_path.unlink()
+        cmd += ["--profile", str(prof_path)]
     log_path = tmpdir / f"{name}.log"
     grace = max(10.0, 0.2 * args.time_limit)
-    with open(log_path, "wb") as log:
+    # POPSO_SLOTS: wait for the run's threads and memory in the shared pool first (slots.py), outside the timing.
+    with slots.slot(args.threads, args.mem_limit or 0), open(log_path, "wb") as log:
         # RSS watchdog: kill at 125% of the limit given to the solver
         rc, reason, wall, peak = run_capped(cmd, args.time_limit + grace,
                                             args.mem_limit * 1.25 if args.mem_limit else None,
@@ -352,6 +360,16 @@ def run_one(path, args, solver_cmd, tmpdir, refs):
         stt = ref["times"].get("scip")
         if stt:
             rec["ref_scip_time"], rec["ref_scip_status"] = stt
+    if args.trace and prof_path.exists():
+        # popso --profile: the incumbents over time, and the primal integral against the reference objective
+        try:
+            pts = primal.trace_points(json.loads(prof_path.read_text())["run"]["incumbents"])
+            rec["incumbents"] = pts
+            pi = primal.integral(pts, rec.get("ref_objective"), args.time_limit)
+            if pi is not None:
+                rec["primal_integral"] = pi
+        except (OSError, ValueError, KeyError):
+            pass
     if reason == "timeout":
         rec.update({"class": ERROR, "message": f"killed after {wall:.1f}s (time limit not respected)"})
         return rec
@@ -385,6 +403,15 @@ def run_one(path, args, solver_cmd, tmpdir, refs):
         m = re.search(r"^Restarts: (\d+) root, (\d+) in-tree$", text, re.M)
         if m:
             rec["restarts"], rec["tree_restarts"] = int(m.group(1)), int(m.group(2))
+        m = re.search(r"^Safe dual bounds: (\d+) LPs checked, (\d+) below", text, re.M)
+        if m:  # printed at verbosity 1 when a safe bound was below its LP objective
+            rec["safe_checks"], rec["safe_below"] = int(m.group(1)), int(m.group(2))
+        m = re.search(r"^Farkas proofs: (\d+) infeasible LPs checked, (\d+) failed, (\d+) passed", text, re.M)
+        if m:  # printed at verbosity 1 when a ray failed its check (or passed only after a refactorization)
+            rec["farkas_checks"], rec["farkas_failed"], rec["farkas_retried"] = (int(m.group(k)) for k in (1, 2, 3))
+        m = re.search(r"^Unscaled dual feasibility: (\d+) LP solves continued, (\d+) iterations", text, re.M)
+        if m:  # LP solves that the scaled dual feasibility test would have stopped earlier, and their iterations
+            rec["unscaled_solves"], rec["unscaled_iters"] = int(m.group(1)), int(m.group(2))
     except OSError:
         pass
     if args.keep_sols:
@@ -485,6 +512,9 @@ def main(argv=None):
     ap.add_argument("--tag", default="", help="label appended to the result file name")
     ap.add_argument("--no-save", action="store_true", help="do not write result files")
     ap.add_argument("--keep-sols", action="store_true", help="keep .sol/.log under results/tmp")
+    ap.add_argument("--trace", action="store_true",
+                    help="popso only: pass --profile and record each run's incumbents over time and its primal "
+                         "integral over the time limit (mean primal gap to the reference objective, lib/primal.py)")
     ap.add_argument("--strict", action="store_true",
                     help="exit code 1 also when an instance is not solved (errors, limits; for CI)")
     ap.add_argument("--resume", metavar="FILE",
@@ -587,7 +617,7 @@ def main(argv=None):
             for r in done:
                 fh.write(json.dumps({"result": r}) + "\n")
         tmp.replace(jsonl)
-    tmpdir = BENCH / "results" / "tmp" / f"{stamp}_{sha}"
+    tmpdir = BENCH / "results" / "tmp" / base  # with the tag: concurrent runs (ab.py) keep apart
     tmpdir.mkdir(parents=True, exist_ok=True)
 
     print(f"running {len(files)} instances, time limit {args.time_limit:g}s, threads {args.threads}, "
@@ -694,6 +724,11 @@ def main(argv=None):
     print(f"instances {n}  solved {solved}  unsolved {by.get(UNSOLVED, 0)}  memlimit {by.get(MEMLIMIT, 0)}  "
           f"errors {by.get(ERROR, 0)}  "
           f"WRONG {len(wrong)}")
+    pis = [r["primal_integral"] for r in recs if r.get("primal_integral") is not None]
+    if pis:
+        summary["primal_integral_mean"] = sum(pis) / len(pis)
+        print(f"primal integral / time limit (mean over the {len(pis)} instances with a reference objective): "
+              f"{summary['primal_integral_mean']:.4f}")
     print(f"shifted geometric mean time (shift 1s, unsolved = {tl:g}s): popso {summary['sgm_time']:.3f}s", end="")
     for key in REF_SOLVERS:
         if f"ref_{key}_sgm_time" in summary:

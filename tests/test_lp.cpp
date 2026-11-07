@@ -157,6 +157,7 @@ TEST(lp_tableau_row_sparse_matches_dense) {
       REQUIRE(s.tableau_row(b, dense));
       for (Index j : nz) sparse[j] = 0.0;
       REQUIRE(s.tableau_row(b, sparse, nz));
+      CHECK(s.tableau_row_work() >= static_cast<long long>(nz.size()));  // at least the listed entries
       for (size_t k = 1; k < nz.size(); ++k) CHECK(nz[k - 1] < nz[k]);
       std::vector<char> listed(N, 0);
       for (Index j : nz) listed[j] = 1;

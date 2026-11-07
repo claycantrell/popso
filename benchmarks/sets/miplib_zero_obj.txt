@@ -1,0 +1,10 @@
+# MIPLIB 2017 benchmark instances with a zero objective (feasibility problems), for changes that
+# only act on them (flat-objective branching, zero-objective pool evidence). Run with
+# --reference benchmarks/reference/miplib_benchmark_x86.json for the expected statuses.
+benchmarks/miplib/cryptanalysiskb128n5obj14.mps.gz
+benchmarks/miplib/cryptanalysiskb128n5obj16.mps.gz
+benchmarks/miplib/fhnw-binpack4-4.mps.gz
+benchmarks/miplib/fhnw-binpack4-48.mps.gz
+benchmarks/miplib/neos-3004026-krka.mps.gz
+benchmarks/miplib/ns1116954.mps.gz
+benchmarks/miplib/ns1952667.mps.gz

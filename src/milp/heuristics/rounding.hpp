@@ -23,4 +23,19 @@ class SimpleRounding {
   std::vector<Index> down_locks_, up_locks_;
 };
 
+// ZI rounding (C. Wallace, "ZI round, a MIP rounding heuristic", J. Heuristics 16, 2010; SCIP's zirounding):
+// each fractional integer variable is shifted to an integer where the slacks of its rows (at the current
+// point, updated after every shift) and its bounds allow it, up to three passes over the fractional ones.
+// Equations have no slack, so it finishes LP points whose fractional variables sit in inequalities.
+class ZiRounding {
+ public:
+  explicit ZiRounding(const MipProblem& p) : p_(p) {}
+  // x: LP solution. On success writes a feasible point to `out` (continuous variables as in x). `work`
+  // (optional): matrix entries touched are added.
+  bool run(const double* x, std::vector<double>& out, long long* work = nullptr) const;
+
+ private:
+  const MipProblem& p_;
+};
+
 }  // namespace milp

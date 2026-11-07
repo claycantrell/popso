@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 #include <utility>
 
@@ -28,6 +29,19 @@ double sub_knob(const char* name, double def) {
 
 bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std::vector<double>& ub, double cutoff,
                    const SubMipLimits& limits, std::vector<double>& sol) {
+  if (limits.fingerprint || limits.skip) {
+    std::uint64_t h = 1469598103934665603ULL;  // FNV-1a over the integer columns' bounds
+    for (Index j = 0; j < p.num_cols(); ++j) {
+      if (!p.is_int[j]) continue;
+      for (double v : {lb[j], ub[j]}) {
+        std::uint64_t b;
+        std::memcpy(&b, &v, sizeof b);
+        h = (h ^ b) * 1099511628211ULL;
+      }
+    }
+    if (limits.fingerprint) *limits.fingerprint = h;
+    if (limits.skip && std::find(limits.skip->begin(), limits.skip->end(), h) != limits.skip->end()) return false;
+  }
   MipProblem q = p;
   q.col_lb = lb;
   q.col_ub = ub;
@@ -51,6 +65,7 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
   opts.stop_flag = limits.stop;
   opts.progress = limits.progress;
   opts.iteration_limit = limits.iteration_limit;
+  opts.solution_limit = limits.solution_limit;
   opts.check_resident = false;
   // The sub-MIP's root cut loop: MILP_SUB_CUT_ROUNDS = k (default -1: as the main search) at most k rounds
   // (no cheap extra rounds); MILP_SUB_CUTS = 0 (default 1): none; MILP_SUB_CUTS_FREE = f (default 0: off):
@@ -610,6 +625,63 @@ bool mutation(const MipProblem& p, const std::vector<double>& incumbent, double 
     std::swap(free[k], free[k + rng() % (free.size() - k)]);
     const Index j = free[k];
     lb[j] = ub[j] = std::round(incumbent[j]);
+  }
+  return solve_sub_mip(p, lb, ub, cutoff, limits, sol);
+}
+
+bool graph_mutation(const MipProblem& p, const std::vector<double>& incumbent, double fix_fraction, unsigned seed,
+                    double cutoff, const SubMipLimits& limits, std::vector<double>& sol, Index max_row) {
+  const Index n = p.num_cols(), m = p.num_rows();
+  std::vector<Index> ints;
+  for (Index j = 0; j < n; ++j) {
+    if (p.is_int[j] && p.col_lb[j] < p.col_ub[j]) ints.push_back(j);
+  }
+  const size_t nfree = ints.size() - static_cast<size_t>(fix_fraction * static_cast<double>(ints.size()));
+  if (nfree == 0 || nfree >= ints.size()) return false;
+  // Rows linking (nearly) everything (cardinality, objective-like rows) would free the whole problem at
+  // distance 2: not followed. Default: 10% of the columns, at least 50 entries.
+  if (max_row <= 0) max_row = std::max<Index>(50, n / 10);
+  const SparseMatrix rows = p.A.transpose();
+  std::vector<char> seen_col(n, 0), seen_row(m, 0), is_free(n, 0);
+  std::mt19937 rng(seed);
+  std::vector<Index> queue;  // columns, breadth first
+  size_t freed = 0, head = 0;
+  while (freed < nfree) {
+    if (head == queue.size()) {
+      // New start: a random integer column not reached yet (the first start too).
+      Index start = -1;
+      for (int tries = 0; tries < 64 && start < 0; ++tries) {
+        const Index j = ints[rng() % ints.size()];
+        if (!seen_col[j]) start = j;
+      }
+      if (start < 0) {
+        for (Index j : ints) {
+          if (!seen_col[j]) {
+            start = j;
+            break;
+          }
+        }
+      }
+      if (start < 0) break;
+      seen_col[start] = 1;
+      queue.push_back(start);
+    }
+    const Index j = queue[head++];
+    if (p.is_int[j] && p.col_lb[j] < p.col_ub[j]) is_free[j] = 1, ++freed;
+    for (Index t = p.A.begin(j); t < p.A.end(j); ++t) {
+      const Index i = p.A.index[t];
+      if (seen_row[i]) continue;
+      seen_row[i] = 1;
+      if (rows.end(i) - rows.begin(i) > max_row) continue;
+      for (Index k = rows.begin(i); k < rows.end(i); ++k) {
+        const Index c = rows.index[k];
+        if (!seen_col[c]) seen_col[c] = 1, queue.push_back(c);
+      }
+    }
+  }
+  std::vector<double> lb = p.col_lb, ub = p.col_ub;
+  for (Index j : ints) {
+    if (!is_free[j]) lb[j] = ub[j] = std::min(std::max(std::round(incumbent[j]), p.col_lb[j]), p.col_ub[j]);
   }
   return solve_sub_mip(p, lb, ub, cutoff, limits, sol);
 }

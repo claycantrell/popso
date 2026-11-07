@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -44,6 +45,11 @@ struct LpOptions {
   bool primal_first = false;
   // Stops the solve (status TimeLimit) once set, e.g. when a concurrent method has finished.
   const std::atomic<bool>* stop = nullptr;
+  // Called with the solve's iterations so far after every checkpoint_every iterations (points that depend on
+  // the iteration count only); false stops the solve (status TimeLimit). Deterministic mode takes the
+  // feasibility-jump helper's solutions there during a long root LP.
+  std::function<bool(long long)> checkpoint;
+  long long checkpoint_every = 0;
 };
 
 class DualSimplex {
@@ -103,6 +109,9 @@ class DualSimplex {
   // Sparse variant: `out` (size n + m) must be all zero on entry; only the positions listed in
   // `nz` (ascending) are written. The caller zeroes them again before the next call.
   bool tableau_row(Index basic_var, std::vector<double>& out, std::vector<Index>& nz);
+  // Work of the last sparse tableau_row: the B^{-1} row's nonzeros, the row matrix entries passed over and the
+  // entries of the index list (all n + m when the row was scanned densely).
+  long long tableau_row_work() const { return tableau_work_; }
   const std::vector<Index>& basic_vars() const { return basic_; }
   // Rows are scaled internally (row i by rscale_[i], a power of two); every
   // accessor below reports unscaled data.
@@ -121,12 +130,46 @@ class DualSimplex {
   std::vector<double> col_values() const;
   std::vector<double> row_activities() const;
   std::vector<double> row_duals() const;     // y, with d = c - A^T y
+  void row_duals(std::vector<double>& y) const;
   std::vector<double> reduced_costs() const;  // d for structurals
+  // Safe lower bound on the LP's optimum for any row multipliers y (Neumaier and Shcherbina, "Safe
+  // bounds in linear and mixed-integer linear programming", Math. Program. 99 (2004)): the Lagrangian
+  //   sum_i y_i b_i + sum_j min_{l_j <= x_j <= u_j} r_j x_j,   r = c - A^T y,
+  // on the unscaled data (rows incl. added ones, current column bounds), minus an a posteriori bound
+  // on its rounding errors, so it needs no directed rounding. y_i > 0 takes the row's lower side,
+  // y_i < 0 the upper one; a y_i whose side is infinite is dropped (y_i = 0). A column whose needed
+  // bound is infinite (or whose r_j has an uncertain sign next to an infinite bound) makes the bound
+  // -inf unless |r_j| <= tau; such a r_j, and a dropped-side |y_i| <= tau (kept in r), count as zero
+  // with |r_j| max(1, |x_j|) (|y_i| max(1, |a_i x|)) added to the error term: the bound is safe up to
+  // dual infeasibilities of tau on unbounded variables, the LP's own dual tolerance.
+  double safe_bound(const std::vector<double>& y, double tau) const;
+  // After an optimal solve: objective(), or safe_bound(row_duals(), tau) if that is lower by more than
+  // 1e-6 relative (*below set; a dual infeasibility hidden by row scaling or the tolerances makes the
+  // objective an invalid bound). MILP_SAFE_BOUND=0: always objective().
+  double safe_objective(double tau, bool* below = nullptr) const;
+  static bool safe_bound_enabled();
   // After a solve that returned Infeasible: row multipliers y (size num_rows)
   // proving it, i.e. y^T A x has no value in the range implied by the row
   // bounds over the column box (the sign of y is not normalized). Returns
   // false if the last solve did not end with such a proof.
   bool farkas_proof(std::vector<double>& y) const;
+  // safe_bound(y, tau) with zero costs: a lower bound on 0 over the LP's feasible set, so > 0 proves the LP
+  // infeasible (Neumaier and Shcherbina's certificate for a ray y: the rows' sides y_i b_i minus the largest
+  // (A^T y)^T x over the column box, with the same rounding error terms).
+  double farkas_bound(const std::vector<double>& y, double tau) const;
+  // Infeasible is only returned with a ray that passes farkas_bound > 0 on the unscaled data (rows incl. added
+  // ones, current column bounds; tau 1e-9 relative to the largest |y_i|). A ray that fails is retried once from a
+  // fresh factorization, then the solve returns NumericalError ("unverified infeasibility proof"), which callers
+  // treat as an unsolved LP (no pruning). MILP_FARKAS_CHECK=0: rays are not verified.
+  static bool farkas_check_enabled();
+  // Process-wide counts: rays checked, failed (NumericalError) and passed after the retry; solves that went on
+  // because only the unscaled dual feasibility test (kUnscaledDual) found dual infeasibilities, and their
+  // iterations from that point on (what the scaled test would have saved).
+  struct CheckCounts {
+    long long farkas_checked = 0, farkas_failed = 0, farkas_retried_ok = 0;
+    long long unscaled_solves = 0, unscaled_iterations = 0;
+  };
+  static CheckCounts check_counts();
   // Values of all n + m variables (structurals first, logicals unscaled).
   const double* x() const;
   long long iterations() const { return total_iterations_; }
@@ -137,7 +180,13 @@ class DualSimplex {
   LpStatus run(const LpOptions& opt);
   LpStatus dual_loop(const LpOptions& opt, bool phase1);
   LpStatus primal_loop(const LpOptions& opt);
-  LpStatus infeasible(bool phase1);  // records the Farkas proof
+  // Records the Farkas proof: rho_ with the leaving variable below its lower bound (sign 1) or above its upper
+  // bound (-1).
+  LpStatus infeasible(bool phase1, double sign);
+  LpStatus verify_infeasible(const LpOptions& opt);  // farkas_bound check of an Infeasible result, one retry
+  bool farkas_verified() const;
+  // safe_bound / farkas_bound: the Lagrangian with the LP's costs or with zero costs.
+  double lagrangian_safe(const std::vector<double>& y, double tau, bool with_cost) const;
   LpStatus fail(const char* why);    // NumericalError with fail_reason_ set
   const char* fail_reason_ = "";
   long long dbg_shifts_ = 0, dbg_degen_ = 0, dbg_flips_ = 0;  // verbosity 3 trace
@@ -158,7 +207,9 @@ class DualSimplex {
   void apply_moves();
   void place_nonbasic(Index j);
   void place_by_dual(Index j);
-  Index count_dual_infeasibilities(bool flip_boxed);
+  // unscaled: the tolerance times dftol_ (the tests at the end of a solve), else in scaled terms.
+  Index count_dual_infeasibilities(bool flip_boxed, bool unscaled);
+  long long unscaled_from_ = -1;  // iteration at which only the unscaled test found dual infeasibilities (-1: none)
   void perturb_costs(double mul);
   void boost_perturbation(double extra);
   void perturb_rows(double b, bool add);  // nonbasic logicals by b (1 + rand) (MILP_LP_PERTURB_ROWS)
@@ -207,16 +258,22 @@ class DualSimplex {
   SparseMatrix At_orig_, A_orig_;  // unscaled CSR / CSC of all rows (as passed in)
   std::vector<double> rscale_;    // per row
   std::vector<double> ftol_;      // per variable: primal tolerance factor (min(1, rscale) for logicals)
+  std::vector<double> dftol_;     // per variable: dual tolerance factor (min(1, 1 / rscale) for logicals)
   mutable std::vector<double> xout_;
+  mutable std::vector<double> sb_y_, sb_r_, sb_a_;  // safe_bound scratch
+  mutable std::vector<int> sb_cnt_;
   bool has_factor_ = false;
   long long total_iterations_ = 0;
   std::vector<double> farkas_;  // row of B^{-1} proving infeasibility of the last solve
+  double farkas_sign_ = 1.0;    // see infeasible()
   bool has_farkas_ = false;
   long long iter_start_ = 0;
+  mutable long long next_checkpoint_ = 0;  // LpOptions::checkpoint: iterations of the solve at the next call
   double solve_start_ = 0.0;
   std::mt19937 rng_{12345};
   // Running averages of the result densities of the solves (hyper-sparse switch in the LU).
   double dens_rho_ = 0.0, dens_col_ = 0.0, dens_tau_ = 0.0, dens_flip_ = 0.0;
+  long long tableau_work_ = 0;  // tableau_row_work()
   void note_density(double& avg, const HVector& v) const {
     avg = 0.95 * avg + 0.05 * (m_ > 0 ? static_cast<double>(v.count) / m_ : 0.0);
   }

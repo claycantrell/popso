@@ -974,6 +974,15 @@ IpmResult Ipm::run() {
   res.analysis_time = timer_.elapsed() - t_an;
   double factor_time = 0.0;
   res.factor_nnz = kkt_.factor_nnz();
+  if (opt_.max_factor_nnz > 0 && res.factor_nnz > opt_.max_factor_nnz) {
+    if (opt_.log) {
+      opt_.log->log(1, "Barrier: factor of %lld nonzeros above the memory budget (%lld); not used\n", res.factor_nnz,
+                    opt_.max_factor_nnz);
+    }
+    res.status = IpmStatus::NumericalError;
+    finish(res);
+    return res;
+  }
   res.dense_columns = kkt_.dense_columns();
   res.augmented = kkt_.augmented();
   if (kkt_.augmented()) {

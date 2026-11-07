@@ -28,12 +28,14 @@
 // inflow x_a <= u y_a with demand d yields x_a <= d y_a + outflow.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
 
+#include "milp/core/worker_pool.hpp"
 #include "milp/cuts/cut.hpp"
 #include "milp/cuts/mcf.hpp"
 
@@ -47,6 +49,7 @@ constexpr int kMaxAggr = 12;          // rows added to a path after its start ro
 constexpr int kCutsPerPath = 4;       // cuts taken from successive aggregations of one path
 constexpr double kWorkPerNnz = 4000;  // separation work budget per call, in units of nnz(A)
 constexpr double kTightDist = 1e-4;   // rows farther from their bounds are never eliminated through
+constexpr size_t kParChunk = 64;      // start rows per chunk of separate_chunked (MILP_MIR_PAR_CHUNK)
 
 enum class BoundKind : int8_t { Lower, Upper, VarLower, VarUpper };
 
@@ -74,6 +77,7 @@ class MirSeparator : public Separator {
       : tableau_(tableau), use_flowcover_(flowcover), mcf_(mcf) {}
   const char* name() const override { return mcf_ ? "mcf" : tableau_ ? "tmir" : "mir"; }
   void separate(const SepaContext& ctx, std::vector<Cut>& out) override;
+  long long work() const override { return work_count_; }
 
  private:
   // Variables 0..n-1 are structurals, n + i is the logical of LP row i.
@@ -111,6 +115,12 @@ class MirSeparator : public Separator {
   // Efficacy of the cut for divisor delta; builds it into `cut` unless null (then only the efficacy,
   // in O(#terms) using the data from prepare_norm).
   double evaluate(double delta, double beta, Cut* cut);
+  // evaluate(delta, beta, nullptr) with the integer terms' quotients a / delta (floor and fraction, for both
+  // complementations) cached by cache_quotients(delta): the complementation trials of best_cut keep delta
+  // and change only beta, and the quotients were most of their cost (h80x6320d: ~700 terms per trial).
+  // The same arithmetic, so the same efficacies.
+  void cache_quotients(double delta);
+  double evaluate_cached(double delta, double beta);
   // The x-space continuous part of every cut of the current transformation is V / (1 - f0) with
   // V = sum_{c_j < 0} c_j x'_j(x) (fixed); stores ||V||^2 and V on the integer columns.
   void prepare_norm();
@@ -121,6 +131,14 @@ class MirSeparator : public Separator {
   void emit(Index j, double v, Cut* cut) const;
   // Path aggregation from row i0 (one side); appends at most one cut.
   void aggregate_path(Index i0, double sign, std::vector<Cut>& out);
+  // The elimination candidates of column j (tight_beg_ / tight_end_ / tight_k_).
+  void build_tight(Index j);
+  // The start rows in fixed chunks of kParChunk (MILP_MIR_PAR=1, root cut loops): the starts of a chunk
+  // run independently, on SepaContext::threads threads (this separator and helpers with their own scratch
+  // state), each with the work at the chunk's start plus its own for the integer elimination budget; their
+  // cuts are merged in start order and the work budget is checked between chunks. The cuts depend on the
+  // chunk size (MILP_MIR_PAR_CHUNK), not on the thread count.
+  void separate_chunked(long long budget, Index max_starts, std::vector<Cut>& out);
   // Tableau rows of fractional basic integers as base equations (HiGHS' tableau separator): the row
   // of B^-1 [A I] is an exact identity over structurals and logicals, so with global bounds
   // the c-MIR / lifted cover cuts from it are globally valid even at a node.
@@ -158,6 +176,10 @@ class MirSeparator : public Separator {
   std::vector<ContTerm> cont_;
   std::vector<IntTerm> ints_;
   std::vector<double> deltas_;
+  struct Quot {
+    double fl[2], fq[2];  // floor and fraction of a / delta, [1]: complemented (-a / delta)
+  };
+  std::vector<Quot> quot_;
   std::vector<double> kw_, kz_, kcoef_;
   std::vector<Index> kj_;
   std::vector<char> kcomp_;
@@ -189,6 +211,15 @@ class MirSeparator : public Separator {
   std::vector<double> row_minact_, row_maxact_;  // activity range of the problem rows (global bounds)
   Cut cand_, vbuf_;
   double vnorm2_ = 0.0;
+  // separate_chunked (opt-in until an A/B: the cuts change with the chunk granularity).
+  bool par_ = [] { const char* v = std::getenv("MILP_MIR_PAR"); return v && *v && *v != '0'; }();
+  // The separator whose setup (row_dist_, row_dual_, row_int_, tight_*, row_minact_ / row_maxact_) the paths
+  // read: this one, or for a helper of separate_chunked the one it works for.
+  const MirSeparator* own_ = this;
+  std::vector<std::unique_ptr<MirSeparator>> helpers_;
+  std::unique_ptr<WorkerPool> pool_;
+  std::vector<std::vector<Cut>> chunk_cuts_;  // per start of the chunk
+  std::vector<long long> chunk_work_;
 };
 
 double MirSeparator::bound_distance(Index j, ContTerm* t, int sign) const {
@@ -251,6 +282,43 @@ void MirSeparator::emit(Index j, double v, Cut* cut) const {
 // to `cut` (mapped back to x space). Returns its efficacy in x space (-1 if not
 // applicable): after variable bound substitution the transformed-space norm is
 // meaningless (with x <= 3950 y the cut x <= 2 y + ... has terms 3950 y - 3950 y').
+void MirSeparator::cache_quotients(double delta) {
+  quot_.resize(ints_.size());
+  for (size_t k = 0; k < ints_.size(); ++k) {
+    for (int c = 0; c < 2; ++c) {
+      const double q = (c ? -ints_[k].a : ints_[k].a) / delta;
+      quot_[k].fl[c] = std::floor(q);
+      quot_[k].fq[c] = q - quot_[k].fl[c];
+    }
+  }
+}
+
+double MirSeparator::evaluate_cached(double delta, double beta) {
+  const double bd = beta / delta;
+  if (std::abs(bd) > 1e8) return -1.0;
+  const double f0 = bd - std::floor(bd);
+  if (f0 < 1e-4 || f0 > 0.999) return -1.0;
+  const double rhs = delta * std::floor(bd);
+  double act = 0.0;
+  const double s = 1.0 / (1.0 - f0);
+  double norm = s * s * vnorm2_;
+  for (size_t k = 0; k < ints_.size(); ++k) {
+    const IntTerm& t = ints_[k];
+    const int c = t.comp ? 1 : 0;
+    const double g = delta * (quot_[k].fl[c] + std::max(0.0, quot_[k].fq[c] - f0) / (1.0 - f0));
+    if (g == 0.0) continue;
+    act += g * (t.comp ? t.u - t.x : t.x - t.l);
+    const double gx = t.comp ? -g : g, sv = s * t.v;
+    norm += (gx + sv) * (gx + sv) - sv * sv;
+  }
+  for (const ContTerm& t : cont_) {
+    if (t.c < 0) act += t.c * s * t.xs;
+  }
+  work_count_ += static_cast<long long>(ints_.size() + cont_.size());
+  if (norm <= 1e-12) return -1.0;
+  return (act - rhs) / std::sqrt(norm);
+}
+
 double MirSeparator::evaluate(double delta, double beta, Cut* cut) {
   const double bd = beta / delta;
   if (std::abs(bd) > 1e8) return -1.0;
@@ -469,11 +537,18 @@ double MirSeparator::best_cut(double b, Cut* cut) {
   }
   // Try complementing integers with LP values inside their bounds (beta updated incrementally:
   // recomputing it per candidate made this loop quadratic outside the work budget).
+  static const bool qcache = [] { const char* v = std::getenv("MILP_MIR_QCACHE"); return !(v && *v == '0'); }();
+  int trials = 0;  // the cache costs about two plain evaluations
+  for (const IntTerm& t : ints_) {
+    trials += !(t.x <= t.l + 1e-6 || t.x >= t.u - 1e-6 || !is_finite(t.l) || !is_finite(t.u));
+  }
+  const bool cached = qcache && trials >= 3;
+  if (cached) cache_quotients(best_delta);
   for (IntTerm& t : ints_) {
     if (t.x <= t.l + 1e-6 || t.x >= t.u - 1e-6 || !is_finite(t.l) || !is_finite(t.u)) continue;
     t.comp = !t.comp;
     const double beta2 = beta - t.a * (t.comp ? t.u - t.l : t.l - t.u);
-    const double e = evaluate(best_delta, beta2, nullptr);
+    const double e = cached ? evaluate_cached(best_delta, beta2) : evaluate(best_delta, beta2, nullptr);
     if (e > best_eff + 1e-9) {
       best_eff = e;
       beta = beta2;
@@ -641,8 +716,8 @@ bool MirSeparator::try_flowcover(Cut* cut) {
       // Logical s = -a_i x of a one-sided row: bounded by the row's activity range (SCIP bounds
       // the slack of the aggregated rows the same way).
       const Index i = j - n_;
-      slb = std::max(slb, -row_maxact_[i]);
-      sub = std::min(sub, -row_minact_[i]);
+      slb = std::max(slb, -own_->row_maxact_[i]);
+      sub = std::min(sub, -own_->row_minact_[i]);
     }
     if (slb <= -kMaxBound) slb = -kInf;
     if (sub >= kMaxBound) sub = kInf;
@@ -909,11 +984,23 @@ bool MirSeparator::try_flowcover(Cut* cut) {
   return true;
 }
 
-void MirSeparator::aggregate_path(Index i0, double sign, std::vector<Cut>& out) {
+void MirSeparator::build_tight(Index j) {
   const Index m0 = ctx_->num_problem_rows;
+  const SparseMatrix& C = ctx_->lp.col_matrix();
+  tight_beg_[j] = static_cast<Index>(tight_k_.size());
+  for (Index k = C.begin(j); k < C.end(j); ++k) {
+    const Index r = C.index[k];
+    if (r < m0 && row_dist_[r] <= kTightDist) tight_k_.push_back(k);
+  }
+  tight_end_[j] = static_cast<Index>(tight_k_.size());
+  work_count_ += C.end(j) - C.begin(j);
+}
+
+void MirSeparator::aggregate_path(Index i0, double sign, std::vector<Cut>& out) {
   const SparseMatrix& R = ctx_->lp.row_matrix();
   const SparseMatrix& C = ctx_->lp.col_matrix();
   const MipProblem& p = ctx_->p;
+  const MirSeparator& o = *own_;
   const Index max_len = 500;
   clear_agg();
   for (Index r : used_) row_used_[r] = 0;
@@ -978,27 +1065,19 @@ void MirSeparator::aggregate_path(Index i0, double sign, std::vector<Cut>& out) 
     Index rbest = -1;
     double sbest = kInf, mbest = 0.0, dbest_row = -1.0;
     const bool prefer_int = ctx_->data.vub[jbest].empty() && ctx_->data.vlb[jbest].empty();
-    if (tight_beg_[jbest] < 0) {
-      tight_beg_[jbest] = static_cast<Index>(tight_k_.size());
-      for (Index k = C.begin(jbest); k < C.end(jbest); ++k) {
-        const Index r = C.index[k];
-        if (r < m0 && row_dist_[r] <= kTightDist) tight_k_.push_back(k);
-      }
-      tight_end_[jbest] = static_cast<Index>(tight_k_.size());
-      work_count_ += C.end(jbest) - C.begin(jbest);
-    }
-    for (Index t = tight_beg_[jbest]; t < tight_end_[jbest]; ++t) {
-      const Index k = tight_k_[t];
+    if (o.tight_beg_[jbest] < 0) build_tight(jbest);  // own_ == this here (separate_chunked builds them first)
+    for (Index t = o.tight_beg_[jbest]; t < o.tight_end_[jbest]; ++t) {
+      const Index k = o.tight_k_[t];
       const Index r = C.index[k];
       if (row_used_[r]) continue;
       // Cheapest test first: the row must be tight (its logical at a bound).
       const double mult = -agg_[jbest] / C.value[k];
-      double slack = row_dist_[r] * std::abs(mult);
+      double slack = o.row_dist_[r] * std::abs(mult);
       if (slack > 1e-6) continue;
       const Index rlen = R.end(r) - R.begin(r);
       if (rlen > max_len) continue;
       if (rlen == 2 && (p.is_int[R.index[R.begin(r)]] || p.is_int[R.index[R.begin(r) + 1]])) continue;  // VB row
-      if (prefer_int && !row_int_[r]) slack += 1.0;
+      if (prefer_int && !o.row_int_[r]) slack += 1.0;
       // Among equally tight rows: the one with the largest LP dual (as SCIP's aggregation row score: the
       // rows that prove the LP bound; neos17 pairs an observation row with a contradicting one), then
       // the sparser one; otherwise the first tight row in column order. Not for integer eliminations
@@ -1006,7 +1085,7 @@ void MirSeparator::aggregate_path(Index i0, double sign, std::vector<Cut>& out) 
       // the balance rows of lot sizing / fixed charge paths are taken in order; by dual, mc11 went from
       // 15-23 s to 24-120 s over 3 seeds, exp-1-500-5-5 1 -> 3 s).
       const double ds = dual_choice_ && !is_int(jbest) && !ctx_->data.row_vb[jbest]
-                            ? row_dual_[r] + 1e-3 / (1.0 + static_cast<double>(rlen))
+                            ? o.row_dual_[r] + 1e-3 / (1.0 + static_cast<double>(rlen))
                             : 0.0;
       if (slack < sbest - 1e-12 || (slack <= sbest + 1e-12 && ds > dbest_row)) {
         sbest = slack, rbest = r, mbest = mult, dbest_row = ds;
@@ -1227,6 +1306,7 @@ void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   DualSimplex& lp = ctx.lp;
   ctx_ = &ctx;
   n_ = p.num_cols();
+  work_count_ = 0;
   if (mcf_ && (ctx.round <= 0 || (net_built_ && net_.empty()))) return;  // no network: skip the setup below
   {
     const char* v = std::getenv("MILP_NO_AGGCOVER");
@@ -1339,6 +1419,12 @@ void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   }
   if (scored) std::stable_sort(starts_.begin(), starts_.end());
   static const Index max_starts = [] { const char* v = std::getenv("MILP_MIR_STARTS"); return v ? std::atoi(v) : 1 << 30; }();
+  if (par_ && ctx.round > 0) {
+    // Root cut loops only: node separation (round 0) stays sequential.
+    separate_chunked(budget, max_starts, out);
+    clear_agg();
+    return;
+  }
   for (size_t s = 0; s < starts_.size() && tried < max_starts && work_count_ < budget; ++s) {
     const Index i0 = starts_[s].second;
     ++tried;
@@ -1347,6 +1433,78 @@ void MirSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   }
 
   clear_agg();
+}
+
+void MirSeparator::separate_chunked(long long budget, Index max_starts, std::vector<Cut>& out) {
+  const MipProblem& p = ctx_->p;
+  // The paths share only read-only state: the context's problem and LP (row / column matrices, bounds, x),
+  // the CutData and this separator's setup. tight_* is built on first use otherwise: all columns first.
+  for (Index j = 0; j < n_; ++j) {
+    if (tight_beg_[j] < 0) build_tight(j);
+  }
+  const int threads = std::max(1, ctx_->threads);
+  while (static_cast<int>(helpers_.size()) < threads - 1) {
+    helpers_.push_back(std::make_unique<MirSeparator>(tableau_, use_flowcover_, mcf_));
+  }
+  for (int t = 0; t + 1 < threads; ++t) {
+    MirSeparator& h = *helpers_[t];
+    h.own_ = this;
+    h.ctx_ = ctx_;
+    h.n_ = n_;
+    h.knapsack_ = knapsack_, h.flowcover_ = flowcover_, h.fc_win_ = fc_win_;
+    h.int_budget_ = int_budget_;
+    h.int_elim_ = int_elim_, h.int_elim_min_ = int_elim_min_, h.int_elim_max_ = int_elim_max_;
+    h.int_elim_general_ = int_elim_general_, h.dual_choice_ = dual_choice_;
+    h.agg_.assign(agg_.size(), 0.0);
+    h.mark_.assign(mark_.size(), 0);
+    h.icoef_.assign(n_, 0.0);
+    h.dense_.assign(n_, 0.0);
+    h.imark_.assign(n_, 0);
+    h.nz_.clear();
+    h.inz_.clear();
+    h.row_used_.assign(row_used_.size(), 0);
+    h.used_.clear();
+  }
+  if (threads > 1 && (!pool_ || pool_->size() != threads)) pool_ = std::make_unique<WorkerPool>(threads);
+  static const size_t chunk = [] {
+    const char* v = std::getenv("MILP_MIR_PAR_CHUNK");
+    return v ? static_cast<size_t>(std::max(1, std::atoi(v))) : kParChunk;
+  }();
+  chunk_cuts_.resize(chunk);
+  chunk_work_.resize(chunk);
+  size_t s = 0;
+  Index tried = 0;
+  while (s < starts_.size() && tried < max_starts && work_count_ < budget) {
+    const size_t len = std::min({chunk, starts_.size() - s, static_cast<size_t>(max_starts - tried)});
+    const long long w0 = work_count_;
+    std::atomic<size_t> next{0};
+    // Task t runs on worker t's scratch state (this one or a helper), taking the chunk's starts in turn.
+    auto run = [&](int t) {
+      MirSeparator& w = t == 0 ? *this : *helpers_[t - 1];
+      for (size_t c = next.fetch_add(1); c < len; c = next.fetch_add(1)) {
+        const Index i0 = starts_[s + c].second;
+        std::vector<Cut>& cuts = chunk_cuts_[c];
+        cuts.clear();
+        w.work_count_ = w0;
+        if (is_finite(p.row_ub[i0])) w.aggregate_path(i0, 1.0, cuts);
+        if (is_finite(p.row_lb[i0])) w.aggregate_path(i0, -1.0, cuts);
+        chunk_work_[c] = w.work_count_ - w0;
+      }
+    };
+    if (threads > 1) {
+      pool_->run(threads, run);
+    } else {
+      run(0);
+    }
+    work_count_ = w0;
+    for (size_t c = 0; c < len; ++c) {
+      for (Cut& cut : chunk_cuts_[c]) out.push_back(std::move(cut));
+      chunk_cuts_[c].clear();
+      work_count_ += chunk_work_[c];
+    }
+    s += len;
+    tried += static_cast<Index>(len);
+  }
 }
 
 }  // namespace

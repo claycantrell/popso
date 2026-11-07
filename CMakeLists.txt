@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(popso LANGUAGES CXX VERSION 0.6.3)
+project(popso LANGUAGES CXX VERSION 0.7.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,7 +70,19 @@ if(POPSO_BUILD_TESTS)
   target_link_libraries(popso_tests PRIVATE milp_lib)
   target_compile_definitions(popso_tests PRIVATE MILP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_test(NAME unit COMMAND popso_tests)
+  # The CLI's user-model tooling (--write-anon, --profile), driven from Python.
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME cli_tooling
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/cli/test_cli_tooling.py $<TARGET_FILE:popso>
+                     ${CMAKE_SOURCE_DIR})
+  endif()
 endif()
+
+# cmake --install: the popso executable (bin), and with POPSO_BUILD_SHARED the shared library and include/popso.h
+# (src/api). The executable links the solver statically and needs nothing else at run time.
+include(GNUInstallDirs)
+install(TARGETS popso RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(POPSO_BUILD_SHARED)
   add_subdirectory(src/api)

@@ -23,8 +23,10 @@ class CliqueSeparator : public Separator {
  public:
   const char* name() const override { return "clique"; }
   void separate(const SepaContext& ctx, std::vector<Cut>& out) override;
+  long long work() const override { return work_; }
 
  private:
+  long long work_ = 0;  // literals and graph entries scanned by the last call
   void build(const MipProblem& p, const SparseMatrix& R, Index m0);
   bool built_ = false;
   std::vector<std::vector<Index>> cliques_;    // literal lists (2j: x_j, 2j+1: 1 - x_j)
@@ -77,6 +79,7 @@ void CliqueSeparator::build(const MipProblem& p, const SparseMatrix& R, Index m0
 
 void CliqueSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   const MipProblem& p = ctx.p;
+  work_ = 0;
   if (!built_) build(p, ctx.lp.row_matrix(), ctx.num_problem_rows);
   const std::vector<Index>& cs = ctx.data.conflict_start;
   const std::vector<Index>& cl = ctx.data.conflict_lit;
@@ -97,6 +100,7 @@ void CliqueSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
       if (has_edges(l) && value(l) > 1e-6) frac.push_back(l), is_frac[l] = 1;
     }
   }
+  work_ = 2 * static_cast<long long>(n);
   if (std::getenv("MILP_CLIQUE_DEBUG")) std::fprintf(stderr, "clique: %zu cliques, %zu candidate literals, frac %d\n", cliques_.size(), frac.size(), (int)any_fractional);
   if (!any_fractional) return;
   if (frac.size() < 2) return;
@@ -107,11 +111,13 @@ void CliqueSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     std::vector<Index>& nb = nbrs[u];
     if (!nb.empty()) return nb;
     for (Index c : lit_cliques_[u]) {
+      work_ += static_cast<long long>(cliques_[c].size());
       for (Index v : cliques_[c]) {
         if (v != u && is_frac[v] && mark[v] != u) mark[v] = u, nb.push_back(v);
       }
     }
     if (probed) {
+      work_ += cs[u + 1] - cs[u];
       for (Index k = cs[u]; k < cs[u + 1]; ++k) {
         const Index v = cl[k];
         if (is_frac[v] && mark[v] != u) mark[v] = u, nb.push_back(v);
@@ -182,6 +188,19 @@ void CliqueSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     }
   };
   int made = 0;
+  // kc[w]: members of the clique K being grown that w is adjacent to (valid where kc_gen[w] == gen). A
+  // candidate joins when it is adjacent to all of K; only the members' neighbour lists are scanned (testing
+  // each candidate against its own list cost qap10 ~1-2.5 s per round). MILP_CLIQUE_COUNT=0: that test.
+  static const bool count_adj = [] { const char* v = std::getenv("MILP_CLIQUE_COUNT"); return !(v && *v == '0'); }();
+  std::vector<int> kc(count_adj ? 2 * static_cast<size_t>(n) : 0, 0), kc_gen(kc.size(), 0);
+  int gen = 0;
+  auto bump = [&](Index x) {
+    work_ += static_cast<long long>(neighbours(x).size());
+    for (Index w : neighbours(x)) {
+      if (kc_gen[w] != gen) kc_gen[w] = gen, kc[w] = 0;
+      ++kc[w];
+    }
+  };
   // Greedy growth depends on the start, so seed it with every pair {u, v}
   // (u's strongest neighbours first) and keep the distinct violated cliques.
   for (Index u : frac) {
@@ -191,10 +210,23 @@ void CliqueSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     for (size_t s0 = 0; s0 < seeds && made < 200; ++s0) {
       std::vector<Index> K{u, nu[s0]};
       double sum = value(u) + value(nu[s0]);
+      if (count_adj) {
+        ++gen;
+        bump(u);
+        bump(nu[s0]);
+      }
       for (Index v : nu) {
         if (v == nu[s0]) continue;
         // v must be adjacent to every member of K.
+        if (count_adj) {
+          if (kc_gen[v] != gen || kc[v] != static_cast<int>(K.size())) continue;
+          K.push_back(v);
+          sum += value(v);
+          bump(v);
+          continue;
+        }
         const std::vector<Index>& nv = neighbours(v);
+        work_ += static_cast<long long>(nv.size() + K.size());
         for (Index w : nv) adj_stamp[w] = v;
         bool all = true;
         for (Index k : K) all = all && adj_stamp[k] == v;
@@ -223,6 +255,7 @@ void CliqueSeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
       ++made;
     }
   }
+  work_ += ext_work;
 }
 
 }  // namespace

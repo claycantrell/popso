@@ -26,8 +26,10 @@ class ImpliedBoundSeparator : public Separator {
  public:
   const char* name() const override { return "implbd"; }
   void separate(const SepaContext& ctx, std::vector<Cut>& out) override;
+  long long work() const override { return work_; }
 
  private:
+  long long work_ = 0;  // implications checked by the last call
   void build(const MipProblem& p);
   bool built_ = false;
   bool vb_store_ = !std::getenv("MILP_NO_IMPLBD_VB");
@@ -108,10 +110,12 @@ void ImpliedBoundSeparator::separate(const SepaContext& ctx, std::vector<Cut>& o
   };
   for (const Implication& im : imps_) check(im);
   for (const ProbeImplication& im : ctx.data.probe_imps) check(im);
+  work_ = static_cast<long long>(imps_.size() + ctx.data.probe_imps.size());
   // Variable bounds of the store (two-variable rows, implied by single rows, probing) on binaries.
   const MipProblem& p = ctx.p;
   if (!vb_store_) return;
   for (Index j = 0; j < static_cast<Index>(ctx.data.vub.size()); ++j) {
+    work_ += 1 + static_cast<long long>(ctx.data.vlb[j].size() + ctx.data.vub[j].size());
     for (int side = 0; side < 2; ++side) {
       for (const VarBound& vb : side ? ctx.data.vlb[j] : ctx.data.vub[j]) {
         if (!binary(p, vb.y)) continue;

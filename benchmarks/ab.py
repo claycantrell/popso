@@ -2,7 +2,8 @@
 """A/B comparison of two solver builds over several random seeds.
 
 Runs benchmarks/run.py for build A and build B (interleaved per seed, so slow
-drifts in machine load affect both), then reports:
+drifts in machine load affect both; A first on odd-numbered seeds of the list, B first
+on the others), then reports:
   * wrong answers per side (any wrong answer fails the comparison),
   * solved counts,
   * shifted geometric mean time (shift 1 s, unsolved = time limit) per side,
@@ -16,16 +17,25 @@ Usage:
 Extra arguments for each side go in --a-args / --b-args. Instance selection
 options (--sizes, --families, --max-size, positional globs, --miplib, --set) are
 forwarded to run.py.
+
+With -j > 1 all sides and seeds run at once and share one pool of -j x --threads threads and
+-j x --mem-limit MB (slots.py; the machine load stays as with one run.py -j at a time), so the
+machine does not idle while one run's last instances finish. A pool given in POPSO_SLOTS (the
+benchmark server's queue sets one for all jobs) is used instead. --sequential: one run at a time.
 """
 
 import argparse
 import json
 import math
+import os
 import random
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -34,7 +44,7 @@ RUN = BENCH / "run.py"
 
 def run_side(solver, extra, seed, args, label, env_extra=""):
     cmd = [sys.executable, str(RUN), "--solver", f"{solver} --seed {seed} {extra}".strip(),
-           "-t", str(args.time_limit), "--threads", str(args.threads), "-j", "1",
+           "-t", str(args.time_limit), "--threads", str(args.threads), "-j", str(args.jobs),
            "--mem-limit", str(args.mem_limit), "--gap", str(args.gap), "--tag", f"ab-{label}-s{seed}"]
     for opt in ("sizes", "families", "max_size"):
         v = getattr(args, opt)
@@ -44,11 +54,12 @@ def run_side(solver, extra, seed, args, label, env_extra=""):
         cmd.append("--miplib")
     if args.keep_logs:
         cmd.append("--keep-sols")
+    if args.primal:
+        cmd.append("--trace")
     for st in args.set:
         cmd += ["--set", st]
     cmd += args.instances
     print(f"[ab] {label} seed {seed}: {' '.join(cmd[2:5])} ...", flush=True)
-    import os
     env = dict(os.environ)
     for kv in env_extra.split():
         k, _, v = kv.partition("=")
@@ -80,6 +91,8 @@ def main():
     ap.add_argument("--seeds", default="1,2,3")
     ap.add_argument("-t", "--time-limit", type=float, default=60)
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("-j", "--jobs", type=int, default=1,
+                    help="parallel solver runs: run.py -j, and the size of the pool all runs share (see above)")
     ap.add_argument("--mem-limit", type=int, default=1500)
     ap.add_argument("--gap", type=float, default=1e-6)
     ap.add_argument("--sizes")
@@ -89,6 +102,10 @@ def main():
     ap.add_argument("--set", action="append", default=[], help="instance list (see run.py --set)")
     ap.add_argument("--out", help="write the comparison as JSON here")
     ap.add_argument("--keep-logs", action="store_true", help="keep the solver logs (run.py --keep-sols)")
+    ap.add_argument("--sequential", action="store_true", help="with -j > 1: one run.py at a time (no shared pool)")
+    ap.add_argument("--primal", action="store_true",
+                    help="popso only: also compare the primal integral (run.py --trace): mean primal gap over the "
+                         "time limit per side, B - A with a 90%% bootstrap interval")
     ap.add_argument("instances", nargs="*")
     args = ap.parse_args()
     seeds = [int(s) for s in args.seeds.split(",")]
@@ -97,18 +114,42 @@ def main():
     times = {"A": defaultdict(list), "B": defaultdict(list)}
     solved = {"A": 0, "B": 0}
     wrong = {"A": [], "B": []}
-    runs = 0
-    for seed in seeds:
-        for side, solver, extra, env in (("A", args.a, args.a_args, args.a_env), ("B", args.b, args.b_args, args.b_env)):
-            res = run_side(solver, extra, seed, args, side, env)
-            for r in res["results"]:
-                name = r["instance"]
-                ok = r["class"] == "ok"
-                if r["class"] == "WRONG":
-                    wrong[side].append((name, seed, r.get("message", "")))
-                solved[side] += ok
-                times[side][name].append(min(r["time"], args.time_limit) if ok else args.time_limit)
-        runs += 1
+    pint = {"A": defaultdict(list), "B": defaultdict(list)}  # primal integrals per instance (--primal)
+    plan = []
+    for k, seed in enumerate(seeds):
+        sides = [("A", args.a, args.a_args, args.a_env), ("B", args.b, args.b_args, args.b_env)]
+        # Alternate which side runs first: an A/A run on the 12-core server (12 parallel jobs, A always first)
+        # came out 0.958 [0.925, 0.991], the second run of each seed faster (warm file cache, clocks).
+        if k % 2 == 1:
+            sides.reverse()
+        plan += [(seed, side) for side in sides]
+    if args.jobs > 1 and not args.sequential:
+        # All runs at once over one pool (slots.py): each run.py would otherwise idle down to its last instances
+        # before the next one starts (on the 12-job server, minutes per run).
+        pool = None
+        if not os.environ.get("POPSO_SLOTS"):
+            pool = tempfile.mkdtemp(prefix="ab-slots-", dir=BENCH / "results")
+            os.environ["POPSO_SLOTS"] = f"{pool}:{args.jobs * args.threads}:{args.jobs * args.mem_limit}"
+        try:
+            with ThreadPoolExecutor(max_workers=len(plan)) as ex:
+                futs = [ex.submit(run_side, solver, extra, seed, args, side, env)
+                        for seed, (side, solver, extra, env) in plan]
+                results = [f.result() for f in futs]
+        finally:
+            if pool:
+                shutil.rmtree(pool, ignore_errors=True)
+    else:
+        results = [run_side(solver, extra, seed, args, side, env) for seed, (side, solver, extra, env) in plan]
+    for (seed, (side, *_)), res in zip(plan, results):
+        for r in res["results"]:
+            name = r["instance"]
+            ok = r["class"] == "ok"
+            if r["class"] == "WRONG":
+                wrong[side].append((name, seed, r.get("message", "")))
+            solved[side] += ok
+            times[side][name].append(min(r["time"], args.time_limit) if ok else args.time_limit)
+            if r.get("primal_integral") is not None:
+                pint[side][name].append(r["primal_integral"])
 
     names = sorted(set(times["A"]) & set(times["B"]))
     if not names:
@@ -155,13 +196,33 @@ def main():
     for n in changes[::-1][:5]:
         print(f"  {n:34s} A {per[n][0]:8.2f}s  B {per[n][1]:8.2f}s")
 
+    primal = None
+    pnames = sorted(n for n in names if pint["A"][n] and pint["B"][n])
+    if args.primal and pnames:
+        pa = {n: sum(pint["A"][n]) / len(pint["A"][n]) for n in pnames}
+        pb = {n: sum(pint["B"][n]) / len(pint["B"][n]) for n in pnames}
+        ma, mb = sum(pa.values()) / len(pnames), sum(pb.values()) / len(pnames)
+        diffs = []
+        for _ in range(2000):
+            sample = [rng.choice(pnames) for _ in pnames]
+            diffs.append(sum(pb[n] - pa[n] for n in sample) / len(sample))
+        diffs.sort()
+        plo, phi = diffs[int(0.05 * len(diffs))], diffs[int(0.95 * len(diffs))]
+        primal = {"A": ma, "B": mb, "diff": mb - ma, "ci90": [plo, phi], "instances": len(pnames)}
+        print(f"\nprimal integral / time limit (mean over {len(pnames)} instances with a reference objective):")
+        print(f"  A {ma:.4f}  B {mb:.4f}  B - A {mb - ma:+.4f}   90% CI [{plo:+.4f}, {phi:+.4f}]")
+        ch = sorted(pnames, key=lambda n: pb[n] - pa[n])
+        print("  largest improvements: " + ", ".join(f"{n} {pa[n]:.3f}->{pb[n]:.3f}" for n in ch[:5] if pb[n] < pa[n]))
+        print("  largest losses:       " + ", ".join(f"{n} {pa[n]:.3f}->{pb[n]:.3f}" for n in ch[::-1][:5] if pb[n] > pa[n]))
+
     for side in ("A", "B"):
         for name, seed, msg in wrong[side]:
             print(f"!!! WRONG {side} {name} seed {seed}: {msg}")
     if args.out:
         Path(args.out).write_text(json.dumps({
             "a": args.a, "b": args.b, "a_args": args.a_args, "b_args": args.b_args, "seeds": seeds,
-            "ratio": ratio, "ci90": [lo, hi], "per_instance": per, "wrong": wrong, "solved": solved}, indent=1))
+            "ratio": ratio, "ci90": [lo, hi], "per_instance": per, "wrong": wrong, "solved": solved,
+            **({"primal": primal} if primal else {})}, indent=1))
     sys.exit(1 if wrong["B"] else 0)
 
 

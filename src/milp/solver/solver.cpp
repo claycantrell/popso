@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -30,6 +31,7 @@
 #include "milp/search/mip_problem.hpp"
 #include "milp/solver/duals.hpp"
 #include "milp/solver/postsolve.hpp"
+#include "milp/solver/square_terms.hpp"
 #include "milp/solver/reformulate.hpp"
 #include "milp/solver/start.hpp"
 
@@ -147,8 +149,7 @@ bool symmetry_rows(const MipProblem& q, const SolverParams& params, const Timer&
     return v ? std::atoi(v) != 0 : true;
   }();
   sst.rows = rows;
-  const SstResult r = sst_reductions(q, sym, used, sst);
-  if (r.empty()) return false;
+  SstResult r = sst_reductions(q, sym, used, sst);
   // Only when the fixings shrink the problem substantially: a few fixings (and their rows) mostly
   // take symmetry away from orbital branching and change the root heuristics' luck (measured on
   // miplib_wide_core: neos-950242 / neos-960392 slower, decomp2 / krka / ns1208400 neutral).
@@ -156,10 +157,33 @@ bool symmetry_rows(const MipProblem& q, const SolverParams& params, const Timer&
     const char* v = std::getenv("MILP_SST_MIN_FIX");
     return v ? std::atof(v) : 0.1;
   }();
-  if (static_cast<double>(r.fixed_zero.size()) < min_fix * q.num_cols()) {
-    log.log(2, "Symmetry: %d leaders would fix %zu columns; not used\n", r.leaders, r.fixed_zero.size());
-    return false;
+  bool use = !r.empty() && static_cast<double>(r.fixed_zero.size()) >= min_fix * q.num_cols();
+  if (!use && !r.empty()) log.log(2, "Symmetry: %d leaders would fix %zu columns; not used\n", r.leaders, r.fixed_zero.size());
+  // Otherwise SST rows on continuous / general integer orbits (SCIP's default leader types; binaries
+  // stay with orbital branching and orbitopes in the search). fhnw-binpack4-4 (infeasible 2D packing,
+  // identical items): rows x_l >= x_f on the positions of interchangeable items; orbital branching on
+  // the binaries alone fixed 209 variables in 96k nodes and the tree did not close in 120 s; SCIP's
+  // own ablations there: SST cuts only 13 s, without symmetry handling or with integer leaders only no
+  // proof in 60-120 s (280-410k nodes). By default on zero-objective problems only: on 10 core models
+  // they take symmetry away from orbital branching as the integer SST rows did (neos-3381206-awhea
+  // 97 leaders / 5029 rows, 1.9 s -> TL; neos-2978193-inde 17 -> 50 s; neos-4738912-atrato 45 -> 93 s;
+  // n5-3, neos-1171448, neos5, seymour1, neos-827175 within +-15%; 1 seed, 120 s, 4 threads).
+  // MILP_SST_CONT=1: all problems, 0: off.
+  const int cont_mode = [] {
+    const char* v = std::getenv("MILP_SST_CONT");
+    return v ? std::atoi(v) : -1;
+  }();
+  bool zero_obj = true;
+  for (Index j = 0; j < q.num_cols() && zero_obj; ++j) zero_obj = q.cost[j] == 0.0;
+  const bool cont = cont_mode > 0 || (cont_mode < 0 && zero_obj);
+  if (!use && cont) {
+    SstOptions s3 = sst;
+    s3.mode = 3;
+    s3.rows = true;
+    r = sst_reductions(q, sym, used, s3);
+    use = !r.rows.empty();
   }
+  if (!use) return false;
   *out = apply_sst(q, r);
   log.log(1, "Symmetry: %d generators, group order ~1e%.1f; %d leaders: %zu symmetry-breaking rows, %zu columns fixed "
           "(%.2fs%s)\n", sym.num_generators(), sym.log10_order(), r.leaders, r.rows.size(), r.fixed_zero.size(),
@@ -226,15 +250,24 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
   const PresolveStats& st = pre.stats();
   log.log(1, "Presolve: %d rows, %d cols, %d nnz -> %d rows, %d cols, %d nnz (%.2fs)\n", st.rows_before,
           st.cols_before, st.nnz_before, st.rows_after, st.cols_after, st.nnz_after, st.time);
+  // This presolve, for MipResult::presolve: the outermost call sets it last (restarts and the
+  // symmetry-breaking rows presolve again in nested calls), so it is the first presolve's.
+  PresolveSummary summary;
+  summary.ran = true;
+  summary.rows_before = st.rows_before, summary.cols_before = st.cols_before, summary.nnz_before = st.nnz_before;
+  summary.rows = st.rows_after, summary.cols = st.cols_after, summary.nnz = st.nnz_after;
+  summary.time = st.time;
   if (ps == PresolveStatus::Infeasible) {
     log.log(1, "Presolve: problem is infeasible\n");
     out->status = Status::Infeasible;
     out->bound = kInf;
+    out->presolve = summary;
     return true;
   }
   // Unbounded-or-infeasible: let the full search classify it precisely.
   if (ps == PresolveStatus::Unbounded) {
     log.log(1, "Presolve: problem is unbounded or infeasible\n");
+    out->presolve = summary;
     return false;
   }
   const MipProblem& q = pre.reduced();
@@ -418,9 +451,11 @@ bool solve_presolved(const MipProblem& p, const SolverParams& params, const Logg
   }
   if (!postsolve_result(p, pre, params, timer, log, &mr)) {
     out->bound = mr.bound;  // still a valid bound for the caller's re-solve
+    out->presolve = summary;
     return false;
   }
   *out = std::move(mr);
+  out->presolve = summary;
   return true;
 }
 
@@ -528,6 +563,50 @@ class IncumbentReporter {
   bool stopped_ = false;
 };
 
+// Collects SolveResult::incumbent_trace (SolverParams::trace_incumbents) from the searches'
+// SearchOptions::on_trace / MiqpOptions::on_trace: only incumbents better than every one before by
+// more than a relative 1e-9 (a restarted search accepts its start again, possibly with an objective
+// that differs in the last bits after the new presolve; racing searches report their own).
+class IncumbentTracer {
+ public:
+  explicit IncumbentTracer(ObjSense sense) : sense_(sense == ObjSense::Maximize ? -1.0 : 1.0) {}
+  void record(double objective, const char* source, double time) {
+    const double v = sense_ * objective;
+    std::lock_guard<std::mutex> lk(mu_);
+    const double tol = is_finite(best_) ? 1e-9 * std::max(1.0, std::abs(best_)) : 0.0;
+    if (!(v < best_ - tol)) return;
+    best_ = v;
+    const char* src = source ? source : "";
+    if (!events_.empty()) {
+      IncumbentEvent& e = events_.back();
+      if (e.source == src && time - e.last_time <= std::max(0.01, 0.01 * e.last_time)) {
+        ++e.count;
+        e.last_time = time;
+        e.last_objective = objective;
+        return;
+      }
+    }
+    IncumbentEvent e;
+    e.time = e.last_time = time;
+    e.objective = e.last_objective = objective;
+    e.source = src;
+    events_.push_back(std::move(e));
+  }
+  std::function<void(double, const char*, double)> hook() {
+    return [this](double objective, const char* source, double time) { record(objective, source, time); };
+  }
+  std::vector<IncumbentEvent> take() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return std::move(events_);
+  }
+
+ private:
+  const double sense_;
+  std::mutex mu_;
+  double best_ = kInf;
+  std::vector<IncumbentEvent> events_;
+};
+
 // LP duals of a pure LP (the solution is optimal) or the fixed-MIP duals of a MILP
 // (SolverParams::duals >= 2), in the model's sense, with the basis they come from (solver/duals.hpp).
 void add_duals(const MipProblem& p, const SolverParams& params, const Timer& timer, const Logger& log, SolveResult& r) {
@@ -583,7 +662,7 @@ void add_duals(const MipProblem& p, const SolverParams& params, const Timer& tim
 // searched problem, and presolve is skipped when there are any.
 SolveResult solve_plain(const Model& model, const std::vector<Implication>& implications, const SolverParams& params_in,
                         const std::vector<double>& start, const Timer& timer, const Logger& log,
-                        IncumbentReporter* reporter, bool allow_duals) {
+                        IncumbentReporter* reporter, IncumbentTracer* tracer, bool allow_duals) {
   SolveResult r;
   MipProblem p;
   if (!MipProblem::from_model(model, &p)) {
@@ -606,6 +685,7 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
   if (reporter) {
     opts.on_incumbent = [reporter](const std::vector<double>& x, double bound) { reporter->report(x, bound); };
   }
+  if (tracer) opts.on_trace = tracer->hook();
   if (const char* v = std::getenv("MILP_CUTOFF")) opts.cutoff = sense * std::atof(v);  // diagnostics: known bound
   if (const char* f = std::getenv("MILP_DEBUG_SOL_ORIG")) {
     // Debugging: a known optimal point of the user model (one value per column), followed through
@@ -628,10 +708,13 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
   if (!params.presolve || !solve_presolved(p, params, log, timer, &mr, opts)) {
     // A failed presolved solve may still leave a valid bound (postsolve failure).
     const double presolved_bound = params.presolve && is_finite(mr.bound) ? mr.bound : -kInf;
+    const PresolveSummary presolved = mr.presolve;  // a presolve that gave up still ran
     SearchOptions plain;
     plain.start = start_x;
     plain.on_incumbent = opts.on_incumbent;
+    plain.on_trace = opts.on_trace;
     mr = branch_and_bound(p, params, log, timer, plain);
+    mr.presolve = presolved;
     if (presolved_bound > mr.bound && !(mr.has_solution && presolved_bound > mr.objective)) {
       mr.bound = presolved_bound;
     }
@@ -667,6 +750,7 @@ SolveResult solve_plain(const Model& model, const std::vector<Implication>& impl
   r.stats.root_bound = sense * mr.root_bound;
   r.stats.restarts = mr.restarts;
   r.stats.tree_restarts = mr.tree_restarts;
+  r.stats.presolve = mr.presolve;
   if (allow_duals && implications.empty() && r.has_solution && !interrupted()) add_duals(p, params, timer, log, r);
   return r;
 }
@@ -703,10 +787,120 @@ void snap_logical(const Model& model, std::vector<double>& x) {
   if (y != x && model.violation(y).max() <= std::max(1e-9, model.violation(x).max())) x = std::move(y);
 }
 
-// A model with a quadratic objective: the QP presolve (qp/qp_presolve.hpp), the convexity test,
-// then the barrier (continuous QP) or the MIQP branch-and-bound.
 SolveResult solve_quadratic(const Model& model, const SolverParams& params, const std::vector<double>& start,
-                            const Timer& timer, const Logger& log) {
+                            const Timer& timer, const Logger& log, IncumbentTracer* tracer);
+
+// A separable convex objective on integer columns (square_terms.hpp) as a MILP: tangent rows of each square
+// around the continuous relaxation's point, the MILP solved by the MILP pipeline, its solution scored with
+// the exact objective, and tangent windows added where it falls outside them, until the solution is exact.
+// Each MILP is a relaxation of the model, so its bound is the model's. MILP_SQ_WINDOW: the window (25);
+// MILP_SQ_ROUNDS: at most that many MILPs (10); MILP_SQ_CENTER=0: no relaxation (centers at 0). A user's integer QP (141637 rows, 265 squared general
+// integers): the MIQP search had no incumbent after 180 s (its root dive solves a barrier QP per step); as
+// a MILP, OPTIMAL at the root in 4.6 s (root LP 9: the tangents give the convex hull of x^2 on the integers).
+SolveResult solve_square_milp(const Model& model, SquareTerms& sq, const SolverParams& params,
+                              const std::vector<double>& start, const Timer& timer, const Logger& log,
+                              IncumbentTracer* tracer) {
+  const double sense = model.sense == ObjSense::Maximize ? -1.0 : 1.0;
+  const Index n = model.num_cols();
+  log.log(1, "Quadratic objective: %zu squares of integer columns (%zu binary), solved as a MILP with tangent rows\n",
+          sq.num_terms(), sq.num_terms() - sq.num_general());
+  SolveResult r;
+  const char* center_env = std::getenv("MILP_SQ_CENTER");  // 0: no relaxation, centers at 0 (in the bounds)
+  if (sq.num_general() > 0 && !(center_env && *center_env == '0')) {
+    // Centers: the continuous relaxation's point.
+    Model rel = model;
+    for (VarType& t : rel.col_type) {
+      if (t == VarType::Integer || t == VarType::Binary) t = VarType::Continuous;
+    }
+    const Logger quiet(log.verbosity() >= 2 ? 1 : 0);
+    const SolveResult rr = solve_quadratic(rel, params, {}, timer, quiet, nullptr);
+    if (rr.has_solution) sq.center_at(rr.x);
+    log.log(1, "  relaxation %s %.10g (%.2fs); %zu tangent rows\n", to_string(rr.status), rr.objective,
+            timer.elapsed(), sq.num_tangents());
+  }
+  const char* rounds_env = std::getenv("MILP_SQ_ROUNDS");
+  const int max_rounds = rounds_env ? std::max(1, std::atoi(rounds_env)) : 10;
+  std::vector<double> best;
+  double best_obj = kInf;      // minimization sense
+  double best_bound = -kInf;   // minimization sense, valid for the model
+  bool converged = false, infeasible = false;
+  Status last = Status::Unknown;
+  long long nodes = 0, iters = 0;
+  for (int round = 0; round < max_rounds; ++round) {
+    const Model milp = sq.build();
+    std::vector<double> st;
+    if (!best.empty()) {
+      st = sq.extend(best);
+    } else if (!start.empty() && static_cast<Index>(start.size()) == n) {
+      bool complete = true;
+      for (double v : start) complete = complete && std::isfinite(v);
+      st = complete ? sq.extend(start) : start;
+      st.resize(static_cast<size_t>(milp.num_cols()), std::numeric_limits<double>::quiet_NaN());
+    }
+    const SolveResult s = solve_plain(milp, {}, params, st, timer, log, nullptr, tracer, false);
+    nodes += s.stats.nodes;
+    iters += s.stats.lp_iterations;
+    last = s.status;
+    if (s.status == Status::Optimal || s.status == Status::TimeLimit || s.status == Status::NodeLimit ||
+        s.status == Status::Interrupted || s.status == Status::IterationLimit || s.status == Status::MemoryLimit) {
+      best_bound = std::max(best_bound, sense * s.bound);
+    }
+    if (s.status == Status::Infeasible) {
+      infeasible = best.empty();
+      converged = !best.empty();
+      break;
+    }
+    if (!s.has_solution) break;
+    std::vector<double> x(s.x.begin(), s.x.begin() + n);
+    const double obj = sense * model.objective_value(x);
+    if (obj < best_obj) best_obj = obj, best = std::move(x);
+    if (s.status != Status::Optimal) break;
+    const int missed = sq.refine(std::vector<double>(s.x.begin(), s.x.begin() + n));
+    if (missed == 0) {
+      converged = true;
+      break;
+    }
+    log.log(1, "Tangent round %d: %d squares outside their tangents (MILP %.10g, exact %.10g); %zu tangent rows\n",
+            round + 1, missed, s.objective, sense * obj, sq.num_tangents());
+  }
+  r.stats.nodes = nodes;
+  r.stats.lp_iterations = iters;
+  if (infeasible) {
+    r.status = Status::Infeasible;
+    r.bound = sense * kInf;
+  } else {
+    if (!best.empty()) {
+      r.has_solution = true;
+      r.x = std::move(best);
+      r.objective = model.objective_value(r.x);
+      best_bound = std::min(best_bound, best_obj);
+    }
+    const double tol = std::max(params.mip_abs_gap, params.mip_rel_gap * std::abs(best_obj));
+    if (r.has_solution && (converged || best_obj - best_bound <= tol)) {
+      r.status = Status::Optimal;
+    } else {
+      r.status = last == Status::Optimal ? Status::Unknown : last;
+    }
+    r.bound = sense * best_bound;
+  }
+  r.stats.root_bound = r.bound;
+  r.stats.time = timer.elapsed();
+  return r;
+}
+
+// A model with a quadratic objective: the QP presolve (qp/qp_presolve.hpp), the convexity test,
+// then the barrier (continuous QP) or the MIQP branch-and-bound. A separable convex objective on integer
+// columns goes to solve_square_milp (MILP_SQ_MILP=0: the MIQP search).
+SolveResult solve_quadratic(const Model& model, const SolverParams& params, const std::vector<double>& start,
+                            const Timer& timer, const Logger& log, IncumbentTracer* tracer) {
+  {
+    const char* on = std::getenv("MILP_SQ_MILP");
+    const char* w = std::getenv("MILP_SQ_WINDOW");
+    SquareTerms sq;
+    if (!(on && *on == '0') && sq.init(model, w ? std::atoi(w) : 25)) {
+      return solve_square_milp(model, sq, params, start, timer, log, tracer);
+    }
+  }
   SolveResult r;
   MipProblem p;
   if (!MipProblem::from_model(model, &p)) {
@@ -719,7 +913,16 @@ SolveResult solve_quadratic(const Model& model, const SolverParams& params, cons
   QpPresolver pre;
   const MipProblem* sp = &p;  // the problem solved: p or the presolved one
   if (params.presolve && p.implications.empty()) {
-    if (pre.run(p, log) == QpPresolveStatus::Infeasible) {
+    const double t0 = timer.elapsed();
+    const QpPresolveStatus qps = pre.run(p, log);
+    PresolveSummary& ps = r.stats.presolve;
+    ps.ran = true;
+    ps.rows_before = p.num_rows(), ps.cols_before = p.num_cols(), ps.nnz_before = p.A.nnz();
+    if (qps != QpPresolveStatus::Infeasible) {
+      ps.rows = pre.reduced().num_rows(), ps.cols = pre.reduced().num_cols(), ps.nnz = pre.reduced().A.nnz();
+    }
+    ps.time = timer.elapsed() - t0;
+    if (qps == QpPresolveStatus::Infeasible) {
       r.status = Status::Infeasible;
       r.bound = sense * kInf;
       r.stats.root_bound = r.bound;
@@ -791,6 +994,7 @@ SolveResult solve_quadratic(const Model& model, const SolverParams& params, cons
   MiqpOptions mo;
   mo.threads = std::max(1, threads);
   mo.diag_shift = shift;
+  if (tracer) mo.on_trace = tracer->hook();
   if (!start.empty()) mo.start = sp == &p ? start : pre.crush(start);
   MiqpResult mr;
   if (sp->num_cols() == 0) {
@@ -822,11 +1026,11 @@ SolveResult solve(const Model& model, const SolverParams& params) { return solve
 namespace {
 
 SolveResult solve_model(const Model& model, const SolverParams& params, const std::vector<double>& start,
-                        IncumbentReporter* reporter) {
+                        IncumbentReporter* reporter, IncumbentTracer* tracer) {
   Timer timer;
   Logger log(params.verbosity);
   if (model.has_quadratic()) {
-    if (!model.has_logical()) return solve_quadratic(model, params, start, timer, log);
+    if (!model.has_logical()) return solve_quadratic(model, params, start, timer, log, tracer);
     const LogicalReformulation R = reformulate_logical(model, params.logic_big_m);
     if (!R.implications.empty()) {
       throw std::runtime_error("logical constraints without finite big-M bounds are not supported yet with a "
@@ -834,7 +1038,7 @@ SolveResult solve_model(const Model& model, const SolverParams& params, const st
     }
     log.log(1, "Logical constraints: %d semi-continuous, %zu SOS, %zu indicator -> %d auxiliary columns, %d rows\n",
             model.num_semi(), model.sos.size(), model.indicators.size(), R.aux_cols, R.aux_rows);
-    SolveResult r = solve_quadratic(R.model, params, start.empty() ? start : R.extend(start), timer, log);
+    SolveResult r = solve_quadratic(R.model, params, start.empty() ? start : R.extend(start), timer, log, tracer);
     if (r.has_solution) {
       r.x.resize(static_cast<size_t>(model.num_cols()));
       snap_logical(model, r.x);
@@ -842,7 +1046,7 @@ SolveResult solve_model(const Model& model, const SolverParams& params, const st
     }
     return r;
   }
-  if (!model.has_logical()) return solve_plain(model, {}, params, start, timer, log, reporter, true);
+  if (!model.has_logical()) return solve_plain(model, {}, params, start, timer, log, reporter, tracer, true);
   // Semi-continuous columns, SOS sets, indicator constraints: solved as a plain MILP with auxiliary
   // binaries (reformulate.hpp). MILP_LOGIC_BIGM overrides params.logic_big_m (diagnostics).
   const char* env_big_m = std::getenv("MILP_LOGIC_BIGM");
@@ -851,7 +1055,7 @@ SolveResult solve_model(const Model& model, const SolverParams& params, const st
           "%zu implications\n", model.num_semi(), model.sos.size(), model.indicators.size(), R.aux_cols, R.aux_rows,
           R.big_m, R.implications.size());
   const std::vector<double> st = start.empty() ? start : R.extend(start);
-  SolveResult r = solve_plain(R.model, R.implications, params, st, timer, log, reporter, false);
+  SolveResult r = solve_plain(R.model, R.implications, params, st, timer, log, reporter, tracer, false);
   if (r.has_solution) {
     r.x.resize(static_cast<size_t>(model.num_cols()));
     snap_logical(model, r.x);
@@ -877,7 +1081,13 @@ SolveResult solve(const Model& model, const SolverParams& params_in, const std::
   cb_params.on_incumbent = params_in.on_incumbent;
   std::optional<IncumbentReporter> reporter;
   if (params_in.on_incumbent && !model.has_quadratic()) reporter.emplace(model, cb_params);
-  SolveResult r = solve_model(model, params, start, reporter ? &*reporter : nullptr);
+  std::optional<IncumbentTracer> tracer;
+  if (params_in.trace_incumbents) tracer.emplace(model.sense);
+  SolveResult r = solve_model(model, params, start, reporter ? &*reporter : nullptr, tracer ? &*tracer : nullptr);
+  if (tracer) {
+    if (r.has_solution) tracer->record(r.objective, "final", r.stats.time);
+    r.incumbent_trace = tracer->take();
+  }
   // The final solution (postsolved and polished) if it improves on the last one reported.
   if (reporter && r.has_solution) reporter->report(r.x, model.sense == ObjSense::Maximize ? -r.bound : r.bound);
   if (local_flag.load() || (params_in.interrupt && params_in.interrupt->load())) {

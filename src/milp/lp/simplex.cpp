@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 #include "milp/core/interrupt.hpp"
 #include "milp/core/timer.hpp"
@@ -53,6 +54,29 @@ const double kWarmMul = lp_knob("MILP_LP_WARM_PERTURB", 10.0);
 const bool kPrimalDse = lp_knob("MILP_LP_PRIMAL_DSE", 1.0) != 0.0;
 const bool kHarrisSigned = lp_knob("MILP_LP_HARRIS_SIGNED", 0.0) != 0.0;
 const double kPerturbColscale = lp_knob("MILP_LP_PERTURB_COLSCALE", 1.0);
+// Dual feasibility in unscaled terms. A logical's reduced cost in the row-scaled LP is the unscaled one divided by
+// the row scale, so the plain tolerance on an upscaled row (scale 2^k) let unscaled dual infeasibilities up to 2^k
+// times the tolerance through, and the LP stopped with its objective above the optimum (the safe dual bound fired
+// on app1-1, beasleyC3, neos17, neos859080, jobshop: duals of the wrong sign by up to 1e-5). The optimality tests
+// at the end of a solve (count_dual_infeasibilities) and the primal cleanup's pricing take the tolerance times
+// min(1, 1 / scale) on logicals (dftol_); the dual loop and the tests that choose the dual phase 1 at the start
+// of a solve stay in scaled terms. MILP_LP_UNSCALED_DUAL=0: scaled terms throughout.
+const bool kUnscaledDual = lp_knob("MILP_LP_UNSCALED_DUAL", 1.0) != 0.0;
+
+// Compensated summation (Ogita, Rump and Oishi's Sum2, i.e. Neumaier's variant of Kahan's): the result's
+// error is at most u |sum| + gamma_{n-1}^2 sum |terms| (u = 2^-53, gamma_k = k u / (1 - k u)).
+struct Sum2 {
+  double s = 0.0, c = 0.0;
+  long long n = 0;
+  void add(double t) {
+    const double a = s + t;
+    const double bb = a - s;
+    c += (s - (a - bb)) + (t - bb);
+    s = a;
+    ++n;
+  }
+  double value() const { return s + c; }
+};
 
 // Uniform [0, 1) factor of logical i for the perturbation (splitmix64 of the row and the seed; rows are
 // added and removed, so no stored table).
@@ -63,6 +87,13 @@ double row_rand(Index i, uint64_t seed) {
   z ^= z >> 31;
   return static_cast<double>(z >> 11) * 0x1.0p-53;
 }
+
+// Dual tolerance factor of a logical whose row is scaled by rs (see kUnscaledDual).
+double dual_tol_factor(double rs) { return kUnscaledDual ? std::min(1.0, 1.0 / rs) : 1.0; }
+
+// DualSimplex::check_counts (statistics only).
+std::atomic<long long> g_farkas_checked{0}, g_farkas_failed{0}, g_farkas_retried_ok{0};
+std::atomic<long long> g_unscaled_solves{0}, g_unscaled_iterations{0};
 }  // namespace
 
 void DualSimplex::load(const SparseMatrix& A, const std::vector<double>& cost, const std::vector<double>& col_lb,
@@ -95,10 +126,12 @@ void DualSimplex::load(const SparseMatrix& A, const std::vector<double>& cost, c
     ub_[j] = col_ub[j];
   }
   ftol_.assign(N, 1.0);
+  dftol_.assign(N, 1.0);
   for (Index i = 0; i < m_; ++i) {
     lb_[n_ + i] = -row_ub[i] * rscale_[i];
     ub_[n_ + i] = -row_lb[i] * rscale_[i];
     ftol_[n_ + i] = std::min(1.0, rscale_[i]);
+    dftol_[n_ + i] = dual_tol_factor(rscale_[i]);
   }
   wcost_ = cost_;
   wlb_ = lb_;
@@ -514,17 +547,20 @@ bool DualSimplex::primal_residuals_small() {
   return ok;
 }
 
-Index DualSimplex::count_dual_infeasibilities(bool flip_boxed) {
-  const double tol = 1e-7;
-  Index count = 0;
+Index DualSimplex::count_dual_infeasibilities(bool flip_boxed, bool unscaled) {
+  Index count = 0, any = 0, scaled = 0;
   bool flipped = false;
   for (Index j = 0; j < n_ + m_; ++j) {
     const VarStatus s = status_[j];
     if (s == VarStatus::Basic || wlb_[j] == wub_[j]) continue;
     const double dj = d_[j];
+    const double tol = unscaled ? 1e-7 * dftol_[j] : 1e-7;
     const bool infeasible = (s == VarStatus::AtLower && dj < -tol) || (s == VarStatus::AtUpper && dj > tol) ||
                             (s == VarStatus::AtZero && std::abs(dj) > tol);
     if (!infeasible) continue;
+    ++any;
+    scaled += (s == VarStatus::AtLower && dj < -1e-7) || (s == VarStatus::AtUpper && dj > 1e-7) ||
+              (s == VarStatus::AtZero && std::abs(dj) > 1e-7);
     if (flip_boxed && is_finite(wlb_[j]) && is_finite(wub_[j])) {
       place_by_dual(j);
       flipped = true;
@@ -532,6 +568,8 @@ Index DualSimplex::count_dual_infeasibilities(bool flip_boxed) {
       ++count;
     }
   }
+  // Statistics: the scaled test would have found nothing here.
+  if (unscaled && any > 0 && scaled == 0 && unscaled_from_ < 0) unscaled_from_ = total_iterations_;
   if (flipped) compute_primal();
   return count;
 }
@@ -705,34 +743,65 @@ bool DualSimplex::limits_hit(const LpOptions& opt, LpStatus* st) const {
     *st = LpStatus::TimeLimit;
     return true;
   }
+  if (opt.checkpoint && opt.checkpoint_every > 0 && total_iterations_ - iter_start_ >= next_checkpoint_) {
+    next_checkpoint_ = total_iterations_ - iter_start_ + opt.checkpoint_every;
+    if (!opt.checkpoint(total_iterations_ - iter_start_)) {
+      *st = LpStatus::TimeLimit;
+      return true;
+    }
+  }
   return false;
 }
 
 double DualSimplex::lagrangian_bound() {
-  // Valid lower bound for any multipliers y: min over the box of (c - A^T y)^T x.
+  // Valid lower bound for any multipliers y: min over the box of (c - A^T y)^T x. The cutoff stop
+  // (CutoffReached) rests on it, so it carries the rounding error terms of safe_bound (scaling by powers of
+  // two changes no rounding: the same bound as on the unscaled data); |d_j| < 1e-11 counts as zero.
+  constexpr double eps = std::numeric_limits<double>::epsilon();
   tau_.clear();
   std::vector<double>& y = tau_.dense;
   for (Index p = 0; p < m_; ++p) y[p] = cost_[basic_[p]];
   lu_.btran(y);
-  double bound = 0.0;
+  Sum2 sum;
+  double S = 0.0, E = 0.0;
+  bool finite = true;
   for (Index j = 0; j < n_ + m_; ++j) {
-    double dj;
+    double dj, ej = 0.0;
     if (j < n_) {
       dj = cost_[j];
-      for (Index p = A_.begin(j); p < A_.end(j); ++p) dj -= A_.value[p] * y[A_.index[p]];
+      double a = std::abs(dj);
+      for (Index p = A_.begin(j); p < A_.end(j); ++p) {
+        const double v = A_.value[p] * y[A_.index[p]];
+        dj -= v;
+        a += std::abs(v);
+      }
+      ej = (A_.end(j) - A_.begin(j) + 2.0) * eps * a;
     } else {
       dj = -y[j - n_];
     }
-    if (std::abs(dj) < 1e-11) continue;
-    const double b = dj > 0 ? lb_[j] : ub_[j];
+    const double l = lb_[j], u = ub_[j];
+    if (std::abs(dj) < 1e-11) {
+      double mag = std::max(1.0, std::abs(x_[j]));
+      if (is_finite(l)) mag = std::max(mag, std::abs(l));
+      if (is_finite(u)) mag = std::max(mag, std::abs(u));
+      E += (std::abs(dj) + ej) * mag;
+      continue;
+    }
+    const double b = dj > 0 ? l : u;
     if (!is_finite(b)) {
-      bound = -kInf;
+      finite = false;
       break;
     }
-    bound += dj * b;
+    E += ej * (is_finite(l) && is_finite(u) ? std::max(std::abs(l), std::abs(u)) : std::abs(b));
+    const double t = dj * b;
+    sum.add(t);
+    S += std::abs(t);
   }
   std::fill(y.begin(), y.end(), 0.0);
-  return bound;
+  if (!finite) return -kInf;
+  const double s = sum.value(), ne = static_cast<double>(sum.n) * eps;
+  E += 2.0 * eps * S + 2.0 * eps * std::abs(s) + ne * ne * S;
+  return s - E * (1.0 + eps);
 }
 
 LpStatus DualSimplex::fail(const char* why) {
@@ -744,10 +813,70 @@ LpStatus DualSimplex::solve(const LpOptions& opt) {
   fail_reason_ = "";
   solve_start_ = t_timer.elapsed();
   iter_start_ = total_iterations_;
+  next_checkpoint_ = opt.checkpoint_every;
   has_farkas_ = false;
-  const LpStatus st = run(opt);
+  unscaled_from_ = -1;
+  LpStatus st = run(opt);
+  if (st == LpStatus::Infeasible && farkas_check_enabled()) st = verify_infeasible(opt);
   if (st != LpStatus::Infeasible) has_farkas_ = false;
+  if (unscaled_from_ >= 0) {
+    g_unscaled_solves.fetch_add(1, std::memory_order_relaxed);
+    g_unscaled_iterations.fetch_add(total_iterations_ - unscaled_from_, std::memory_order_relaxed);
+  }
   return st;
+}
+
+bool DualSimplex::farkas_check_enabled() {
+  static const bool on = lp_knob("MILP_FARKAS_CHECK", 1.0) != 0.0;
+  return on;
+}
+
+DualSimplex::CheckCounts DualSimplex::check_counts() {
+  CheckCounts c;
+  c.farkas_checked = g_farkas_checked.load(std::memory_order_relaxed);
+  c.farkas_failed = g_farkas_failed.load(std::memory_order_relaxed);
+  c.farkas_retried_ok = g_farkas_retried_ok.load(std::memory_order_relaxed);
+  c.unscaled_solves = g_unscaled_solves.load(std::memory_order_relaxed);
+  c.unscaled_iterations = g_unscaled_iterations.load(std::memory_order_relaxed);
+  return c;
+}
+
+bool DualSimplex::farkas_verified() const {
+  // The dual loop's ray: rho = row r of B^{-1} (scaled rows), the leaving variable below its lower bound (sign
+  // 1) or above its upper bound (-1). Then min over the box of sign rho^T [A_s I] (x, s') > 0, which is the
+  // zero-cost Lagrangian of y = -sign R rho on the unscaled rows (R: the row scales).
+  if (!has_farkas_) return false;
+  sb_y_.resize(m_);
+  double big = 0.0;
+  for (Index i = 0; i < m_; ++i) {
+    sb_y_[i] = -farkas_sign_ * farkas_[i] * rscale_[i];
+    big = std::max(big, std::abs(sb_y_[i]));
+  }
+  // tau: entries the dual ratio test ignores are below 1e-9 (|alpha|); relative, as the ray has no scale.
+  return big > 0.0 && farkas_bound(sb_y_, 1e-9 * big) > 0.0;
+}
+
+LpStatus DualSimplex::verify_infeasible(const LpOptions& opt) {
+  g_farkas_checked.fetch_add(1, std::memory_order_relaxed);
+  if (farkas_verified()) return LpStatus::Infeasible;
+  if (lu_.num_updates() > 0) {
+    // Once more from a fresh factorization (an updated one may have drifted).
+    has_factor_ = false;
+    has_farkas_ = false;
+    const LpStatus st = run(opt);
+    const bool ok = st == LpStatus::Infeasible ? farkas_verified() : st == LpStatus::Optimal || st == LpStatus::CutoffReached;
+    if (ok) {
+      g_farkas_retried_ok.fetch_add(1, std::memory_order_relaxed);
+      return st;
+    }
+    if (st != LpStatus::Infeasible) {  // a limit or a failure of its own
+      g_farkas_failed.fetch_add(1, std::memory_order_relaxed);
+      return st;
+    }
+  }
+  g_farkas_failed.fetch_add(1, std::memory_order_relaxed);
+  has_farkas_ = false;
+  return fail("unverified infeasibility proof");
 }
 
 LpStatus DualSimplex::run(const LpOptions& opt) {
@@ -834,7 +963,7 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
       }
     }
   }
-  const Index dual_infeasible = opt.primal_first ? count_dual_infeasibilities(false) : 0;
+  const Index dual_infeasible = opt.primal_first ? count_dual_infeasibilities(false, true) : 0;
   if (dual_infeasible > 0) {
     bool primal_feasible = true;
     for (Index p = 0; p < m_ && primal_feasible; ++p) {
@@ -870,7 +999,7 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
       }
     }
   }
-  if (count_dual_infeasibilities(true) > 0) {
+  if (count_dual_infeasibilities(true, false) > 0) {
     // Dual phase 1 on the auxiliary problem where every variable is boxed.
     for (Index j = 0; j < n_ + m_; ++j) {
       const double l = lb_[j], u = ub_[j];
@@ -898,7 +1027,7 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
     }
     compute_duals();
     compute_primal();
-    if (count_dual_infeasibilities(true) > 0) {
+    if (count_dual_infeasibilities(true, false) > 0) {
       // Dual infeasible (possibly only numerically): find a primal feasible
       // point with zero costs, then let the primal simplex either reach the
       // optimum or prove unboundedness with a ray.
@@ -957,7 +1086,7 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
       const char* v = std::getenv("MILP_LP_FLIP_ROUNDS");
       return v ? std::atoi(v) : 0;
     }();
-    if (round >= kFlipRounds && count_dual_infeasibilities(false) > 0) {
+    if (round >= kFlipRounds && count_dual_infeasibilities(false, true) > 0) {
       bool primal_feasible = true;
       for (Index p = 0; p < m_ && primal_feasible; ++p) {
         const Index j = basic_[p];
@@ -976,7 +1105,7 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
         if (!kPrimalDse) dse_.assign(m_, 1.0);  // the primal pivots do not maintain the weights
       }
     }
-    if (count_dual_infeasibilities(true) == 0) {
+    if (count_dual_infeasibilities(true, true) == 0) {
       // Never trust incrementally updated values for the final verdict: the
       // primal values must pass a residual check (else they are recomputed),
       // the duals are recomputed, and if the updated factorization leaves
@@ -1001,7 +1130,7 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
         for (Index p = 0; p < m_; ++p) drift = std::max(drift, std::abs(x_[basic_[p]] - x_old[basic_[p]]));
         if (drift > 1e-6) std::fprintf(stderr, "LP drift %.3g at optimality (round %d)\n", drift, round);
       }
-      if (count_dual_infeasibilities(true) > 0) {
+      if (count_dual_infeasibilities(true, true) > 0) {
         if (trace) std::fprintf(stderr, "LPTRACE round %d: dual infeasible after recompute (fresh %d ok %d)\n", round, (int)fresh, (int)ok);
         continue;
       }
@@ -1048,10 +1177,11 @@ LpStatus DualSimplex::run(const LpOptions& opt) {
   return fail("no convergence after 20 rounds");
 }
 
-LpStatus DualSimplex::infeasible(bool phase1) {
+LpStatus DualSimplex::infeasible(bool phase1, double sign) {
   // rho_ is the row of B^{-1} of the leaving variable whose bound cannot be reached.
   if (!phase1) {
     farkas_.assign(rho_.dense.begin(), rho_.dense.begin() + m_);
+    farkas_sign_ = sign;
     has_farkas_ = true;
   }
   return LpStatus::Infeasible;
@@ -1190,7 +1320,7 @@ LpStatus DualSimplex::dual_loop(const LpOptions& opt, bool phase1) {
         theta0 = std::min(theta0, kHarrisSigned ? std::max(dj_eff + dtol, 0.0) / aa : ratio + dtol / aa);
       }
     }
-    if (nc == 0) return infeasible(phase1);
+    if (nc == 0) return infeasible(phase1, s);
 
     // Process breakpoints group by group (Harris groups). The first group is
     // found by partitioning; if bound flips continue past it, the remaining
@@ -1269,7 +1399,7 @@ LpStatus DualSimplex::dual_loop(const LpOptions& opt, bool phase1) {
       }
       return fail("non-finite ratio test");
     }
-    if (q < 0) return infeasible(phase1);
+    if (q < 0) return infeasible(phase1, s);
 
     // ---- FTRAN: entering column, DSE tau = B^{-1} rho and bound flips, in one pass ----
     column(q, alpha_);
@@ -1422,9 +1552,9 @@ LpStatus DualSimplex::primal_loop(const LpOptions& opt) {
       compute_primal();
       compute_duals();
     }
-    // Dantzig pricing.
+    // Dantzig pricing over the variables dual infeasible in unscaled terms (dftol_).
     Index q = -1;
-    double best = dtol;
+    double best = 0.0;
     for (Index j = 0; j < n_ + m_; ++j) {
       const VarStatus st = status_[j];
       if (st == VarStatus::Basic || wlb_[j] == wub_[j]) continue;
@@ -1433,7 +1563,7 @@ LpStatus DualSimplex::primal_loop(const LpOptions& opt) {
       if (st == VarStatus::AtLower) infeas = -dj;
       else if (st == VarStatus::AtUpper) infeas = dj;
       else infeas = std::abs(dj);
-      if (infeas > best) best = infeas, q = j;
+      if (infeas > best && infeas > dtol * dftol_[j]) best = infeas, q = j;
     }
     if (q < 0) {
       if (!kPrimalDse) dse_.assign(m_, 1.0);
@@ -1593,6 +1723,7 @@ void DualSimplex::add_rows(Index count, const std::vector<Index>& start, const s
     wlb_.push_back(-ub[r] * rs);
     wub_.push_back(-lb[r] * rs);
     ftol_.push_back(std::min(1.0, rs));
+    dftol_.push_back(dual_tol_factor(rs));
     status_.push_back(VarStatus::Basic);
     basic_.push_back(j);
     // Logical value: s = -a x.
@@ -1658,6 +1789,7 @@ void DualSimplex::remove_rows(const std::vector<Index>& rows) {
   compact(x_);
   compact(d_);
   compact(ftol_);
+  compact(dftol_);
   arow_.assign(n_ + m_new, 0.0);
   arow_mark_.assign(n_ + m_new, 0);
   arow_count_ = 0;
@@ -1715,9 +1847,12 @@ bool DualSimplex::tableau_row(Index basic_var, std::vector<double>& out, std::ve
   }
   if (r < 0) return false;
   unit_btran(r);
+  tableau_work_ = rho_.count;
+  for (Index k = 0; k < rho_.count; ++k) tableau_work_ += At_.end(rho_.nz[k]) - At_.begin(rho_.nz[k]);
   pivot_row(rho_);
   out.resize(arow_.size(), 0.0);
   const Index total = static_cast<Index>(arow_.size());
+  tableau_work_ += 16 * arow_count_ > total ? total : arow_count_;
   if (16 * arow_count_ > total) {
     nz.clear();  // dense row: a scan is cheaper than sorting the index list
     for (Index j = 0; j < total; ++j) {
@@ -1752,11 +1887,16 @@ std::vector<double> DualSimplex::row_activities() const {
 }
 
 std::vector<double> DualSimplex::row_duals() const {
-  std::vector<double> y(m_);
+  std::vector<double> y;
+  row_duals(y);
+  return y;
+}
+
+void DualSimplex::row_duals(std::vector<double>& y) const {
+  y.resize(m_);
   for (Index p = 0; p < m_; ++p) y[p] = cost_[basic_[p]];
   lu_.btran(y);
   for (Index i = 0; i < m_; ++i) y[i] *= rscale_[i];  // duals of the unscaled rows
-  return y;
 }
 
 std::vector<double> DualSimplex::reduced_costs() const {
@@ -1768,6 +1908,101 @@ std::vector<double> DualSimplex::reduced_costs() const {
     d[j] = dj;
   }
   return d;
+}
+
+bool DualSimplex::safe_bound_enabled() {
+  static const bool on = lp_knob("MILP_SAFE_BOUND", 1.0) != 0.0;
+  return on;
+}
+
+double DualSimplex::safe_bound(const std::vector<double>& y, double tau) const { return lagrangian_safe(y, tau, true); }
+
+double DualSimplex::farkas_bound(const std::vector<double>& y, double tau) const {
+  return lagrangian_safe(y, tau, false);
+}
+
+double DualSimplex::lagrangian_safe(const std::vector<double>& y, double tau, bool with_cost) const {
+  // Rounding: every product and sum is in round-to-nearest; the error terms use eps = 2u (DBL_EPSILON),
+  // twice the unit roundoff, which also covers the rounding of the error terms themselves. Scaling is by
+  // powers of two, so the unscaled data (At_orig_, bounds / rscale_) is exact.
+  constexpr double eps = std::numeric_limits<double>::epsilon();
+  constexpr double tiny = std::numeric_limits<double>::denorm_min();  // absolute error of an underflowing product
+  sb_r_.assign(n_, 0.0);
+  sb_a_.assign(n_, 0.0);
+  sb_cnt_.assign(n_, 0);
+  Sum2 sum;
+  double S = 0.0, E = 0.0;  // sum of |terms|; error terms
+  for (Index i = 0; i < m_ && i < static_cast<Index>(y.size()); ++i) {
+    const double yi = y[i];
+    if (yi == 0.0) continue;
+    const double side = yi > 0.0 ? -var_upper(n_ + i) : -var_lower(n_ + i);  // row lower / upper side
+    if (!std::isfinite(side)) {
+      if (!(std::abs(yi) <= tau)) continue;  // y_i = 0 (also a NaN)
+      E += std::abs(yi) * std::max(1.0, std::abs(var_value(n_ + i)));
+    } else {
+      const double t = yi * side;
+      sum.add(t);
+      S += std::abs(t);
+    }
+    for (Index p = At_orig_.begin(i); p < At_orig_.end(i); ++p) {
+      const Index j = At_orig_.index[p];
+      const double v = At_orig_.value[p] * yi;
+      sb_r_[j] += v;
+      sb_a_[j] += std::abs(v);
+      ++sb_cnt_[j];
+    }
+  }
+  for (Index j = 0; j < n_; ++j) {
+    const double cj = with_cost ? cost_[j] : 0.0;
+    const double rj = cj - sb_r_[j];
+    // |r_j - computed r_j| <= gamma_{k+1} (|c_j| + sum_i |a_ij y_i|) for k products (dot product bound).
+    const double k = sb_cnt_[j] + 2.0;
+    const double ej = k * eps * (std::abs(cj) + sb_a_[j]) + k * tiny;
+    if (rj == 0.0 && sb_cnt_[j] == 0) continue;  // c_j = 0 exactly, no rows
+    const double l = lb_[j], u = ub_[j];
+    const bool lf = std::isfinite(l), uf = std::isfinite(u);
+    double b;
+    if (lf && uf) {
+      // min over the box of r x >= r~ b - e_j max(|l|, |u|) for any r within e_j of r~ (b = l or u by sign).
+      b = rj > 0.0 ? l : u;
+      E += ej * std::max(std::abs(l), std::abs(u));
+    } else if (lf && rj - ej >= 0.0) {
+      b = l;
+      E += ej * std::abs(l);
+    } else if (uf && rj + ej <= 0.0) {
+      b = u;
+      E += ej * std::abs(u);
+    } else if (std::abs(rj) <= tau) {
+      double mag = std::max(1.0, std::abs(x_[j]));
+      if (lf) mag = std::max(mag, std::abs(l));
+      if (uf) mag = std::max(mag, std::abs(u));
+      E += (std::abs(rj) + ej) * mag;
+      continue;
+    } else {
+      return -kInf;
+    }
+    const double t = rj * b;
+    sum.add(t);
+    S += std::abs(t);
+  }
+  const double s = sum.value();
+  const double ne = static_cast<double>(sum.n) * eps;
+  // Products (u |t| each), the compensated sum, the final subtraction and underflow.
+  E += 2.0 * eps * S + 2.0 * eps * std::abs(s) + ne * ne * S + static_cast<double>(sum.n) * tiny;
+  E *= 1.0 + eps;
+  const double bound = s - E;
+  return std::isfinite(bound) ? bound : -kInf;
+}
+
+double DualSimplex::safe_objective(double tau, bool* below) const {
+  const double obj = objective();
+  if (below) *below = false;
+  if (!safe_bound_enabled()) return obj;
+  row_duals(sb_y_);
+  const double sb = safe_bound(sb_y_, tau);
+  if (sb >= obj - 1e-6 * std::max(1.0, std::abs(obj))) return obj;
+  if (below) *below = true;
+  return sb;
 }
 
 }  // namespace milp

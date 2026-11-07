@@ -1,0 +1,87 @@
+# Primal benchmark set (80 MIPLIB 2017 benchmark instances): where popso v0.6.0 (120 s, 4 threads, the
+# 240-instance run on the Intel machine) ended without proving optimality and with an incumbent more than 1%
+# worse than the best known objective (74; primal gap |z - z*| / max(|z|, |z*|), z* = the best of the MIPLIB
+# solu value and the HiGHS / SCIP 120 s references in benchmarks/reference/miplib_benchmark_x86.json), or with
+# no incumbent while HiGHS or SCIP found one (6: academictimetablesmall, cmflsp50-24-8-8, dws008-01, s100,
+# s250r10, triptim1). Kept: files <= 30 MB and peak RSS <= 4 GB in that run (dropped: square41, square47,
+# neos-5114902-kasavu). For primal heuristic work: compare final objectives, not solve times.
+benchmarks/miplib/academictimetablesmall.mps.gz
+benchmarks/miplib/app1-2.mps.gz
+benchmarks/miplib/atlanta-ip.mps.gz
+benchmarks/miplib/b1c1s1.mps.gz
+benchmarks/miplib/blp-ar98.mps.gz
+benchmarks/miplib/blp-ic98.mps.gz
+benchmarks/miplib/bppc4-08.mps.gz
+benchmarks/miplib/brazil3.mps.gz
+benchmarks/miplib/buildingenergy.mps.gz
+benchmarks/miplib/cmflsp50-24-8-8.mps.gz
+benchmarks/miplib/co-100.mps.gz
+benchmarks/miplib/comp21-2idx.mps.gz
+benchmarks/miplib/cost266-UUE.mps.gz
+benchmarks/miplib/csched008.mps.gz
+benchmarks/miplib/cvs16r128-89.mps.gz
+benchmarks/miplib/dws008-01.mps.gz
+benchmarks/miplib/eilA101-2.mps.gz
+benchmarks/miplib/germanrr.mps.gz
+benchmarks/miplib/glass4.mps.gz
+benchmarks/miplib/highschool1-aigio.mps.gz
+benchmarks/miplib/k1mushroom.mps.gz
+benchmarks/miplib/lectsched-5-obj.mps.gz
+benchmarks/miplib/leo2.mps.gz
+benchmarks/miplib/mad.mps.gz
+benchmarks/miplib/map10.mps.gz
+benchmarks/miplib/map16715-04.mps.gz
+benchmarks/miplib/markshare2.mps.gz
+benchmarks/miplib/momentum1.mps.gz
+benchmarks/miplib/n3div36.mps.gz
+benchmarks/miplib/neos-1171737.mps.gz
+benchmarks/miplib/neos-3024952-loue.mps.gz
+benchmarks/miplib/neos-3216931-puriri.mps.gz
+benchmarks/miplib/neos-3656078-kumeu.mps.gz
+benchmarks/miplib/neos-4300652-rahue.mps.gz
+benchmarks/miplib/neos-4338804-snowy.mps.gz
+benchmarks/miplib/neos-4387871-tavua.mps.gz
+benchmarks/miplib/neos-4413714-turia.mps.gz
+benchmarks/miplib/neos-4532248-waihi.mps.gz
+benchmarks/miplib/neos-4763324-toguru.mps.gz
+benchmarks/miplib/neos-5049753-cuanza.mps.gz
+benchmarks/miplib/neos-5052403-cygnet.mps.gz
+benchmarks/miplib/neos-5093327-huahum.mps.gz
+benchmarks/miplib/neos-5107597-kakapo.mps.gz
+benchmarks/miplib/neos-5195221-niemur.mps.gz
+benchmarks/miplib/neos-631710.mps.gz
+benchmarks/miplib/neos-787933.mps.gz
+benchmarks/miplib/neos-848589.mps.gz
+benchmarks/miplib/neos-873061.mps.gz
+benchmarks/miplib/ns1644855.mps.gz
+benchmarks/miplib/ns1760995.mps.gz
+benchmarks/miplib/nursesched-medium-hint03.mps.gz
+benchmarks/miplib/opm2-z10-s4.mps.gz
+benchmarks/miplib/physiciansched3-3.mps.gz
+benchmarks/miplib/proteindesign121hz512p9.mps.gz
+benchmarks/miplib/rd-rplusc-21.mps.gz
+benchmarks/miplib/rmatr200-p5.mps.gz
+benchmarks/miplib/rocI-4-11.mps.gz
+benchmarks/miplib/rocII-5-11.mps.gz
+benchmarks/miplib/rococoB10-011000.mps.gz
+benchmarks/miplib/roi5alpha10n8.mps.gz
+benchmarks/miplib/s100.mps.gz
+benchmarks/miplib/s250r10.mps.gz
+benchmarks/miplib/satellites2-40.mps.gz
+benchmarks/miplib/satellites2-60-fs.mps.gz
+benchmarks/miplib/savsched1.mps.gz
+benchmarks/miplib/snp-02-004-104.mps.gz
+benchmarks/miplib/sorrell3.mps.gz
+benchmarks/miplib/splice1k1.mps.gz
+benchmarks/miplib/supportcase10.mps.gz
+benchmarks/miplib/supportcase18.mps.gz
+benchmarks/miplib/supportcase33.mps.gz
+benchmarks/miplib/supportcase42.mps.gz
+benchmarks/miplib/tbfp-network.mps.gz
+benchmarks/miplib/thor50dday.mps.gz
+benchmarks/miplib/traininstance2.mps.gz
+benchmarks/miplib/trento1.mps.gz
+benchmarks/miplib/triptim1.mps.gz
+benchmarks/miplib/uccase9.mps.gz
+benchmarks/miplib/uct-subprob.mps.gz
+benchmarks/miplib/var-smallemery-m6j6.mps.gz

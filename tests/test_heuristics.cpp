@@ -12,6 +12,7 @@
 #include "milp/heuristics/fj.hpp"
 #include "milp/heuristics/lmip.hpp"
 #include "milp/heuristics/localsearch.hpp"
+#include "milp/heuristics/rounding.hpp"
 #include "milp/heuristics/submip.hpp"
 #include "milp/search/branch_and_bound.hpp"
 #include "milp/search/mip_problem.hpp"
@@ -76,6 +77,58 @@ MipProblem mixed(unsigned seed) {
 }
 
 }  // namespace
+
+// ZI rounding shifts within row slacks where both lock directions are blocked for simple rounding:
+// 0.5 <= x1 + x2 <= 1.5, x in {0, 1}^2, LP point (0.25, 0.25).
+TEST(zi_rounding_uses_row_slack) {
+  ModelBuilder b;
+  b.add_col("x1", 1.0, 0, 1, VarType::Binary);
+  b.add_col("x2", 1.0, 0, 1, VarType::Binary);
+  const Index r = b.add_row("r", 0.5, 1.5);
+  b.add_coef(r, 0, 1.0);
+  b.add_coef(r, 1, 1.0);
+  const MipProblem p = make_problem(b.build());
+  const double x[2] = {0.25, 0.25};
+  std::vector<double> out;
+  CHECK(!SimpleRounding(p).run(x, out));
+  long long work = 0;
+  CHECK(ZiRounding(p).run(x, out, &work));
+  CHECK(out[0] + out[1] == 1.0);
+  CHECK(work > 0);
+  // An equation leaves no slack: (0.5, 0.5) on x1 + x2 = 1 stays fractional.
+  ModelBuilder e;
+  e.add_col("x1", 1.0, 0, 1, VarType::Binary);
+  e.add_col("x2", 1.0, 0, 1, VarType::Binary);
+  const Index q = e.add_row("q", 1.0, 1.0);
+  e.add_coef(q, 0, 1.0);
+  e.add_coef(q, 1, 1.0);
+  const MipProblem pe = make_problem(e.build());
+  const double y[2] = {0.5, 0.5};
+  CHECK(!ZiRounding(pe).run(y, out));
+}
+
+// Every point ZI rounding returns is feasible (random mixed problems, random LP-like points inside the
+// bounds: only the feasible ones count).
+TEST(zi_rounding_points_feasible) {
+  int found = 0;
+  for (unsigned seed = 1; seed <= 200; ++seed) {
+    const MipProblem p = mixed(seed);
+    std::mt19937 rng(seed * 7u);
+    std::vector<double> x(p.num_cols());
+    for (Index j = 0; j < p.num_cols(); ++j) {
+      const double u = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+      x[j] = p.col_lb[j] + u * (p.col_ub[j] - p.col_lb[j]);
+    }
+    std::vector<double> out;
+    if (!ZiRounding(p).run(x.data(), out)) continue;
+    ++found;
+    CHECK(p.max_violation(out) <= 1e-6);
+    for (Index j = 0; j < p.num_cols(); ++j) {
+      if (p.is_int[j]) CHECK(out[j] == std::round(out[j]));
+    }
+  }
+  CHECK(found > 0);
+}
 
 TEST(fj_set_cover_feasible_and_improving) {
   for (unsigned seed = 1; seed <= 20; ++seed) {
@@ -217,6 +270,116 @@ TEST(mutation_neighbourhood) {
   std::vector<double> sol;
   CHECK(!mutation(p, inc, 1.0, 5, kInf, lim, sol));
   CHECK(st.solves == 0);
+}
+
+TEST(graph_mutation_neighbourhood) {
+  MipProblem p = set_cover(17, 40, 30);
+  std::vector<double> inc(p.num_cols(), 1.0);
+  SubMipStats st;
+  SubMipLimits lim;
+  lim.node_limit = 1000;
+  lim.stats = &st;
+  std::uint64_t fp = 0;
+  lim.fingerprint = &fp;
+  std::vector<double> sol;
+  REQUIRE(graph_mutation(p, inc, 0.5, 7, p.objective(inc), lim, sol));
+  CHECK(p.max_violation(sol) <= 1e-6);
+  CHECK(p.objective(sol) < p.objective(inc));
+  CHECK(st.solves == 1);
+  CHECK(st.fixed == 15);
+  // The same neighbourhood again (same seed): skipped by its fingerprint, without a solve.
+  const std::vector<std::uint64_t> skip{fp};
+  SubMipStats st2;
+  lim.stats = &st2;
+  lim.skip = &skip;
+  CHECK(!graph_mutation(p, inc, 0.5, 7, p.objective(inc), lim, sol));
+  CHECK(st2.solves == 0);
+}
+
+TEST(proximity_search_improves_by_target) {
+  MipProblem p = set_cover(19, 40, 30);
+  std::vector<double> inc(p.num_cols(), 1.0);
+  SubMipLimits lim;
+  lim.node_limit = 1000;
+  lim.solution_limit = 1;
+  std::vector<double> sol;
+  const double target = p.objective(inc) - 5.0;
+  REQUIRE(proximity(p, inc, target, lim, sol));
+  CHECK(p.max_violation(sol) <= 1e-6);
+  CHECK(p.objective(sol) <= target + 1e-6);
+  // Facility location (12 binaries, continuous flows) from "all open, each customer at its cheapest
+  // facility": the point must improve by the step; its flows are polished to the LP optimum for its
+  // open facilities, so the objective is at most the one with the flows the sub-MIP chose.
+  std::mt19937 rng(23);
+  ModelBuilder b;
+  const int nf = 12, nc = 6;
+  std::vector<double> fixed_cost(nf), demand(nc), ship(nf * nc);
+  for (int i = 0; i < nf; ++i) b.add_col("y" + std::to_string(i), fixed_cost[i] = 20.0 + rng() % 30, 0, 1, VarType::Binary);
+  for (int i = 0; i < nf; ++i) {
+    for (int k = 0; k < nc; ++k) b.add_col("x" + std::to_string(i) + "_" + std::to_string(k), ship[i * nc + k] = 1.0 + rng() % 9, 0, kInf);
+  }
+  for (int k = 0; k < nc; ++k) {
+    demand[k] = 1.0 + rng() % 5;
+    const Index r = b.add_row("d" + std::to_string(k), demand[k], demand[k]);
+    for (int i = 0; i < nf; ++i) b.add_coef(r, nf + i * nc + k, 1.0);
+  }
+  for (int i = 0; i < nf; ++i) {
+    for (int k = 0; k < nc; ++k) {
+      const Index r = b.add_row("c" + std::to_string(i) + "_" + std::to_string(k), -kInf, 0.0);  // x_ik <= d_k y_i
+      b.add_coef(r, nf + i * nc + k, 1.0);
+      b.add_coef(r, i, -demand[k]);
+    }
+  }
+  MipProblem q = make_problem(b.build());
+  std::vector<double> start(q.num_cols(), 0.0);
+  for (int i = 0; i < nf; ++i) start[i] = 1.0;
+  for (int k = 0; k < nc; ++k) {
+    int best = 0;
+    for (int i = 1; i < nf; ++i) best = ship[i * nc + k] < ship[best * nc + k] ? i : best;
+    start[nf + best * nc + k] = demand[k];
+  }
+  REQUIRE(q.max_violation(start) <= 1e-9);
+  SubMipLimits pl;
+  pl.node_limit = 1000;
+  pl.solution_limit = 1;
+  std::vector<double> better;
+  const double t = q.objective(start) - 1.0;
+  REQUIRE(proximity(q, start, t, pl, better));
+  CHECK(q.max_violation(better) <= 1e-6);
+  CHECK(q.objective(better) <= t + 1e-6);
+  // Polished: every customer is served by its cheapest open facility.
+  double flows = 0.0;
+  for (int k = 0; k < nc; ++k) {
+    double c = kInf;
+    for (int i = 0; i < nf; ++i) {
+      if (better[i] > 0.5) c = std::min(c, ship[i * nc + k]);
+    }
+    flows += c * demand[k];
+  }
+  double open = 0.0;
+  for (int i = 0; i < nf; ++i) open += better[i] > 0.5 ? fixed_cost[i] : 0.0;
+  CHECK(std::abs(q.objective(better) - (open + flows)) <= 1e-6);
+}
+
+TEST(sub_mip_solution_limit) {
+  // Stops at its first incumbent: the point is feasible, and the sub-MIP did not finish, unless that
+  // incumbent already meets the root LP bound (the root-gap stop ends the search optimal there).
+  MipProblem p = set_cover(29, 60, 40);
+  SubMipStats st, full_st;
+  SubMipLimits lim;
+  lim.node_limit = 100000;
+  lim.solution_limit = 1;
+  lim.stats = &st;
+  std::vector<double> sol, opt;
+  REQUIRE(solve_sub_mip(p, p.col_lb, p.col_ub, kInf, lim, sol));
+  CHECK(p.max_violation(sol) <= 1e-6);
+  SubMipLimits full = lim;
+  full.solution_limit = 0;
+  full.stats = &full_st;
+  REQUIRE(solve_sub_mip(p, p.col_lb, p.col_ub, kInf, full, opt));
+  CHECK(full_st.exhausted);
+  CHECK(st.nodes <= full_st.nodes);
+  if (st.exhausted) CHECK(std::abs(p.objective(sol) - p.objective(opt)) <= 1e-6);
 }
 
 TEST(propagating_dive_feasible_and_restores_bounds) {

@@ -59,14 +59,21 @@ struct MpsError : std::runtime_error {
 Model read_mps(const std::string& path, std::vector<std::string>* warnings = nullptr);
 Model read_mps_string(const std::string& text, std::vector<std::string>* warnings = nullptr);
 
-// Writes free MPS with full round-trip precision. Names that are empty or
-// contain whitespace are replaced (C<j> / R<i>, or whitespace -> '_').
+// Writes free MPS with full round-trip precision: reading the file back gives
+// the same numbers bit for bit (up to the sign of zero). Ranged rows are the
+// exception MPS imposes: a reader computes the second side as rhs +- |R|, and
+// for some pairs of sides no double R gives it exactly (mostly sides of
+// opposite signs); the range is chosen to give both sides exactly whenever
+// one does, else the closest (off by at most an ulp of the larger side).
+// inexact_ranges (optional) receives the number of such rows.
+// Names that are empty or contain whitespace are replaced (C<j> / R<i>, or
+// whitespace -> '_').
 // Free rows (both bounds infinite) are written as extra N rows, which a
 // reader drops; they carry no constraint anyway. Semi-continuous columns get
 // SC bounds, SOS sets an SOS section, a quadratic objective a QUADOBJ
 // section (lower triangle), and indicator constraints are written
 // as rows (after the ordinary ones) listed in an INDICATORS section.
-void write_mps(const Model& model, const std::string& path);
-std::string write_mps_string(const Model& model);
+void write_mps(const Model& model, const std::string& path, Index* inexact_ranges = nullptr);
+std::string write_mps_string(const Model& model, Index* inexact_ranges = nullptr);
 
 }  // namespace milp

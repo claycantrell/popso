@@ -62,6 +62,9 @@ struct IpmOptions {
   // this constant (and the fixed columns' part) when gap_with_offset is set: a QP whose objective
   // is a small difference of large terms is then solved to an absolute accuracy that matches it.
   bool gap_with_offset = false;
+  // > 0: give up after the symbolic analysis (status NumericalError) when the chosen Newton system's factor
+  // would have more nonzeros: a memory budget (a MIP root's concurrent barrier, see branch_and_bound.cpp).
+  long long max_factor_nnz = 0;
 };
 
 struct IpmResult {

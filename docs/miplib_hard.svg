@@ -28,11 +28,11 @@
 <line class="axis" x1="56" x2="602" y1="354" y2="354" stroke-width="1"/>
 <text class="t2" x="329.0" y="392" font-size="12" text-anchor="middle">time limit per instance (seconds, log scale)</text>
 <text class="t2" transform="translate(16 206.0) rotate(-90)" font-size="12" text-anchor="middle">instances solved</text>
-<path class="s-ours" d="M56.0 354.0 L224.6 354.0 L224.6 347.1 L426.0 347.1 L426.0 340.2 L439.7 340.2 L439.7 333.3 L453.5 333.3 L453.5 326.5 L485.4 326.5 L485.4 319.6 L498.1 319.6 L498.1 312.7 L504.3 312.7 L504.3 305.8 L518.8 305.8 L518.8 298.9 L526.4 298.9 L526.4 292.0 L529.4 292.0 L529.4 285.2 L531.9 285.2 L531.9 278.3 L554.4 278.3 L554.4 271.4 L554.8 271.4 L554.8 264.5 L569.0 264.5 L569.0 257.6 L572.0 257.6 L572.0 250.7 L579.8 250.7 L579.8 243.9 L584.1 243.9 L584.1 237.0 L590.1 237.0 L590.1 230.1 L602.0 230.1" fill="none" stroke-width="2" stroke-linejoin="round"><title>popso: 18/43 solved</title></path>
+<path class="s-ours" d="M56.0 354.0 L163.2 354.0 L163.2 347.1 L412.1 347.1 L412.1 340.2 L468.3 340.2 L468.3 333.3 L477.6 333.3 L477.6 326.5 L493.5 326.5 L493.5 319.6 L502.3 319.6 L502.3 312.7 L510.3 312.7 L510.3 305.8 L515.5 305.8 L515.5 298.9 L532.3 298.9 L532.3 292.0 L537.5 292.0 L537.5 285.2 L539.3 285.2 L539.3 278.3 L548.8 278.3 L548.8 271.4 L552.3 271.4 L552.3 264.5 L573.0 264.5 L573.0 257.6 L586.0 257.6 L586.0 250.7 L599.4 250.7 L599.4 243.9 L602.0 243.9" fill="none" stroke-width="2" stroke-linejoin="round"><title>popso: 16/43 solved</title></path>
 <path class="s-highs" d="M56.0 354.0 L525.1 354.0 L525.1 347.1 L534.2 347.1 L534.2 340.2 L537.2 340.2 L537.2 333.3 L545.3 333.3 L545.3 326.5 L558.2 326.5 L558.2 319.6 L562.5 319.6 L562.5 312.7 L571.6 312.7 L571.6 305.8 L574.4 305.8 L574.4 298.9 L581.3 298.9 L581.3 292.0 L592.0 292.0 L592.0 285.2 L599.2 285.2 L599.2 278.3 L599.6 278.3 L599.6 271.4 L602.0 271.4" fill="none" stroke-width="2" stroke-linejoin="round"><title>HiGHS: 12/43 solved</title></path>
 <path class="s-scip" d="M56.0 354.0 L533.2 354.0 L533.2 347.1 L580.2 347.1 L580.2 340.2 L583.1 340.2 L583.1 333.3 L584.9 333.3 L584.9 326.5 L600.1 326.5 L600.1 319.6 L600.8 319.6 L600.8 312.7 L602.0 312.7" fill="none" stroke-width="2" stroke-linejoin="round"><title>SCIP: 6/43 solved</title></path>
-<circle class="f-ours" cx="614.0" cy="230.1" r="4"/>
-<text class="t1" x="623.0" y="234.1" font-size="12">popso <tspan class="t2">18/43</tspan></text>
+<circle class="f-ours" cx="614.0" cy="243.9" r="4"/>
+<text class="t1" x="623.0" y="247.9" font-size="12">popso <tspan class="t2">16/43</tspan></text>
 <circle class="f-highs" cx="614.0" cy="271.4" r="4"/>
 <text class="t1" x="623.0" y="275.4" font-size="12">HiGHS <tspan class="t2">12/43</tspan></text>
 <circle class="f-scip" cx="614.0" cy="312.7" r="4"/>

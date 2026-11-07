@@ -1086,6 +1086,117 @@ TEST(cuts_tableau_mir_valid_at_nodes) {
   CHECK_EQ(ninvalid, 0);
 }
 
+namespace {
+
+void set_env(const char* name, const char* value) {
+#ifdef _WIN32
+  _putenv_s(name, value ? value : "");
+#else
+  if (value) setenv(name, value, 1);
+  else unsetenv(name);
+#endif
+}
+
+// Random MILP with many rows for the c-MIR start loop (several chunks of start rows): rows of 3-8 entries over
+// general integers in [0, 9] (and continuous columns in [0, 20] when mixed), tight or nearly so at a random point.
+Model random_mir_rows(std::mt19937& rng, int rows, bool mixed) {
+  ModelBuilder b;
+  std::uniform_real_distribution<double> U(0.0, 1.0);
+  const int ni = rows / 2, nc = mixed ? rows / 3 : 0;
+  std::vector<double> x0;
+  for (int j = 0; j < ni; ++j) {
+    b.add_col("i" + std::to_string(j), static_cast<double>(static_cast<int>(rng() % 21) - 10), 0, 9, VarType::Integer);
+    x0.push_back(static_cast<double>(rng() % 10));
+  }
+  for (int j = 0; j < nc; ++j) {
+    b.add_col("c" + std::to_string(j), static_cast<double>(static_cast<int>(rng() % 21) - 10), 0, 20);
+    x0.push_back(20.0 * U(rng));
+  }
+  const int n = ni + nc;
+  for (int r = 0; r < rows; ++r) {
+    std::vector<Index> cols;
+    const int len = 3 + static_cast<int>(rng() % 6);
+    while (static_cast<int>(cols.size()) < len) {
+      const Index j = static_cast<Index>(rng() % static_cast<unsigned>(n));
+      if (std::find(cols.begin(), cols.end(), j) == cols.end()) cols.push_back(j);
+    }
+    std::vector<double> vals;
+    double act = 0.0;
+    for (Index j : cols) {
+      double v = static_cast<double>(1 + rng() % 9) * (rng() % 3 == 0 ? -1.0 : 1.0);
+      if (rng() % 2) v += std::round(U(rng) * 100) / 100.0;
+      vals.push_back(v);
+      act += v * x0[j];
+    }
+    const double slack = rng() % 2 ? 0.0 : std::round(U(rng) * 300) / 100.0;
+    const int kind = static_cast<int>(rng() % 3);
+    const Index row = kind == 0 ? b.add_row("r", -kInf, act + slack)
+                      : kind == 1 ? b.add_row("r", act - slack, kInf)
+                                  : b.add_row("r", act - slack, act + slack);
+    for (size_t k = 0; k < cols.size(); ++k) b.add_coef(row, cols[k], vals[k]);
+  }
+  return b.build();
+}
+
+}  // namespace
+
+// MILP_MIR_PAR=1: the root c-MIR start rows in chunks on SepaContext::threads threads. The cuts (and their
+// order) must not depend on the thread count, also where the work budget or the integer elimination budget
+// ends the starts within the call (small work_scale); with neither binding (mixed model, full budget) they
+// must equal the sequential separation's.
+TEST(cuts_mir_parallel_thread_count_independent) {
+  std::mt19937 rng(97);
+  auto same = [](const std::vector<Cut>& a, const std::vector<Cut>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t k = 0; k < a.size(); ++k) {
+      if (a[k].idx != b[k].idx || a[k].val != b[k].val || a[k].rhs != b[k].rhs) return false;
+      if (std::string(a[k].origin) != b[k].origin) return false;
+    }
+    return true;
+  };
+  int compared = 0, total = 0, seq_compared = 0;
+  for (int t = 0; t < iters(12); ++t) {
+    const bool mixed = t % 2 == 1;
+    MipProblem p = make_problem(random_mir_rows(rng, 150 + 50 * (t % 4), mixed));
+    DualSimplex lp;
+    lp.load(p.A, p.cost, p.col_lb, p.col_ub, p.row_lb, p.row_ub);
+    LpOptions o;
+    if (lp.solve(o) != LpStatus::Optimal) continue;
+    CutData data;
+    data.build(p);
+    const double* x = lp.x();
+    std::vector<double> xs(x, x + p.num_cols() + lp.num_rows());
+    for (double ws : {1e-5, 1e-4, 1e-3, 1.0}) {
+      SepaContext ctx{p, lp, xs.data(), p.num_rows(), data, 1};
+      ctx.work_scale = ws;
+      set_env("MILP_MIR_PAR", "1");
+      std::unique_ptr<Separator> sep = make_mir_separator();
+      set_env("MILP_MIR_PAR", nullptr);
+      std::vector<Cut> ref;
+      sep->separate(ctx, ref);  // 1 thread
+      total += static_cast<int>(ref.size());
+      for (int threads : {2, 3, 4}) {
+        ctx.threads = threads;
+        std::vector<Cut> cuts;
+        sep->separate(ctx, cuts);
+        CHECK(same(ref, cuts));
+        ++compared;
+      }
+      if (mixed && ws == 1.0) {
+        ctx.threads = 1;
+        std::vector<Cut> seq;
+        make_mir_separator()->separate(ctx, seq);
+        CHECK(same(ref, seq));
+        ++seq_compared;
+      }
+    }
+  }
+  std::printf("  parallel c-MIR: %d comparisons (%d sequential), %d cuts at 1 thread\n", compared, seq_compared, total);
+  CHECK(compared > 60);
+  CHECK(seq_compared > 3);
+  CHECK(total > 200);
+}
+
 TEST(cuts_knapsack_cover_lifting_valid) {
   // GNS-lifted covers checked against every 0/1 point of random knapsacks.
   std::mt19937 rng(17);

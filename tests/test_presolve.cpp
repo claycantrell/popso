@@ -15,6 +15,7 @@
 #include "milp/presolve/implied_int.hpp"
 #include "milp/presolve/presolve.hpp"
 #include "milp/presolve/probing.hpp"
+#include "milp/search/obj_cliques.hpp"
 #include "milp/solver/postsolve.hpp"
 #include "milp/solver/solver.hpp"
 #include "test_framework.hpp"
@@ -54,6 +55,7 @@ PresolveOptions only(bool bt, bool coef, bool par, bool dual, bool aggr) {
   o.probing = false;
   o.parallel_cols = false;
   o.dominated_cols = false;
+  o.dual_aggregation = false;
   o.sparsify = false;
   return o;
 }
@@ -436,6 +438,99 @@ TEST(presolve_singleton_does_not_block_substitution) {
   CHECK_NEAR(pre.postsolve(xr)[c], 0.0, 1e-12);
 }
 
+TEST(presolve_substitution_implied_by_other_rows) {
+  // x + y - z = 1 with x in [0, 3] (cost 1): the equation alone gives x in [-9, 11], but x + w <= 3 (w in [0, 1])
+  // and x - u >= 0 (u in [0, 2]) imply x in [0, 3]: x is implied free, substituted with its cost, and the equation
+  // is removed. y and z (cost, bounds not implied) cannot be substituted. Off (subst_implied): x has a cost and
+  // bounds of its own, so nothing is substituted.
+  for (bool implied : {true, false}) {
+    Builder b;
+    const Index x = b.col(1.0, 0.0, 3.0);
+    const Index y = b.col(1.0, 0.0, 10.0);
+    const Index z = b.col(-1.0, 0.0, 10.0);
+    const Index w = b.col(-1.0, 0.0, 1.0);
+    const Index u = b.col(0.5, 0.0, 2.0);
+    b.row(1.0, 1.0, {{x, 1.0}, {y, 1.0}, {z, -1.0}});
+    b.row(-kInf, 3.0, {{x, 1.0}, {w, 1.0}});
+    b.row(0.0, kInf, {{x, 1.0}, {u, -1.0}});
+    b.row(-kInf, 15.0, {{y, 1.0}, {z, 1.0}});
+    const MipProblem p = b.build();
+    PresolveOptions o = only_subst();
+    o.substitution_bounded = false;  // the default
+    o.substitution_implied = implied;
+    Presolver pre;
+    REQUIRE(pre.run(p, o, kQuiet) == PresolveStatus::Reduced);
+    const MipProblem& q = pre.reduced();
+    CHECK_EQ(reduced_index(pre, x) < 0, implied);
+    CHECK_EQ(q.num_rows(), implied ? 3 : 4);
+    CHECK_EQ(pre.stats().subst_implied, implied ? 1 : 0);
+    if (!implied) continue;
+    // x = 1 - y + z: its cost goes to the offset and to y and z.
+    CHECK_NEAR(q.offset, 1.0, 1e-12);
+    CHECK_NEAR(q.cost[reduced_index(pre, y)], 0.0, 1e-12);
+    CHECK_NEAR(q.cost[reduced_index(pre, z)], 0.0, 1e-12);
+    // x + w <= 3 -> -y + z + w <= 2 and x - u >= 0 -> -y + z - u >= -1 keep x in [0, 3].
+    std::vector<double> xr(q.num_cols(), 0.0);
+    xr[reduced_index(pre, y)] = 2.0;
+    xr[reduced_index(pre, z)] = 3.0;
+    xr[reduced_index(pre, w)] = 1.0;
+    xr[reduced_index(pre, u)] = 1.0;
+    CHECK(q.max_violation(xr) <= 1e-12);
+    const auto xs = pre.postsolve(xr);
+    CHECK_NEAR(xs[x], 2.0, 1e-12);
+    CHECK(p.max_violation(xs) <= 1e-12);
+    xr[reduced_index(pre, z)] = 5.0;  // x = 4: violates the first of the two rows in the reduced problem as well
+    CHECK(q.max_violation(xr) > 0.5);
+  }
+}
+
+TEST(presolve_substitution_fill_limit) {
+  // x + y1 + y2 + y3 = 4 with x in [0, 5] (continuous, no cost) also in x - z1 <= 5 and x - z2 >= -1: substituting
+  // x keeps the equation (as y1 + y2 + y3 <= 4: x >= 0 is not implied) and adds y1..y3 to both rows, 6 entries
+  // for x's 3: net +3. The y's (costs, bounds not implied) are not substituted. Allowed with the default
+  // substitution_fill (8), also with probing (after its first pass: a round more), not with 0 or 2; x integer
+  // (with integer y's and z's), or x with a variable bound x <= 5 w (w binary): not at all.
+  for (int variant = 0; variant < 6; ++variant) {
+    const int fill = variant == 1 ? 0 : (variant == 2 ? 2 : 8);
+    const bool integer = variant == 4, vbound = variant == 5;
+    Builder b;
+    const Index x = b.col(0.0, 0.0, 5.0, integer);
+    std::vector<Index> y, z;
+    for (int k = 0; k < 3; ++k) y.push_back(b.col(1.0, 0.0, 2.0, integer));
+    for (int k = 0; k < 2; ++k) z.push_back(b.col(-1.0, 0.0, 1.0, integer));
+    b.row(4.0, 4.0, {{x, 1.0}, {y[0], 1.0}, {y[1], 1.0}, {y[2], 1.0}});
+    b.row(-kInf, 5.0, {{x, 1.0}, {z[0], -1.0}});
+    b.row(-1.0, kInf, {{x, 1.0}, {z[1], -1.0}});
+    b.row(-kInf, 3.0, {{y[0], 1.0}, {z[0], 1.0}});
+    b.row(-kInf, 3.0, {{y[1], 1.0}, {z[1], 1.0}});
+    b.row(-kInf, 3.0, {{y[2], 1.0}, {z[0], 1.0}});
+    if (vbound) b.row(-kInf, 0.0, {{x, 1.0}, {b.col(1.0, 0.0, 1.0, true), -5.0}});
+    const MipProblem p = b.build();
+    PresolveOptions o = only_subst();
+    o.substitution_bounded = false;
+    o.substitution_fill = fill;
+    o.probing = variant == 3;
+    Presolver pre;
+    REQUIRE(pre.run(p, o, kQuiet) == PresolveStatus::Reduced);
+    const MipProblem& q = pre.reduced();
+    const bool subst = fill >= 3 && !integer && !vbound;
+    CHECK_EQ(reduced_index(pre, x) < 0, subst);
+    CHECK_EQ(pre.stats().subst_fill, subst ? 1 : 0);
+    CHECK_EQ(q.num_rows(), vbound ? 7 : 6);
+    CHECK_EQ(q.A.nnz(), p.A.nnz() + (subst ? 3 : 0));
+    if (!subst) continue;
+    // The equation stays as y1 + y2 + y3 <= 4 (x >= 0); x <= 5 is implied by it.
+    std::vector<double> xr(q.num_cols(), 0.0);
+    for (Index k : y) xr[reduced_index(pre, k)] = 2.0;  // x = -2
+    CHECK(q.max_violation(xr) > 1.0);
+    xr[reduced_index(pre, y[0])] = 0.0;  // x = 0
+    CHECK(q.max_violation(xr) <= 1e-12);
+    const auto xs = pre.postsolve(xr);
+    CHECK_NEAR(xs[x], 0.0, 1e-12);
+    CHECK(p.max_violation(xs) <= 1e-12);
+  }
+}
+
 TEST(presolve_dual_bound_keeps_integral_value) {
   // makespan C >= s_i + p_i with C's cost > 0: dual bound strengthening gives C <= max(ub_s + p) = 19 exactly
   // (in the first round): no 1e-9 relative margin above an integral value.
@@ -584,6 +679,52 @@ TEST(presolve_parallel_columns) {
     for (Index j : {x1, x2, x3}) CHECK(xs[j] == 0.0 || xs[j] == 1.0);
     CHECK_NEAR(xs[c1] + 0.5 * xs[c2], 2.25, 1e-12);
     CHECK(xs[c1] >= 0.0 && xs[c1] <= 2.0 && xs[c2] >= 1.0 && xs[c2] <= 3.0);
+  }
+}
+
+TEST(presolve_dual_aggregation) {
+  // Facilities y0 (aggregated row x0k <= 4 y0) and y1 (rows x1k <= y1) cover four clients: x0k + x1k >= 1.
+  PresolveOptions o = only(false, false, false, false, false);
+  o.dual_aggregation = true;
+  {
+    Builder b;
+    const Index y0 = b.col(3.0, 0.0, 1.0, true), y1 = b.col(4.0, 0.0, 1.0, true);
+    std::vector<Index> x0, x1;
+    for (int k = 0; k < 4; ++k) x0.push_back(b.col(0.0, 0.0, 1.0, true)), x1.push_back(b.col(k == 0 ? -0.5 : 0.0, 0.0, 1.0, true));
+    std::vector<std::pair<Index, double>> agg{{y0, -4.0}};
+    for (int k = 0; k < 4; ++k) agg.push_back({x0[k], 1.0});
+    b.row(-kInf, 0.0, agg);
+    for (int k = 0; k < 4; ++k) b.row(0.0, kInf, {{y1, 1.0}, {x1[k], -1.0}});  // x1k <= y1 as a >= row
+    for (int k = 0; k < 4; ++k) b.row(1.0, kInf, {{x0[k], 1.0}, {x1[k], 1.0}});
+    Presolver pre;
+    REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+    CHECK_EQ(pre.stats().dual_aggregations, 8);
+    CHECK_EQ(pre.reduced().num_cols(), 2);
+    // y1's cost absorbs x10's -0.5.
+    CHECK_NEAR(pre.reduced().cost[reduced_index(pre, y1)], 3.5, 1e-12);
+    std::vector<double> xr(2, 0.0);
+    xr[reduced_index(pre, y0)] = 1.0;
+    const auto xs = pre.postsolve(xr);
+    for (int k = 0; k < 4; ++k) CHECK_EQ(xs[x0[k]], 1.0), CHECK_EQ(xs[x1[k]], 0.0);
+  }
+  {
+    // Not aggregated: x0 has a positive cost; x1's row does not hold at y = 1 for all x (2 y covers 3 columns);
+    // x4 has a second up-lock; x5's row is an equation.
+    Builder b;
+    const Index y = b.col(1.0, 0.0, 1.0, true);
+    const Index x0 = b.col(1.0, 0.0, 1.0, true);
+    b.row(-kInf, 0.0, {{x0, 1.0}, {y, -1.0}});
+    const Index x1 = b.col(0.0, 0.0, 1.0, true), x2 = b.col(0.0, 0.0, 1.0, true), x3 = b.col(0.0, 0.0, 1.0, true);
+    b.row(-kInf, 0.0, {{x1, 1.0}, {x2, 1.0}, {x3, 1.0}, {y, -2.0}});
+    const Index x4 = b.col(0.0, 0.0, 1.0, true);
+    b.row(-kInf, 0.0, {{x4, 1.0}, {y, -1.0}});
+    b.row(-kInf, 1.0, {{x4, 1.0}, {x0, 1.0}});
+    const Index x5 = b.col(0.0, 0.0, 1.0, true), z = b.col(0.0, 0.0, 1.0, true);
+    b.row(0.0, 0.0, {{x5, 1.0}, {z, 1.0}, {y, -1.0}});
+    for (Index x : {x0, x1, x2, x3, x4, x5}) b.row(1.0, kInf, {{x, 1.0}, {z, 1.0}});
+    Presolver pre;
+    REQUIRE(pre.run(b.build(), o, kQuiet) == PresolveStatus::Reduced);
+    CHECK_EQ(pre.stats().dual_aggregations, 0);
   }
 }
 
@@ -923,12 +1064,13 @@ PresolveStats g_stats;  // reductions applied by the randomized tests (coverage 
 int g_numeric = 0;      // cases skipped because the LP solver reported numerical trouble
 
 void print_coverage(const char* name) {
-  std::printf("  %s reductions: %lld aggregations, %lld substitutions, %lld parallel cols, %lld dominated, probing "
-              "%lld fixed / %lld bounds / %lld equivs / %lld lifts, cliques %lld extended / %lld dominated / %lld fixed, "
-              "%lld rows sparsified\n",
-              name, g_stats.aggregations, g_stats.substitutions, g_stats.parallel_cols, g_stats.dominated,
+  std::printf("  %s reductions: %lld aggregations, %lld substitutions (%lld implied free by other rows), %lld parallel "
+              "cols, %lld dominated, probing %lld fixed / %lld bounds / %lld equivs / %lld lifts, cliques %lld extended / "
+              "%lld dominated / %lld fixed, %lld rows sparsified, %lld dual aggregations\n",
+              name, g_stats.aggregations, g_stats.substitutions, g_stats.subst_implied, g_stats.parallel_cols, g_stats.dominated,
               g_stats.probing_fixed, g_stats.probing_bounds, g_stats.probing_equivs, g_stats.probing_lifts,
-              g_stats.clique_extended, g_stats.clique_dominated, g_stats.clique_fixed, g_stats.sparsify_rows);
+              g_stats.clique_extended, g_stats.clique_dominated, g_stats.clique_fixed, g_stats.sparsify_rows,
+              g_stats.dual_aggregations);
   if (g_numeric > 0) std::printf("  %s: %d cases skipped (numerical trouble)\n", name, g_numeric);
   g_stats = PresolveStats{};
   g_numeric = 0;
@@ -936,8 +1078,8 @@ void print_coverage(const char* name) {
 
 // Solves m with and without presolve (presolve + reduced solve + postsolve, without the solver's safety fallback)
 // and checks that both agree. Returns the status without presolve (NodeLimit if skipped). sparsify: 0 / 1 off / on,
-// -1 off in a third of the cases.
-Status compare_with_presolve(const Model& m, int it, int sparsify = -1) {
+// -1 off in a third of the cases. base: the presolve options before those variations (default: the defaults).
+Status compare_with_presolve(const Model& m, int it, int sparsify = -1, const PresolveOptions* base = nullptr) {
   SolverParams params;
   params.verbosity = 0;
   params.threads = 1;
@@ -952,7 +1094,7 @@ Status compare_with_presolve(const Model& m, int it, int sparsify = -1) {
   MipProblem p;
   Presolver pre;
   const bool valid = MipProblem::from_model(m, &p);
-  PresolveOptions opt;
+  PresolveOptions opt = base ? *base : PresolveOptions{};
   opt.substitution_bounded = it % 2 == 1;  // the default (off) and the opt-in variant
   opt.probing_cliques = it % 4 >= 2;       // likewise
   opt.sparsify = sparsify < 0 ? it % 3 != 2 : sparsify != 0;
@@ -961,12 +1103,15 @@ Status compare_with_presolve(const Model& m, int it, int sparsify = -1) {
   g_stats.sparsify_rows += pre.stats().sparsify_rows;
   g_stats.aggregations += pre.stats().aggregations;
   g_stats.substitutions += pre.stats().substitutions;
+  g_stats.subst_implied += pre.stats().subst_implied;
+  g_stats.subst_fill += pre.stats().subst_fill;
   g_stats.probing_fixed += pre.stats().probing_fixed;
   g_stats.probing_bounds += pre.stats().probing_bounds;
   g_stats.probing_equivs += pre.stats().probing_equivs;
   g_stats.probing_lifts += pre.stats().probing_lifts;
   g_stats.parallel_cols += pre.stats().parallel_cols;
   g_stats.dominated += pre.stats().dominated;
+  g_stats.dual_aggregations += pre.stats().dual_aggregations;
   g_stats.clique_extended += pre.stats().clique_extended;
   g_stats.clique_dominated += pre.stats().clique_dominated;
   g_stats.clique_fixed += pre.stats().clique_fixed;
@@ -1671,6 +1816,295 @@ TEST(presolve_probing_round_trip_enumerated) {
   CHECK(compared > iters / 2);
 }
 
+namespace {
+
+// Presolves p with o and checks the round trip against enumeration: every feasible point of p crushes onto a
+// feasible reduced point, and (reduced problems of at most 14 columns) the reduced feasible points are exactly
+// those images and postsolve to feasible points of p. Returns false if presolve found p infeasible.
+bool check_round_trip(const MipProblem& p, const PresolveOptions& o, int it, Presolver& pre, long long* compared) {
+  const auto pts = enumerate_feasible(p);
+  const PresolveStatus st = pre.run(p, o, kQuiet);
+  if (st == PresolveStatus::Infeasible) {
+    if (!CHECK(pts.empty())) std::fprintf(stderr, "  case %d: presolve infeasible, %zu feasible points\n", it, pts.size());
+    return false;
+  }
+  REQUIRE(st == PresolveStatus::Reduced);
+  const MipProblem& q = pre.reduced();
+  std::set<std::vector<double>> image;
+  bool ok = true;
+  for (const auto& x : pts) {
+    const std::vector<double> z = pre.crush(x);
+    ok = ok && q.max_violation(z) <= 1e-9;
+    image.insert(z);
+  }
+  if (!CHECK(ok)) std::fprintf(stderr, "  case %d: presolve cut off a feasible point\n", it);
+  if (q.num_cols() > 14) return true;
+  const auto red = enumerate_feasible(q);
+  ++*compared;
+  if (!CHECK_EQ(red.size(), image.size())) {
+    std::fprintf(stderr, "  case %d: %zu reduced vs %zu original points\n", it, red.size(), image.size());
+  }
+  bool back = true;
+  for (const auto& z : red) back = back && p.max_violation(pre.postsolve(z)) <= 1e-9;
+  if (!CHECK(back)) std::fprintf(stderr, "  case %d: a reduced point postsolves to an infeasible one\n", it);
+  return true;
+}
+
+// Random models around equations whose columns also appear in pair rows a_j x_j + a_k x_k <= / >= c with the side
+// set so that the row implies a bound of x_j exactly, cuts it by 1 / a_j, or misses it by 1 / a_j (what
+// implied_by_rows looks for), plus a few general rows around a point x0. Integer columns (binaries, [0, 3],
+// [-1, 2]); with `mixed`, also continuous columns (some unbounded on one side), fractional coefficients and sides.
+Model random_subst_model(std::mt19937& rng, bool mixed) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  ModelBuilder b;
+  std::vector<double> lb, ub, x0;
+  const int n = mixed ? uni(4, 10) : uni(4, 8);
+  for (int j = 0; j < n; ++j) {
+    const int kind = uni(0, mixed ? 6 : 2);
+    double l = 0.0, u = 1.0;
+    if (kind == 1) u = 3.0;
+    if (kind == 2) l = -1.0, u = 2.0;
+    if (kind >= 3) l = uni(-2, 0) * 0.5, u = l + uni(1, 8) * 0.5;
+    const VarType t = kind >= 3 ? VarType::Continuous : (kind == 0 ? VarType::Binary : VarType::Integer);
+    const double cost = t == VarType::Continuous && uni(0, 1) == 0 ? 0.0 : uni(-4, 4) * (mixed && uni(0, 2) == 0 ? 0.5 : 1.0);
+    b.add_col("x" + std::to_string(j), cost, l, u, t);
+    lb.push_back(l), ub.push_back(u);
+    x0.push_back(kind >= 3 ? l + (u - l) * uni(0, 4) / 4.0 : uni(static_cast<int>(l), static_cast<int>(u)));
+  }
+  auto pick = [&] { return uni(0, n - 1); };
+  int r = 0;
+  auto unique = [](const std::vector<std::pair<Index, double>>& c) {
+    std::vector<std::pair<Index, double>> u;
+    for (const auto& e : c) {
+      if (e.second != 0.0 && std::none_of(u.begin(), u.end(), [&](const auto& f) { return f.first == e.first; })) {
+        u.push_back(e);
+      }
+    }
+    return u;
+  };
+  auto row = [&](double lo, double hi, const std::vector<std::pair<Index, double>>& c) {
+    if (c.size() < 2) return;
+    const Index i = b.add_row("r" + std::to_string(r++), lo, hi);
+    for (const auto& [j, v] : c) b.add_coef(i, j, v);
+  };
+  auto act = [&](const std::vector<std::pair<Index, double>>& c) {
+    double v = 0.0;
+    for (const auto& [j, a] : c) v += a * x0[j];
+    return v;
+  };
+  const double fracs[] = {1.0, 1.0, 1.0, 2.0, 0.5, 0.25};
+  std::vector<Index> eq_cols;
+  for (int k = uni(1, mixed ? 4 : 3); k > 0; --k) {  // equations through x0
+    std::vector<std::pair<Index, double>> c;
+    for (int t = uni(2, 4); t > 0; --t) {
+      c.push_back({pick(), (uni(0, 1) ? 1.0 : -1.0) * (mixed ? fracs[uni(0, 5)] : (uni(0, 4) ? 1.0 : 2.0))});
+    }
+    c = unique(c);
+    row(act(c), act(c), c);
+    for (const auto& e : c) eq_cols.push_back(e.first);
+  }
+  for (int k = uni(2, 7); k > 0; --k) {  // pair rows implying (or nearly implying) a bound of x_j
+    const Index j = pick();
+    Index k2 = pick();
+    if (k2 == j) k2 = (j + 1) % n;
+    const double aj = (uni(0, 3) ? 1.0 : 2.0) * (uni(0, 1) ? 1.0 : -1.0);
+    const double ak = (uni(0, 1) ? 1.0 : -1.0) * uni(1, 2) * (mixed && uni(0, 2) == 0 ? 0.5 : 1.0);
+    const int side = uni(0, 4);  // cuts the bound (side 0), implies it exactly (1, 2), misses it (3, 4)
+    const double slack = (side == 0 ? -1.0 : (side <= 2 ? 0.0 : 1.0)) * (mixed && uni(0, 1) ? 0.5 : 1.0);
+    const double kmin = ak > 0 ? ak * lb[k2] : ak * ub[k2], kmax = ak > 0 ? ak * ub[k2] : ak * lb[k2];
+    if (uni(0, 1)) {  // implies x_j <= ub_j: aj x_j + ak x_k <= aj ub_j + min(ak x_k) (aj > 0)
+      if (aj > 0) row(-kInf, aj * ub[j] + kmin + slack, {{j, aj}, {k2, ak}});
+      else row(aj * ub[j] + kmax - slack, kInf, {{j, aj}, {k2, ak}});
+    } else {  // implies x_j >= lb_j
+      if (aj > 0) row(aj * lb[j] + kmax - slack, kInf, {{j, aj}, {k2, ak}});
+      else row(-kInf, aj * lb[j] + kmin + slack, {{j, aj}, {k2, ak}});
+    }
+  }
+  for (int k = uni(1, 3); k > 0; --k) {  // general rows around x0
+    std::vector<std::pair<Index, double>> c;
+    for (int t = uni(2, 4); t > 0; --t) {
+      // Mixed: half of the entries from the equations' columns (substitutions that add entries to these rows).
+      const Index j = mixed && !eq_cols.empty() && uni(0, 1) ? eq_cols[uni(0, static_cast<int>(eq_cols.size()) - 1)] : pick();
+      c.push_back({j, static_cast<double>(uni(-3, 3))});
+    }
+    c = unique(c);
+    const double v = act(c);
+    if (uni(0, 1)) row(-kInf, v + uni(0, 2), c); else row(v - uni(0, 2), kInf, c);
+  }
+  if (mixed && uni(0, 3) == 0) {  // a column unbounded on one side
+    Model m = b.build();
+    const Index j = uni(0, n - 1);
+    if (m.col_type[j] == VarType::Continuous) {
+      if (uni(0, 1)) m.col_lb[j] = -kInf; else m.col_ub[j] = kInf;
+    }
+    if (uni(0, 1)) m.sense = ObjSense::Maximize;
+    return m;
+  }
+  if (uni(0, 1)) b.model().sense = ObjSense::Maximize;
+  return b.build();
+}
+
+}  // namespace
+
+TEST(presolve_substitution_implied_bounds_in_place) {
+  // x <= y and x >= y (two rows) imply x's bounds from y's and y's from x's (both [0, 3]). Once x is substituted out
+  // of x + p - q = 2 (its bounds implied by them), y >= 0 is still implied (y >= 2 - p + q) but y <= 3 is not
+  // (2 - p + q reaches 4, and y + s - 2 t = 1 gives y <= 5): it must stay when y is substituted. The reduced
+  // problem has exactly the original's points.
+  Builder b;
+  const Index x = b.col(1.0, 0.0, 3.0, true), y = b.col(-1.0, 0.0, 3.0, true);
+  std::vector<Index> v;
+  for (int k = 0; k < 4; ++k) v.push_back(b.col(k - 1.5, 0.0, 2.0, true));
+  b.row(2.0, 2.0, {{x, 1.0}, {v[0], 1.0}, {v[1], -1.0}});
+  b.row(1.0, 1.0, {{y, 1.0}, {v[2], 1.0}, {v[3], -2.0}});
+  b.row(-kInf, 0.0, {{x, 1.0}, {y, -1.0}});
+  b.row(0.0, kInf, {{x, 1.0}, {y, -1.0}});
+  b.row(-kInf, 3.0, {{v[0], 1.0}, {v[1], 1.0}});
+  b.row(-kInf, 3.0, {{v[2], 1.0}, {v[3], 1.0}});
+  const MipProblem p = b.build();
+  PresolveOptions o = only_subst();
+  o.substitution_bounded = false;
+  Presolver pre;
+  long long compared = 0;
+  REQUIRE(check_round_trip(p, o, 0, pre, &compared));
+  CHECK_EQ(compared, 1);
+  CHECK_EQ(reduced_index(pre, x), -1);
+  CHECK(pre.stats().subst_implied >= 1);
+  CHECK_EQ(enumerate_feasible(pre.reduced()).size(), enumerate_feasible(p).size());
+}
+
+TEST(presolve_substitution_round_trip_enumerated) {
+  // Substitution with bounds implied by other rows (on, off; fill allowance on or off; alone or with bound
+  // tightening, coefficient tightening and aggregation) on enumerable models: the feasible points map exactly onto
+  // those of the reduced problem (crush) and back (postsolve). Pure integer: the fill allowance (continuous columns
+  // only) is covered by the MILP test below.
+  std::mt19937 rng(fuzz_seed(13579u));
+  const int iters = fuzz_iters(2000);
+  long long by_rows = 0, compared = 0;
+  for (int it = 0; it < iters; ++it) {
+    MipProblem p;
+    REQUIRE(MipProblem::from_model(random_subst_model(rng, false), &p));
+    PresolveOptions o = only(it % 2 == 0, it % 4 == 1, false, false, it % 3 == 0);
+    o.substitution = true;
+    o.substitution_implied = it % 5 != 4;
+    o.substitution_fill = it % 7 == 6 ? 0 : 8;
+    o.clique_extension = it % 2 == 1;
+    Presolver pre;
+    if (!check_round_trip(p, o, it, pre, &compared)) continue;
+    by_rows += pre.stats().subst_implied;
+    CHECK_EQ(pre.stats().subst_fill, 0);
+  }
+  std::printf("  substitution round trip: %lld implied free by other rows, %lld compared exactly\n", by_rows, compared);
+  CHECK(by_rows > iters / 10);
+  CHECK(compared > iters / 2);
+}
+
+TEST(presolve_random_substitution_milps_match_no_presolve) {
+  // Mixed models around equations, with the default presolve and, in a third of the cases, without bound tightening
+  // and probing (the bounds propagation tightens make most columns implied free; substitutions that add nonzeros
+  // wait for probing): more substitutions that keep their row and grow the matrix.
+  std::mt19937 rng(fuzz_seed(86420u));
+  const int iters = fuzz_iters(2000);
+  int optimal = 0;
+  PresolveOptions plain;
+  plain.bound_tightening = false;
+  plain.probing = false;
+  for (int it = 0; it < iters; ++it) {
+    const Model m = random_subst_model(rng, true);
+    optimal += compare_with_presolve(m, it, -1, it % 3 == 2 ? &plain : nullptr) == Status::Optimal;
+  }
+  const long long subst = g_stats.substitutions, by_rows = g_stats.subst_implied, grew = g_stats.subst_fill;
+  std::printf("  substitution models: %d optimal, %lld kept rows grew\n", optimal, grew);
+  print_coverage("substitution");
+  CHECK(optimal > iters / 3);
+  CHECK(subst > iters / 10);
+  CHECK(by_rows > iters / 40);
+  CHECK(grew > iters / 100);
+}
+
+// Facility covering models: binary facilities y_i, binary assignments x_ij with x_ij <= y_i (aggregated
+// sum_j x_ij <= |J| y_i, disaggregated, or sometimes with a smaller capacity), client rows sum_i x_ij >= 1 or
+// == 1, costs of either sign on the assignments and some side rows.
+Model random_vub_model(std::mt19937& rng) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  ModelBuilder b;
+  const int nf = uni(2, 4), nc = uni(2, 5);
+  std::vector<Index> y(nf);
+  std::vector<std::vector<Index>> x(nf, std::vector<Index>(nc, -1));
+  for (int i = 0; i < nf; ++i) y[i] = b.add_col("y" + std::to_string(i), uni(1, 6), 0.0, 1.0, VarType::Binary);
+  int r = 0;
+  auto row = [&](double lo, double hi, const std::vector<std::pair<Index, double>>& c) {
+    const Index k = b.add_row("r" + std::to_string(r++), lo, hi);
+    for (const auto& [j, v] : c) b.add_coef(k, j, v);
+  };
+  for (int i = 0; i < nf; ++i) {
+    std::vector<std::pair<Index, double>> agg;
+    for (int j = 0; j < nc; ++j) {
+      if (uni(0, 4) == 0) continue;
+      x[i][j] = b.add_col("x" + std::to_string(i) + "_" + std::to_string(j), uni(0, 3) == 0 ? uni(1, 3) : -uni(0, 2) * 0.5,
+                          0.0, 1.0, VarType::Binary);
+      agg.push_back({x[i][j], static_cast<double>(uni(1, 2))});
+    }
+    const int kind = uni(0, 3);
+    double cap = 0.0;
+    for (const auto& e : agg) cap += e.second;
+    if (kind == 3) cap = std::max(1.0, cap - uni(1, 2));  // a capacity: not a variable upper bound
+    if (kind == 0) {
+      for (const auto& e : agg) row(-kInf, 0.0, {{e.first, 1.0}, {y[i], -1.0}});
+    } else if (!agg.empty()) {
+      agg.push_back({y[i], -cap});
+      if (kind == 2) {
+        for (auto& e : agg) e.second = -e.second;
+        row(0.0, kInf, agg);
+      } else {
+        row(-kInf, 0.0, agg);
+      }
+    }
+  }
+  for (int j = 0; j < nc; ++j) {
+    std::vector<std::pair<Index, double>> c;
+    for (int i = 0; i < nf; ++i) {
+      if (x[i][j] >= 0) c.push_back({x[i][j], 1.0});
+    }
+    if (c.empty()) continue;
+    if (uni(0, 3) == 0) row(1.0, 1.0, c);
+    else row(1.0, kInf, c);
+  }
+  for (int t = uni(0, 2); t > 0; --t) {  // side rows on facilities and assignments
+    std::vector<std::pair<Index, double>> c;
+    for (int i = 0; i < nf; ++i) {
+      if (uni(0, 1)) c.push_back({y[i], static_cast<double>(uni(1, 3))});
+      const int j = uni(0, nc - 1);
+      if (x[i][j] >= 0 && uni(0, 2) == 0) c.push_back({x[i][j], static_cast<double>(uni(-2, 2))});
+    }
+    std::vector<std::pair<Index, double>> u;
+    for (const auto& e : c) {
+      if (e.second != 0.0 && std::none_of(u.begin(), u.end(), [&](const auto& f) { return f.first == e.first; })) u.push_back(e);
+    }
+    if (u.empty()) continue;
+    if (uni(0, 1)) row(-kInf, uni(2, 6), u);
+    else row(1.0, kInf, u);
+  }
+  return b.build();
+}
+
+TEST(presolve_random_vub_milps_match_no_presolve) {
+  // Dual aggregation with the default presolve, and alone with bound tightening (fewer other reductions first).
+  std::mt19937 rng(fuzz_seed(24680u));
+  const int iters = fuzz_iters(1500);
+  int optimal = 0;
+  PresolveOptions alone = only(true, false, false, false, false);
+  alone.dual_aggregation = true;
+  for (int it = 0; it < iters; ++it) {
+    optimal += compare_with_presolve(random_vub_model(rng), it, -1, it % 2 == 0 ? &alone : nullptr) == Status::Optimal;
+  }
+  const long long agg = g_stats.dual_aggregations;
+  std::printf("  variable-upper-bound models: %d optimal\n", optimal);
+  print_coverage("vub");
+  CHECK(optimal > iters / 3);
+  CHECK(agg > iters);
+}
+
 TEST(presolve_probing_lifts_big_m) {
   // y <= 100 x where x = 1 forces w = 1 and with it y <= 5 (y + 10 w <= 15): lifted to y <= 5 x (with x = 0,
   // y = 0 already). Liftings off: the coefficient stays.
@@ -2070,10 +2504,188 @@ TEST(presolve_random_sparsify_milps_match_no_presolve) {
   std::mt19937 rng(fuzz_seed(97531u));
   const int iters = fuzz_iters(1000);
   int optimal = 0;
-  for (int it = 0; it < iters; ++it) optimal += compare_with_presolve(random_sparsify_milp(rng), it, it % 4 != 3) == Status::Optimal;
+  // In half of the cases without the substitutions through other rows and with fill: they remove equations that
+  // sparsify would add to other rows.
+  PresolveOptions no_subst5;
+  no_subst5.substitution_implied = false;
+  no_subst5.substitution_fill = 0;
+  for (int it = 0; it < iters; ++it) {
+    optimal += compare_with_presolve(random_sparsify_milp(rng), it, it % 4 != 3, it % 2 == 0 ? &no_subst5 : nullptr) ==
+               Status::Optimal;
+  }
   const long long combos = g_stats.sparsify_rows;
   std::printf("  sparsify models: %d optimal\n", optimal);
   print_coverage("sparsify");
   CHECK(optimal > iters / 3);
   CHECK(combos > iters / 4);
+}
+
+namespace {
+
+// Random bin-packing / knapsack models small enough to enumerate (6-12 binaries): rows a x_S + C y <= C (y = 1
+// empties the bin S; C = sum a, or a little more or less), knapsacks, covering rows y + x_S >= 1 and packing
+// rows, objective coefficients in [-6, 3] (mostly a maximization of weighted items).
+MipProblem random_binpack_model(std::mt19937& rng, int min_cols = 6, int max_cols = 12) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  Builder b;
+  std::vector<Index> bin;
+  for (int j = uni(min_cols, max_cols); j > 0; --j) bin.push_back(b.col(uni(-6, 3), 0.0, 1.0, true));
+  const int n = static_cast<int>(bin.size());
+  auto subset = [&](Index y, int k) {
+    std::vector<Index> s;
+    for (int t = 0; t < 4 * k && static_cast<int>(s.size()) < k; ++t) {
+      const Index j = bin[uni(0, n - 1)];
+      if (j != y && std::find(s.begin(), s.end(), j) == s.end()) s.push_back(j);
+    }
+    return s;
+  };
+  for (int i = uni(2, 7 * max_cols / 12); i > 0; --i) {
+    const int kind = uni(0, 5);
+    const Index y = bin[uni(0, n - 1)];
+    std::vector<std::pair<Index, double>> c;
+    if (kind <= 2) {  // a x_S + C y <= C
+      double tot = 0.0;
+      for (Index j : subset(y, uni(2, 6))) {
+        const double a = uni(1, 4);
+        c.push_back({j, a});
+        tot += a;
+      }
+      const double C = tot + (kind == 0 ? 0.0 : (kind == 1 ? uni(1, 2) : -uni(1, 2)));
+      c.push_back({y, C});
+      if (C > 0.0) b.row(-kInf, C, c);
+    } else if (kind == 3) {  // knapsack
+      double tot = 0.0;
+      for (Index j : subset(-1, uni(3, 6))) {
+        const double a = uni(1, 9);
+        c.push_back({j, a});
+        tot += a;
+      }
+      b.row(-kInf, std::floor(tot * uni(3, 7) / 10.0), c);
+    } else if (kind == 4) {  // y + x_S >= 1
+      c.push_back({y, 1.0});
+      for (Index j : subset(y, uni(1, 4))) c.push_back({j, 1.0});
+      b.row(1.0, kInf, c);
+    } else {  // packing
+      for (Index j : subset(-1, uni(2, 4))) c.push_back({j, 1.0});
+      b.row(-kInf, 1.0, c);
+    }
+  }
+  return b.build();
+}
+
+}  // namespace
+
+TEST(objective_cliques_star_row) {
+  // y + x_k <= 1 for every item of a x + C y <= C with C = sum a (the prefix clique of the row has only the
+  // heaviest item): y = 1 forces the items' objective -12 away (c x = -1 then), so y = 0 in every point with
+  // c x <= -1.5.
+  Builder b;
+  const Index y = b.col(-1.0, 0.0, 1.0, true);
+  std::vector<std::pair<Index, double>> row;
+  for (int k = 1; k <= 4; ++k) row.push_back({b.col(-3.0, 0.0, 1.0, true), static_cast<double>(k)});
+  row.push_back({y, 10.0});
+  b.row(-kInf, 10.0, row);
+  const MipProblem p = b.build();
+  ObjectiveCliques oc(p, 1000);
+  CHECK(oc.lists() == 1);
+  CHECK(oc.entries() == 5);
+  std::vector<double> lb = p.col_lb, ub = p.col_ub;
+  std::vector<Index> changed;
+  CHECK(oc.propagate(-1.0 + 1e-6, lb, ub, changed, 1000000) == 0);  // y = 1 (c x = -1) is still improving
+  CHECK(oc.propagate(-1.5, lb, ub, changed, 1000000) == 1);
+  REQUIRE(changed.size() == 1);
+  CHECK(changed[0] == y);
+  CHECK(ub[y] == 0.0);
+  for (Index j = 1; j < p.num_cols(); ++j) CHECK(lb[j] == 0.0 && ub[j] == 1.0);
+}
+
+TEST(objective_cliques_keep_improving_points) {
+  // Objective propagation with clique implications on enumerable bin-packing / knapsack models (and the probing
+  // test models): at cutoffs from just below the optimum (nothing improving left) to a few units above, within
+  // random sub-boxes, every feasible point of the box with c x <= cutoff satisfies the derived bounds.
+  std::mt19937 rng(fuzz_seed(31337u));
+  const int iters = fuzz_iters(2000);
+  long long fixings = 0, cases = 0, unions = 0;
+  for (int it = 0; it < iters; ++it) {
+    const MipProblem p = it % 3 == 2 ? random_enum_model(rng) : random_binpack_model(rng);
+    const auto pts = enumerate_feasible(p);
+    if (pts.empty()) continue;
+    const Index n = p.num_cols();
+    auto obj = [&](const std::vector<double>& x) {
+      double v = 0.0;
+      for (Index j = 0; j < n; ++j) v += p.cost[j] * x[j];
+      return v;
+    };
+    double zmin = kInf;
+    for (const auto& x : pts) zmin = std::min(zmin, obj(x));
+    ObjectiveCliques oc(p, 1000000);
+    for (int t = 0; t < 4; ++t) {
+      // The search's prune threshold for an integral objective (incumbent zmin + t - 1 + 1e-6), or a fractional one.
+      const double cutoff = t == 3 ? zmin + 1.5 : zmin + t - 1.0 + 1e-6;
+      std::vector<double> lb = p.col_lb, ub = p.col_ub;
+      if (rng() % 2) {  // a sub-box: one or two columns fixed at the value of a random feasible point
+        const auto& x0 = pts[rng() % pts.size()];
+        for (int k = 1 + static_cast<int>(rng() % 2); k > 0; --k) {
+          const Index j = static_cast<Index>(rng() % static_cast<unsigned>(n));
+          lb[j] = ub[j] = x0[j];
+        }
+      }
+      const std::vector<double> lb0 = lb, ub0 = ub;
+      std::vector<Index> changed;
+      const long long limit = it % 5 == 4 ? 5 + rng() % 40 : 1000000000;  // sometimes cut short by the work limit
+      fixings += oc.propagate(cutoff, lb, ub, changed, limit);
+      ++cases;
+      bool ok = true;
+      for (const auto& x : pts) {
+        bool in_box = obj(x) <= cutoff + 1e-9;
+        for (Index j = 0; j < n && in_box; ++j) in_box = x[j] >= lb0[j] && x[j] <= ub0[j];
+        if (!in_box) continue;
+        for (Index j = 0; j < n; ++j) ok = ok && x[j] >= lb[j] && x[j] <= ub[j];
+      }
+      if (!CHECK(ok)) std::fprintf(stderr, "  case %d, cutoff %g: a fixing cuts off an improving point\n", it, cutoff);
+      for (Index j : changed) CHECK(lb[j] == ub[j]);
+    }
+    unions += oc.unions();
+  }
+  std::printf("  objective cliques: %lld fixings in %lld cases, %lld exact unions\n", fixings, cases, unions);
+  CHECK(fixings > cases / 4);
+  CHECK(unions > 0);
+}
+
+TEST(objective_cliques_solve_matches_enumeration) {
+  // End to end (presolve on and off, 1 and 2 threads): the solver's optimum on enumerable bin-packing models
+  // equals the enumerated one (the search applies the propagation at the root and with every incumbent).
+  std::mt19937 rng(fuzz_seed(8642u));
+  const int iters = fuzz_iters(300);
+  int optimal = 0, infeasible = 0;
+  for (int it = 0; it < iters; ++it) {
+    const MipProblem p = random_binpack_model(rng, 14, 18);
+    const auto pts = enumerate_feasible(p);
+    SolverParams params;
+    params.verbosity = 0;
+    params.threads = 1 + it % 2;
+    params.mip_rel_gap = 0.0;
+    params.mip_abs_gap = 1e-9;
+    params.presolve = it % 4 < 2;
+    const SolveResult r = solve(to_model(p), params);
+    if (pts.empty()) {
+      ++infeasible;
+      CHECK(r.status == Status::Infeasible || r.status == Status::InfeasibleOrUnbounded);
+      continue;
+    }
+    double zmin = kInf;
+    for (const auto& x : pts) {
+      double v = 0.0;
+      for (Index j = 0; j < p.num_cols(); ++j) v += p.cost[j] * x[j];
+      zmin = std::min(zmin, v);
+    }
+    if (!CHECK(r.status == Status::Optimal)) {
+      std::fprintf(stderr, "  case %d: status %s\n", it, to_string(r.status));
+      continue;
+    }
+    ++optimal;
+    if (!CHECK_NEAR(r.objective, zmin, 1e-6)) std::fprintf(stderr, "  case %d: objective %g, optimum %g\n", it, r.objective, zmin);
+  }
+  std::printf("  objective cliques solves: %d optimal, %d infeasible\n", optimal, infeasible);
+  CHECK(optimal > iters / 2);
 }

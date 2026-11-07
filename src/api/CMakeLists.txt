@@ -27,6 +27,12 @@ if(POPSO_SANITIZE AND NOT MSVC)
   target_link_options(popso_shared INTERFACE -fsanitize=address,undefined)
 endif()
 
+install(TARGETS popso_shared
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES ${CMAKE_SOURCE_DIR}/include/popso.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
 if(POPSO_BUILD_TESTS)
   # The C test is compiled as C99, which also checks that the header is plain C.
   enable_language(C)

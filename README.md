@@ -18,13 +18,13 @@ instances, and is faster overall, than the open-source solvers HiGHS and SCIP:
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| popso | 59/63 | 9.0 |
+| popso | 61/63 | 9.4 |
 | HiGHS 1.15 | 53/63 | 18.9 |
 | SCIP 10 | 50/63 | 21.3 |
 
 On the 43 harder instances of the same collection that no solver finishes in 2 minutes, with a
-10-minute limit, popso solves 18, HiGHS 12 and SCIP 6. On the full 240-instance MIPLIB 2017
-benchmark set (2 minutes, another machine) it solves 75, HiGHS 63 and SCIP 53.
+10-minute limit, popso solves 16, HiGHS 12 and SCIP 6. On the full 240-instance MIPLIB 2017
+benchmark set (2 minutes, another machine) it solves 89, HiGHS 74 and SCIP 65.
 
 These numbers come from single runs and have caveats. See **[BENCHMARKS.md](BENCHMARKS.md)** for
 the setup, per-instance results, the hard instances, the full benchmark set, the generated benchmark
@@ -43,6 +43,10 @@ cmake --build build -j 4
 
 On Windows with Visual Studio, add `--config Release` to the build command; the binaries are
 then in `build/Release/`.
+
+`cmake --install build --prefix <dir>` installs the `popso` executable into `<dir>/bin` (it needs
+no other file at run time), the shared library with the C API into `<dir>/lib` (`bin` on Windows)
+and `popso.h` into `<dir>/include`.
 
 The solver is developed and benchmarked on macOS (Apple silicon). Continuous integration
 builds it and runs the unit tests and a small end-to-end check on Linux (gcc and clang),
@@ -102,6 +106,8 @@ x1 1
 | `--no-presolve` | disable presolve |
 | `--lp-method <m>` | LP algorithm for a pure LP and the MIP root LP: `auto` (default), `simplex` or `barrier` |
 | `--verbosity <0-3>` | 0 silent, 1 summary (default), 2 progress, 3 debug |
+| `--profile <file>` | after the solve, write a JSON profile of the model and the run (see below) |
+| `--write-anon <file>` | write an anonymized copy of the model as MPS and exit (see below; `--solve` solves as well) |
 | `--version` | print the version |
 
 **Starting solutions.** `--start` takes a solution file, for example one written by an earlier run
@@ -112,6 +118,15 @@ sub-MIP. If that fails, the start is ignored and the log says so.
 **Interrupting.** Ctrl-C (SIGINT) stops the solve within a fraction of a second; popso prints the
 usual summary with the status `INTERRUPTED` and the best solution found so far (and writes `--sol` /
 `--duals` files as usual). A second Ctrl-C ends the process at once.
+
+**Models that cannot be shared.** `--write-anon anon.mps` writes a copy with generic names (`x1..`,
+`c1..`), rows and columns shuffled (`--anon-seed <n>`, default 1; `--anon-keep-order` keeps the order)
+and every number unchanged (up to an ulp on a ranged row MPS cannot express; popso warns): a model to
+debug the solver on, without its meaning. `--anon-map map.txt` writes the private
+`new_name original_name` mapping, which stays with you. `--profile profile.json` writes aggregate
+statistics only: sizes, column types, row classes (MIPLIB 2017 classification), coefficient ranges,
+presolve and run statistics and the incumbent trace (time, objective, the heuristic that found it), with
+no names, no per-row or per-column data and no paths.
 
 ### Dual values
 
@@ -176,6 +191,12 @@ End
   inexact solves, and they also tighten integer bounds (reduced-cost fixing). The search uses
   domain propagation, reliability branching, rounding, a QP dive and feasibility jump on a
   linearized objective; it is single-threaded and deterministic.
+- **Sums of squares of integer variables** (a diagonal Q whose columns are all integer, e.g.
+  squared integer target errors, plus any linear terms) are solved as a MILP instead, with the full
+  MILP machinery (presolve, cuts, parallel search): each square x^2 of an integer is exactly the
+  maximum of its tangent lines at the integers, and popso adds those tangents around the continuous
+  relaxation's point, checks every solution against the exact objective and adds more where needed.
+  This relaxation is much tighter than the continuous x^2, often closing the gap at the root.
 - Cutting planes are not used for quadratic models yet, and quadratic constraints are not
   supported (MPS `QCMATRIX`, LP brackets in constraints: an error).
 
@@ -299,12 +320,13 @@ pip install ./python
 - **QP and MIQP:** convexity test by a sparse factorization of the scaled Hessian; the barrier
   method with the Hessian in the augmented system; branch-and-bound with a warm-started dual
   active-set QP solver at the nodes, safe Lagrangian bounds, reliability branching and QP-based
-  heuristics.
+  heuristics. Sums of squares of integer variables are solved as a MILP with exact tangent rows.
 - **LP:** bounded dual simplex with hyper-sparse LU factorization, Forrest–Tomlin updates and
   dual steepest-edge pricing, plus a primal simplex for cleanup. An interior-point (barrier)
   method: Mehrotra predictor-corrector with Gondzio correctors, AMD ordering and a supernodal
   sparse Cholesky factorization (normal equations or augmented system), and a crossover to an
-  optimal basis. Large pure LPs run both methods at the same time by default.
+  optimal basis. Large pure LPs, and the root LPs of large MILPs, run both methods at the same time by
+  default.
 - **Logical constraints:** semi-continuous and semi-integer variables, SOS1/SOS2 and
   indicator constraints, reformulated with binaries and big-M rows whose coefficients come
   from bound propagation; without finite bounds, branching on the binary enforces the
@@ -326,7 +348,7 @@ pip install ./python
 - **Branch-and-bound:**
   - reliability branching on pseudocosts with strong branching;
   - node-level domain propagation and conflict analysis;
-  - reduced-cost fixing;
+  - reduced-cost fixing and objective propagation with clique implications;
   - symmetry handling (orbital branching, orbitopes, symmetry-breaking reductions from a
     stabilizer chain);
   - root and in-tree restarts.

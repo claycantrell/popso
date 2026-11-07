@@ -24,6 +24,7 @@
 //  - a node whose relaxation looks integral but whose rounded point cannot be completed to a
 //    feasible one is split three ways on an integer column (x <= v-1, x = v, x >= v+1).
 
+#include <functional>
 #include <vector>
 
 #include "milp/core/log.hpp"
@@ -37,6 +38,8 @@ struct MiqpOptions {
   int threads = 1;                  // for the factorizations of large relaxations
   std::vector<double> diag_shift;   // added to Q's diagonal in the relaxations (convexity repair)
   std::vector<double> start;        // starting point (one value per column, NaN = not given) or empty
+  // Each new incumbent: objective in the user's sense, what found it, time (SolverParams::trace_incumbents).
+  std::function<void(double objective, const char* source, double time)> on_trace;
 };
 
 struct MiqpResult {

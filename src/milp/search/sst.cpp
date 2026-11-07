@@ -239,7 +239,9 @@ SstResult Sst::run(const Symmetry& sym, const std::vector<char>& skip_gen) {
     bool fixed_more = false;
     for (Index r = 0; r < n_; ++r) {
       if (work_ > work_limit) break;  // scoring the orbits alone can take long (bab2: long rows, minutes)
-      if (uf[r] != r || head[r] < 0 || !p_.is_int[r]) continue;
+      if (uf[r] != r || head[r] < 0) continue;
+      // Symmetries map columns onto columns of the same type and bounds: the root stands for its orbit.
+      if (o_.mode == 3 ? binary(r) : !p_.is_int[r]) continue;
       members.clear();
       bool has_zero = false;
       for (Index j = r; j >= 0; j = next[j]) {
@@ -260,7 +262,7 @@ SstResult Sst::run(const Symmetry& sym, const std::vector<char>& skip_gen) {
       }
       // Orbits of the stabilizer refine the previous ones: an orbit with the same smallest member
       // and size is the same set, with the same conflict count.
-      int c = score_size[r] == static_cast<Index>(members.size()) ? score[r] : -1;
+      int c = o_.mode == 3 ? 0 : score_size[r] == static_cast<Index>(members.size()) ? score[r] : -1;
       if (c < 0) {
         for (Index j : members) in_orbit_[j] = 1;
         c = conflicts(r);

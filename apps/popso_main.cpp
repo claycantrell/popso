@@ -1,5 +1,6 @@
 // popso command-line interface: read an MPS or LP model, solve it, report, and
-// optionally write a .sol file (common "name value" format).
+// optionally write a .sol file (common "name value" format), a JSON profile of the
+// model and the run (--profile), or an anonymized copy of the model (--write-anon).
 
 #include <algorithm>
 #include <atomic>
@@ -15,9 +16,11 @@
 
 #include "milp/core/model.hpp"
 #include "milp/core/timer.hpp"
+#include "milp/io/anonymize.hpp"
 #include "milp/io/lp_reader.hpp"
 #include "milp/io/mps_reader.hpp"
 #include "milp/io/solution.hpp"
+#include "milp/solver/profile.hpp"
 #include "milp/solver/solver.hpp"
 
 namespace {
@@ -53,6 +56,21 @@ void print_usage(std::FILE* out) {
                "  --node-limit <n>      stop after n branch-and-bound nodes (default: none)\n"
                "  --deterministic       reproducible parallel search (slower; default: opportunistic)\n"
                "  --racing <k>          run k differently seeded searches concurrently (default 1)\n"
+               "  --profile <file>      after the solve (also LPs, QPs and stops at a limit), write a JSON profile:\n"
+               "                        sizes, column types, row classes (MIPLIB 2017 classification), coefficient\n"
+               "                        ranges, presolve and run statistics, incumbent trace (time, objective,\n"
+               "                        source); aggregated only: no names, no per-row or per-column data, no paths\n"
+               "  --write-anon <file>   write the model as free MPS with generic names (columns x1.., rows c1..,\n"
+               "                        SOS sets s1.., indicators i1.., model \"anon\"), rows and columns in a\n"
+               "                        shuffled order and every number unchanged (a warning counts the ranged\n"
+               "                        rows MPS cannot express exactly: off by an ulp), then exit without solving\n"
+               "  --anon-map <file>     with --write-anon: also write the private name mapping, one line\n"
+               "                        \"<new name> <original name>\" per column, row, SOS set and indicator\n"
+               "                        (keep it: it maps a solution of the copy back; never written by default)\n"
+               "  --anon-seed <n>       with --write-anon: seed of the shuffle (default 1; same seed, same file)\n"
+               "  --anon-keep-order     with --write-anon: keep the row and column order (only the names change)\n"
+               "  --solve               with --write-anon: solve the original model as well (needed for --sol,\n"
+               "                        --duals, --start and --profile together with --write-anon)\n"
                "  --version             print the version\n"
                "  --help                show this message\n");
 }
@@ -89,7 +107,9 @@ long long parse_int_arg(const char* opt, const char* s) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string model_path, sol_path, start_path, duals_path, format;
+  std::string model_path, sol_path, start_path, duals_path, format, profile_path, anon_path, anon_map_path;
+  milp::AnonOptions anon;
+  bool anon_option = false, solve_too = false;
   milp::SolverParams params;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
@@ -154,6 +174,24 @@ int main(int argc, char** argv) {
       const long long s = parse_int_arg(a, value());
       if (s < 0) usage_error("seed must be nonnegative");
       params.seed = static_cast<unsigned>(s);
+    } else if (!std::strcmp(a, "--profile")) {
+      profile_path = value();
+      params.trace_incumbents = true;
+    } else if (!std::strcmp(a, "--write-anon")) {
+      anon_path = value();
+    } else if (!std::strcmp(a, "--anon-map")) {
+      anon_map_path = value();
+      anon_option = true;
+    } else if (!std::strcmp(a, "--anon-seed")) {
+      const long long s = parse_int_arg(a, value());
+      if (s < 0) usage_error("anon-seed must be nonnegative");
+      anon.seed = static_cast<uint64_t>(s);
+      anon_option = true;
+    } else if (!std::strcmp(a, "--anon-keep-order")) {
+      anon.keep_order = true;
+      anon_option = true;
+    } else if (!std::strcmp(a, "--solve")) {
+      solve_too = true;
     } else if (a[0] == '-' && a[1] == '-') {
       usage_error(std::string("unknown option ") + a);
     } else if (model_path.empty()) {
@@ -163,6 +201,12 @@ int main(int argc, char** argv) {
     }
   }
   if (model_path.empty()) usage_error("no model file given");
+  if (anon_path.empty() && (anon_option || solve_too))
+    usage_error("--anon-map, --anon-seed, --anon-keep-order and --solve go with --write-anon");
+  // --write-anon alone does not solve: options that need a solve must say so with --solve.
+  if (!anon_path.empty() && !solve_too && (!sol_path.empty() || !duals_path.empty() || !start_path.empty() ||
+                                           !profile_path.empty()))
+    usage_error("--write-anon exits without solving; add --solve for --sol, --duals, --start or --profile");
 
   milp::Timer timer;
   milp::Model model;
@@ -178,6 +222,28 @@ int main(int argc, char** argv) {
     std::printf("Model %s: %d rows, %d columns (%d integer), %d nonzeros, read in %.3fs\n",
                 model.name.empty() ? model_path.c_str() : model.name.c_str(), model.num_rows(), model.num_cols(),
                 model.num_integers(), model.num_nonzeros(), read_time);
+  }
+
+  if (!anon_path.empty()) {
+    try {
+      milp::AnonMap map;
+      const milp::Model copy = milp::anonymize(model, anon, &map);
+      milp::Index inexact = 0;
+      milp::write_mps(copy, anon_path, &inexact);
+      if (!anon_map_path.empty()) milp::write_anon_map(anon_map_path, model, map);
+      if (inexact > 0) {
+        std::fprintf(stderr, "popso: warning: %d ranged rows are off by up to an ulp in the MPS file (no MPS range "
+                     "gives both sides exactly)\n", inexact);
+      }
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "popso: error writing the anonymized model: %s\n", e.what());
+      return 1;
+    }
+    if (!quiet) {
+      std::printf("Anonymized model written to %s%s%s\n", anon_path.c_str(), anon_map_path.empty() ? "" : ", map to ",
+                  anon_map_path.c_str());
+    }
+    if (!solve_too) return 0;
   }
 
   std::vector<double> start;
@@ -231,6 +297,14 @@ int main(int argc, char** argv) {
   if (!sol_path.empty()) {
     try {
       milp::write_solution(sol_path, model, result);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "milp: %s\n", e.what());
+      return 1;
+    }
+  }
+  if (!profile_path.empty()) {
+    try {
+      milp::write_profile(profile_path, model, params, result, POPSO_VERSION);
     } catch (const std::exception& e) {
       std::fprintf(stderr, "milp: %s\n", e.what());
       return 1;

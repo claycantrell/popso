@@ -8,7 +8,7 @@
 //   - activity-based bound tightening, redundant and forcing rows
 //   - coefficient strengthening on one-sided rows (integer columns)
 //   - parallel rows; parallel columns with proportional costs (merged)
-//   - dual fixing (lock-based); dominated columns
+//   - dual fixing (lock-based); dominated columns; dual aggregation of a binary onto its variable upper bound
 //   - doubleton equations (aggregation; integer pairs when integrality is preserved)
 //   - substitution of (implied) free columns and column singletons out of equations
 //   - probing on binaries: fixings, bound tightening, equivalences x = y / x = 1 - y, lifted rows
@@ -34,6 +34,9 @@ struct PresolveOptions {
   bool parallel_rows = true;
   bool parallel_cols = true;
   bool dual_fixing = true;
+  // Binaries whose only up-lock is a variable-upper-bound row x <= y (or an aggregated one) substituted by y
+  // (PresolveWork::dual_aggregate; MILP_PRESOLVE_OFF=dual_agg).
+  bool dual_aggregation = true;
   bool dominated_cols = true;
   bool aggregation = true;
   bool substitution = true;  // free column / column singleton substitution
@@ -44,6 +47,14 @@ struct PresolveOptions {
   // (l,S)-like cuts; root 127730 -> 130056 without the substitution). Zero-cost columns are still substituted
   // (empirical: neos-3627168-kasai's stocks, cost 0, solve 2-3x faster substituted).
   bool substitution_bounded = false;
+  // A non-singleton column is implied free also when its other rows imply its bounds (given the other columns'
+  // bounds), not only the equation it is substituted from: that equation is then removed
+  // (MILP_PRESOLVE_OFF=subst_implied).
+  bool substitution_implied = true;
+  // Net nonzeros a substitution of a continuous non-singleton column may add when the equation stays as the
+  // column's bounds (only after the first probing pass), or is removed because the column's other rows imply
+  // them; integer columns may add none (MILP_PRESOLVE_OFF=subst_fill: 0, i.e. the matrix may not grow).
+  int substitution_fill = 8;
   bool probing = true;
   // Lifting of one-sided rows by probing implications (probing.hpp; MILP_PRESOLVE_OFF=probing_lift).
   bool probing_lift = true;
@@ -99,7 +110,9 @@ struct PresolveStats {
   long long dominated = 0;
   long long dual_bounds = 0;  // dual bound strengthening
   long long aggregations = 0;
+  long long dual_aggregations = 0;  // binaries substituted by their variable upper bound
   long long substitutions = 0;
+  long long subst_implied = 0, subst_fill = 0;  // of those: implied free by other rows; kept rows that grew
   long long probes = 0, probing_fixed = 0, probing_bounds = 0, probing_equivs = 0;
   long long probing_lifts = 0, probing_lift_fill = 0;  // lifted rows; of those, new entries
   long long probing_conflicts = 0;                     // implications between binaries kept (literal pairs)

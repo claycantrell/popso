@@ -746,6 +746,34 @@ void append_entry(std::string& out, const std::string& a, const std::string& b, 
   out += '\n';
 }
 
+// A ranged row lo <= a^T x <= hi as an MPS row type, rhs and range. Readers compute the second side
+// as rhs + |R| (G row) or rhs - |R| (L row), so R = hi - lo can miss it by an ulp (0.1 + (0.3 - 0.1)
+// is not 0.3). Tries ranges a few ulps around hi - lo on both row types and takes the first that
+// gives back exactly [lo, hi] (G with hi - lo first, the writer's old choice). Some rows have none:
+// lo + R and hi - R move in steps of ulp(R), which can step over the side (sides of opposite signs,
+// |R| above both; or a tie: lo half an ulp of hi off hi's grid, hi odd). Then the closest one,
+// off by at most ulp(R) / 2 <= one ulp of the larger side; returns false.
+bool ranged_row(double lo, double hi, char* type, double* rhs, double* range) {
+  const double d = hi - lo;
+  double up = d, down = d, best_err = kInf;
+  for (int k = 0; k <= 4; ++k) {
+    for (double r : {up, down}) {
+      if (!(r > 0.0) || !std::isfinite(r)) continue;
+      const double eg = std::abs(lo + r - hi), el = std::abs(hi - r - lo);
+      if (eg == 0.0 || el == 0.0) {
+        *type = eg == 0.0 ? 'G' : 'L', *rhs = eg == 0.0 ? lo : hi, *range = r;
+        return true;
+      }
+      if (eg < best_err) best_err = eg, *type = 'G', *rhs = lo, *range = r;
+      if (el < best_err) best_err = el, *type = 'L', *rhs = hi, *range = r;
+    }
+    up = std::nextafter(up, kInf);
+    down = std::nextafter(down, 0.0);
+  }
+  if (!(best_err < kInf)) *type = 'G', *rhs = lo, *range = d;
+  return false;
+}
+
 }  // namespace
 
 Model read_mps_string(const std::string& text, std::vector<std::string>* warnings) {
@@ -759,7 +787,7 @@ Model read_mps(const std::string& path, std::vector<std::string>* warnings) {
   return parser.parse();
 }
 
-std::string write_mps_string(const Model& model_in) {
+std::string write_mps_string(const Model& model_in, Index* inexact_ranges) {
   // Indicator constraints are written as ordinary rows (appended) named in the INDICATORS section.
   Model with_ind;
   std::vector<std::pair<size_t, Index>> ind_rows;  // (indicator, row); vacuous ones (no finite side) are left out
@@ -814,6 +842,7 @@ std::string write_mps_string(const Model& model_in) {
   out += "ROWS\n N  " + objname + "\n";
 
   std::vector<double> rhs(m, 0.0), range(m, 0.0);
+  Index inexact = 0;  // ranged rows MPS cannot give back exactly (ranged_row)
   std::vector<char> has_range(m, 0);
   for (Index i = 0; i < m; ++i) {
     const double lo = model.row_lb[i], hi = model.row_ub[i];
@@ -827,7 +856,8 @@ std::string write_mps_string(const Model& model_in) {
     } else if (lo == -kInf) {
       t = 'L', rhs[i] = hi;
     } else {
-      t = 'G', rhs[i] = lo, range[i] = hi - lo, has_range[i] = 1;
+      if (!ranged_row(lo, hi, &t, &rhs[i], &range[i])) ++inexact;
+      has_range[i] = 1;
     }
     out += ' ';
     out += t;
@@ -937,11 +967,12 @@ std::string write_mps_string(const Model& model_in) {
     }
   }
   out += "ENDATA\n";
+  if (inexact_ranges) *inexact_ranges = inexact;
   return out;
 }
 
-void write_mps(const Model& model, const std::string& path) {
-  const std::string text = write_mps_string(model);
+void write_mps(const Model& model, const std::string& path, Index* inexact_ranges) {
+  const std::string text = write_mps_string(model, inexact_ranges);
   std::FILE* f = std::fopen(path.c_str(), "wb");
   if (!f) throw std::runtime_error(path + ": cannot open file for writing");
   const bool wrote = std::fwrite(text.data(), 1, text.size(), f) == text.size();

@@ -25,6 +25,7 @@ constexpr double kRedundantTol = 1e-9;
 constexpr Index kMaxSubstRow = 1000;      // longest equation used for non-singleton substitution
 constexpr Index kMaxSubstCol = 8;         // most rows of a substituted non-singleton column
 constexpr long long kMaxSubstFill = 32;   // (row length - 1) * (column length - 1) limit
+constexpr double kMaxImpliedRatio = 10.0;  // |a_ij| / |a_rj| limit for a bound of x_j implied by row r
 constexpr Index kMaxSparsifyRow = 50;     // longest equation added to other rows by sparsify
 constexpr double kMaxSparsifyScale = 1e3;  // largest |lambda| in r += lambda e
 constexpr double kMaxSparsifyRange = 1e6;  // a row's coefficient range may not grow beyond this
@@ -86,6 +87,7 @@ class PresolveWork {
     const int max_passes = opt_.probing ? std::max(1, opt_.probing_passes) : 0;
     bool probe_pending = max_passes > 0;  // another probing pass is due
     keep_binaries_ = probe_pending && opt_.probing_keep_binaries;
+    defer_fill_ = probe_pending;
     int clique_runs = 0;
     long long since_clique = 0;
     // Sparsify whenever the other reductions are exhausted and something changed since its last run, at most
@@ -114,6 +116,7 @@ class PresolveWork {
       step(0, true, [&] { return column_pass(); });
       step(3, opt_.coef_tightening, [&] { return coef_tightening(); });
       step(4, opt_.dual_fixing, [&] { return dual_fixing(); });
+      step(13, opt_.dual_aggregation, [&] { return dual_aggregate(); });
       step(5, opt_.dominated_cols, [&] { return dominated_cols(); });
       step(6, opt_.parallel_rows, [&] { return parallel_rows(); });
       step(7, opt_.parallel_cols, [&] { return parallel_cols(); });
@@ -160,11 +163,12 @@ class PresolveWork {
         // previous pass used (puriri: pass 2 would use 2.5x the work of pass 1).
         const int pass = ++stats_.probing_passes;
         keep_binaries_ = false;
+        defer_fill_ = false;
         compact();
         Timer tp;
         long long useful = 0;
         ch = probing(opt_.probing_effort * std::ldexp(1.0, 1 - pass), &useful);
-        // Substitutions of binaries deferred until now: at least one more round.
+        // Substitutions deferred until now (binaries, fill-in): at least one more round.
         if (deferred_ > 0 && status_ == PresolveStatus::Reduced) ch += 1, deferred_ = 0;
         step_time_[10] += tp.elapsed();
         probe_pending = pass < max_passes && useful > 0;
@@ -178,9 +182,10 @@ class PresolveWork {
     }
     if (log_.verbosity() >= 3) {
       static const char* names[] = {"columns", "rows", "propagate", "coef", "dual", "dominated", "parallel_rows",
-                                    "parallel_cols", "aggregate", "substitute", "probing", "cliqueext", "sparsify"};
+                                    "parallel_cols", "aggregate", "substitute", "probing", "cliqueext", "sparsify",
+                                    "dualagg"};
       std::string line = "Presolve step times:";
-      for (int k = 0; k < 13; ++k) line += " " + std::string(names[k]) + " " + std::to_string(step_time_[k]).substr(0, 5);
+      for (int k = 0; k < 14; ++k) line += " " + std::string(names[k]) + " " + std::to_string(step_time_[k]).substr(0, 5);
       log_.log(3, "%s\n", line.c_str());
     }
     if (status_ == PresolveStatus::Reduced) column_pass();
@@ -902,6 +907,74 @@ class PresolveWork {
     return ch;
   }
 
+  // Dual aggregation onto a variable upper bound: a binary x_j with c_j <= 0 whose only up-lock is a one-sided row
+  // r with a binary y such that r holds at y = 1 for all values of its other columns, and admits no x_j = 1 at
+  // y = 0 (sum_{k in S} a_k x_k <= (sum_{k in S} a_k) y, or x_j <= y). Some optimal solution has x_j = y: y = 0
+  // forces x_j = 0, and with y = 1 raising x_j to 1 keeps row r (redundant then) and x_j's other rows (none locks
+  // it upwards) and does not increase the objective. x_j is substituted by y (neos-787933: 1764 rows "sum of 133
+  // x_k <= 133 y" after dual fixing).
+  long long dual_aggregate() {
+    long long ch = 0, nnz = 0;
+    for (Index i = 0; i < m_; ++i) nnz += row_alive_[i] ? row_size_[i] : 0;
+    const long long limit = 20 * nnz + 1000000;
+    long long work = 0;
+    auto binary = [&](Index k) { return is_int_[k] && lb_[k] == 0.0 && ub_[k] == 1.0; };
+    for (Index j = 0; j < n_ && work < limit && status_ == PresolveStatus::Reduced; ++j) {
+      if (!col_alive_[j] || !binary(j) || cost_[j] > 0.0) continue;
+      Index r = -1;
+      double s = 0.0;  // row r as s * (row) <= b
+      bool one = true;
+      for (const Entry& e : cols_[j]) {
+        const Index i = e.idx;
+        if (!row_alive_[i] || !(e.val > 0 ? std::isfinite(rub_[i]) : std::isfinite(rlb_[i]))) continue;
+        if (r >= 0 || (std::isfinite(rlb_[i]) && std::isfinite(rub_[i]))) {
+          one = false;
+          break;
+        }
+        r = i;
+        s = e.val > 0 ? 1.0 : -1.0;
+      }
+      if (!one || r < 0 || row_size_[r] < 2 || row_size_[r] > 1000) continue;
+      work += row_size_[r];
+      const double b = s > 0 ? rub_[r] : -rlb_[r];
+      double minact = 0.0, maxact = 0.0, aj = 0.0;
+      bool finite = true;
+      for (const Entry& e : rows_[r]) {
+        const Index k = e.idx;
+        if (!col_alive_[k]) continue;
+        if (!small_bound(lb_[k]) || !small_bound(ub_[k])) {
+          finite = false;
+          break;
+        }
+        const double a = s * e.val;
+        minact += a * (a > 0 ? lb_[k] : ub_[k]);
+        maxact += a * (a > 0 ? ub_[k] : lb_[k]);
+        if (k == j) aj = a;
+      }
+      if (!finite || !(aj > 0.0)) continue;
+      // y: at y = 1 the maximum activity is maxact + a_y (y adds a_y lb_y = 0 to maxact); at y = 0 with x_j = 1 the
+      // minimum one is minact - a_y + a_j (y adds a_y ub_y = a_y to minact, x_j a_j lb_j = 0).
+      const double tol = 1e-9 * (1.0 + std::abs(b));
+      Index y = -1;
+      for (const Entry& e : rows_[r]) {
+        const Index k = e.idx;
+        const double a = s * e.val;
+        if (!col_alive_[k] || k == j || !(a < 0.0) || !binary(k)) continue;
+        if (maxact + a <= b + tol && minact - a + aj > b + opt_.feas_tol * (1.0 + std::abs(b))) {
+          y = k;
+          break;
+        }
+      }
+      if (y < 0) continue;
+      for (const Entry& e : cols_[j]) work += row_alive_[e.idx] ? row_size_[e.idx] : 0;
+      if (log_.verbosity() >= 4) log_.log(4, "  dual aggregation: col %d = col %d (row %d)\n", j, y, r);
+      substitute(j, 0.0, 1.0, {{y, -1.0}}, -1);
+      ++stats_.dual_aggregations;
+      ++ch;
+    }
+    return ch;
+  }
+
   // Parallel rows: rows that are scalar multiples of each other are merged.
   long long parallel_rows() {
     long long ch = 0;
@@ -1171,13 +1244,93 @@ class PresolveWork {
     return ch;
   }
 
+  // Whether the rows of column j other than `skip` imply its bounds, given the current bounds of their other
+  // columns: lo (hi) is set when one of them implies x_j >= lb_j (x_j <= ub_j). Row r: rlb_r - (max activity of
+  // the others) <= a_rj x_j <= rub_r - (min activity of the others). When x_j is then substituted out of row
+  // skip, these rows stay (with x_j replaced by its expression) and so do the bounds of their other columns, so
+  // the bounds of x_j are redundant. The bound is evaluated in the current problem each time (a snapshot could
+  // let two columns imply each other's bounds, e.g. x_j = x_k with both bounds derived from that row, and both
+  // be dropped). Tolerances as for the substitution row (1e-9 relative, integers rounded by 1e-6), plus the
+  // round-off of the activity (1e-12 of the magnitudes summed, as propagate's margin: a continuous bound
+  // propagate tightened from row r is recognized, a bound the row misses by more is not). Only rows with
+  // |a_rj| >= |a_j| / kMaxImpliedRatio (a_j: x_j's coefficient in row skip): a reduced point violating row r by v
+  // puts x_j up to v / |a_rj| beyond its bound, and postsolve's clamp moves that into row skip as |a_j| v / |a_rj|
+  // (milo-v12-6-r2-40-1 has ratios up to 100; 10 keeps 232 of the 270 rows removed without a limit).
+  void implied_by_rows(Index j, Index skip, double aj, bool& lo, bool& hi) const {
+    for (const Entry& x : cols_[j]) {
+      const Index r = x.idx;
+      if (lo && hi) return;
+      if (r == skip || !row_alive_[r]) continue;
+      const double a = x.val;
+      if (std::abs(aj) > kMaxImpliedRatio * std::abs(a)) continue;
+      const bool has_lb = std::isfinite(rlb_[r]), has_ub = std::isfinite(rub_[r]);
+      // Sides that would give the missing bound: a > 0: rub gives an upper bound, rlb a lower one.
+      const bool want_ub = !hi && (a > 0 ? has_ub : has_lb), want_lb = !lo && (a > 0 ? has_lb : has_ub);
+      if (!want_ub && !want_lb) continue;
+      double minact = 0.0, maxact = 0.0, mag = 0.0;
+      int nmin_inf = 0, nmax_inf = 0;
+      for (const Entry& e : rows_[r]) {
+        const Index k = e.idx;
+        if (k == j || !col_alive_[k]) continue;
+        const double bl = e.val > 0 ? lb_[k] : ub_[k], bh = e.val > 0 ? ub_[k] : lb_[k];
+        if (small_bound(bl)) minact += e.val * bl, mag += std::abs(e.val * bl); else ++nmin_inf;
+        if (small_bound(bh)) maxact += e.val * bh, mag += std::abs(e.val * bh); else ++nmax_inf;
+        if (nmin_inf > 0 && nmax_inf > 0) break;
+      }
+      double scale = 1.0;
+      if (has_lb) scale = std::max(scale, std::abs(rlb_[r]));
+      if (has_ub) scale = std::max(scale, std::abs(rub_[r]));
+      const double err = 1e-12 * (mag + scale) / std::abs(a);
+      // From rub: a x_j <= rub - minact; from rlb: a x_j >= rlb - maxact.
+      double ilo = -kInf, ihi = kInf;
+      if (has_ub && nmin_inf == 0) (a > 0 ? ihi : ilo) = (rub_[r] - minact) / a;
+      if (has_lb && nmax_inf == 0) (a > 0 ? ilo : ihi) = (rlb_[r] - maxact) / a;
+      ilo -= err;
+      ihi += err;
+      if (is_int_[j]) {
+        ilo = std::ceil(ilo - 1e-6);
+        ihi = std::floor(ihi + 1e-6);
+      }
+      lo = lo || ilo >= lb_[j] - 1e-9 * (1.0 + std::abs(lb_[j]));
+      hi = hi || ihi <= ub_[j] + 1e-9 * (1.0 + std::abs(ub_[j]));
+    }
+  }
+
+  // Whether continuous column j has a variable bound: an inequality with integer columns whose continuous
+  // coefficients all have one sign and the integer ones the other (x <= u y; as sparsify_protect).
+  bool has_variable_bound(Index j) const {
+    for (const Entry& x : cols_[j]) {
+      const Index i = x.idx;
+      if (!row_alive_[i] || rlb_[i] == rub_[i]) continue;
+      int cs = 0, is = 0;
+      bool ok = true;
+      for (const Entry& e : rows_[i]) {
+        if (!col_alive_[e.idx]) continue;
+        int& sg = is_int_[e.idx] ? is : cs;
+        const int v = e.val > 0 ? 1 : -1;
+        if (sg == 0) sg = v;
+        ok = ok && sg == v;
+      }
+      if (ok && cs != 0 && is != 0 && cs != is) return true;
+    }
+    return false;
+  }
+
   // Equations sum_k a_k x_k = b: a column j is substituted out, x_j = (b - sum_{k != j} a_k x_k) / a_j. The row
-  // stays as lb_j <= (b - sum_{k != j} a_k x_k) / a_j <= ub_j, without the sides the row already implies (it is
-  // removed if j is implied free). Column singletons cause no fill-in and are preferred (implied free ones
-  // first); they are taken from equations of any length: the work is O(row length) for the objective update
-  // (objective-defining rows z = c^T x with a free z). Other columns are tried only when no singleton
-  // qualifies, in rows of at most kMaxSubstRow entries, if the fill-in is small. Integer columns qualify only
-  // if the row keeps them integral (integer columns, a_k / a_j and b / a_j integral).
+  // stays as lb_j <= (b - sum_{k != j} a_k x_k) / a_j <= ub_j, without the sides that the row or the column's
+  // other rows already imply (implied_by_rows; the row is removed if j is implied free). Column singletons cause
+  // no fill-in and are preferred (implied free ones first); they are taken from equations of any length: the
+  // work is O(row length) for the objective update (objective-defining rows z = c^T x with a free z). Other
+  // columns are tried only when no singleton qualifies, in rows of at most kMaxSubstRow entries, if the fill-in
+  // is small: a substitution that keeps the row, or removes it by implied_by_rows, may add at most
+  // substitution_fill nonzeros net for a continuous column (csched007/008, neos-4954672-berkel, milo-v12-6-r2-40-1;
+  // without the limit for the latter milo kept 236 more rows than before: the longer rows no longer became
+  // doubletons), none for an integer column (binaries out of set partitioning rows: chromaticindex512-7 9215
+  // columns fewer for 27.6k more nonzeros, the cliques gone). One that keeps the row waits for the first probing
+  // pass (defer_fill_), and is not done for a column with a variable bound (has_variable_bound: the flows of
+  // fixed-charge networks, which the c-MIR and flow cover separators aggregate through; beasleyC3 and mc11 went
+  // from 15-17 s to the 120 s limit, p200x1188c 0.6 -> 5 s). Integer columns qualify only if the row keeps them
+  // integral (integer columns, a_k / a_j and b / a_j integral).
   long long substitute_equations() {
     long long ch = 0;
     std::vector<Entry> r, terms;
@@ -1204,7 +1357,8 @@ class PresolveWork {
       for (size_t t = 0; t < r.size() && int_ok; ++t) int_ok = integral(r[t].val / amin);
       int best = -1;
       long long best_score = 0;
-      bool best_lo = false, best_hi = false;  // whether the row implies lb_j / ub_j
+      bool best_lo = false, best_hi = false;  // whether the rows imply lb_j / ub_j
+      bool best_by_rows = false;              // ... both, with the column's other rows
       const bool long_row = row_size_[i] > kMaxSubstRow;
       if (long_row && !any_single) continue;
       // Pass 0: column singletons; pass 1 (none qualified; short rows only): the other columns.
@@ -1239,19 +1393,34 @@ class PresolveWork {
             ilo = std::ceil(ilo - 1e-6);
             ihi = std::floor(ihi + 1e-6);
           }
-          const bool lo = !std::isfinite(lb_[j]) || ilo >= lb_[j] - 1e-9 * (1.0 + std::abs(lb_[j]));
-          const bool hi = !std::isfinite(ub_[j]) || ihi <= ub_[j] + 1e-9 * (1.0 + std::abs(ub_[j]));
+          bool lo = !std::isfinite(lb_[j]) || ilo >= lb_[j] - 1e-9 * (1.0 + std::abs(lb_[j]));
+          bool hi = !std::isfinite(ub_[j]) || ihi <= ub_[j] + 1e-9 * (1.0 + std::abs(ub_[j]));
           if (small && !(lo && hi)) continue;
-          // Net change of nonzeros; a kept row must not grow the matrix.
+          // The bounds the row does not imply may be implied by the column's other rows.
+          bool by_rows = false;
+          if (!single && !(lo && hi) && opt_.substitution_implied) {
+            implied_by_rows(j, i, a, lo, hi);
+            by_rows = lo && hi;
+          }
+          // Net change of nonzeros (limits above).
           const long long score =
               single ? (lo && hi ? -static_cast<long long>(row_size_[i]) : -1)
                      : new_entries(j, i, r) - col_size_[j] - (lo && hi ? row_size_[i] - 1 : 0);
-          if (!(lo && hi) && score > 0) continue;
+          const bool limited = !(lo && hi) || by_rows;
+          if (limited && score > (is_int_[j] ? 0 : opt_.substitution_fill)) continue;
           if (!(lo && hi) && !single && !is_int_[j] && cost_[j] != 0.0 && !opt_.substitution_bounded) continue;
-          if (best < 0 || score < best_score) best = static_cast<int>(t), best_score = score, best_lo = lo, best_hi = hi;
+          if (!(lo && hi) && score > 0 && (defer_fill_ || has_variable_bound(j))) {
+            deferred_ += defer_fill_;
+            continue;
+          }
+          if (best < 0 || score < best_score) {
+            best = static_cast<int>(t), best_score = score, best_lo = lo, best_hi = hi, best_by_rows = by_rows;
+          }
         }
       }
       if (best < 0) continue;
+      stats_.subst_implied += best_by_rows;
+      stats_.subst_fill += !(best_lo && best_hi) && best_score > 0;
       const Index j = r[best].idx;
       const double a = r[best].val;
       terms.clear();
@@ -1743,7 +1912,7 @@ class PresolveWork {
   std::vector<char> is_int_;
   std::vector<Index> mark_;  // scratch (new_entries)
   double offset_ = 0.0, display_sense_ = 1.0;
-  double step_time_[13] = {};
+  double step_time_[14] = {};
   // Implications between binaries found by probing, as conflicting literal pairs a < b (2 j + v: x_j = v; columns of
   // this problem): seeds of later passes; the pairs of two literals x_j = 1 extend the cliques. Columns that
   // absorbed a parallel column (merged_) no longer stand for themselves.
@@ -1753,7 +1922,10 @@ class PresolveWork {
   // Binaries stay until the first probing pass (no substitution): probing may fix them, e.g. y = sum x_k with
   // y = 0 infeasible gives sum x_k = 1, while y substituted out leaves only 0 <= sum x_k <= 1 (puriri).
   bool keep_binaries_ = false;
-  long long deferred_ = 0;  // substitutions skipped for that
+  // Substitutions that add nonzeros also wait for the first probing pass: they changed the rows probing works on
+  // (neos-1445765: 18423 -> 16283 equivalences, presolved 955 x 1134 -> 1077 x 3465).
+  bool defer_fill_ = false;
+  long long deferred_ = 0;  // substitutions skipped for these two
   std::vector<char> merged_;
   std::vector<double> minact_, maxact_;  // row activity snapshot (dual_fixing)
   std::vector<int> nmin_inf_, nmax_inf_;
@@ -1781,10 +1953,13 @@ PresolveOptions PresolveOptions::from_env() {
   if (off("parallel_cols")) o.parallel_cols = false;
   if (off("dominated")) o.dominated_cols = false;
   if (off("dual")) o.dual_fixing = false;
+  if (off("dual_agg")) o.dual_aggregation = false;
   if (off("aggregation")) o.aggregation = false;
   if (off("cliques")) o.clique_merging = false;
   if (off("cliqueext")) o.clique_extension = false;
   if (off("substitution")) o.substitution = false;
+  if (off("subst_implied")) o.substitution_implied = false;
+  if (off("subst_fill")) o.substitution_fill = 0;
   if (off("probing")) o.probing = false;
   if (off("probing_lift")) o.probing_lift = false;
   if (off("probing_passes")) o.probing_passes = 1;
@@ -1850,10 +2025,14 @@ PresolveStatus Presolver::run(const MipProblem& in, const PresolveOptions& opt, 
   log.log(2,
           "Presolve details: %d rounds, %lld fixed cols, %lld removed rows, %lld bound changes, %lld coef changes, "
           "%lld parallel rows, %lld parallel cols, %lld dominated cols, %lld dual bounds, %lld aggregations, "
-          "%lld substitutions\n",
+          "%lld substitutions, %lld dual aggregations\n",
           stats_.rounds, stats_.fixed_cols, stats_.removed_rows, stats_.bound_changes, stats_.coef_changes,
           stats_.parallel_rows, stats_.parallel_cols, stats_.dominated, stats_.dual_bounds, stats_.aggregations,
-          stats_.substitutions);
+          stats_.substitutions, stats_.dual_aggregations);
+  if (opt.substitution && (opt.substitution_implied || opt.substitution_fill > 0)) {
+    log.log(2, "Presolve substitutions: %lld implied free by other rows, %lld kept rows grew\n", stats_.subst_implied,
+            stats_.subst_fill);
+  }
   if (opt.sparsify) {
     log.log(2, "Presolve sparsify: %lld rows combined, %lld nonzeros removed, %d runs, %lld equations skipped for "
             "variable-bound columns (summed over the runs)\n", stats_.sparsify_rows, stats_.sparsify_removed,

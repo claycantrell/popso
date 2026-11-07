@@ -515,6 +515,26 @@
      "scip": "10.0",
      "pyscipopt": "6.3.0"
     }
+   },
+   {
+    "date": "2026-11-06",
+    "time_limit": 600.0,
+    "threads": 2,
+    "jobs": 1,
+    "mem_limit_mb": 2048,
+    "solvers": [
+     "highs",
+     "scip"
+    ],
+    "instances": 5,
+    "versions": {
+     "python": "3.12.7",
+     "platform": "macOS-27.2-arm64-arm-64bit",
+     "machine": "arm64",
+     "highs": "1.15.1",
+     "scip": "10.0",
+     "pyscipopt": "6.3.0"
+    }
    }
   ]
  },
@@ -13304,6 +13324,283 @@
      "jobs": 1,
      "mem_limit_mb": 2800,
      "solvers": [
+      "scip"
+     ]
+    }
+   ]
+  },
+  "sqtrack_hard_1": {
+   "file": "benchmarks/instances/sqtrack_hard_1.mps",
+   "num_vars": 9956,
+   "num_cons": 325,
+   "num_nonzeros": 19647,
+   "num_integers": 9956,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 58248839.0,
+   "bound": 58248839.0,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "unknown",
+     "objective": null,
+     "bound": null,
+     "time": 159.23532333306503,
+     "raw_status": "python-bnb",
+     "nodes": 1,
+     "peak_rss_mb": 273.4
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 58248839.0,
+     "bound": 58248839.0,
+     "time": 1.7752527919365093,
+     "raw_status": "optimal",
+     "nodes": 11,
+     "verify": {
+      "feasible": true,
+      "objective": 58248839.0,
+      "max_viol": 2.6702196009864565e-11,
+      "worst": "var x[41,228]=-2.663689693053234e-11 < lb 0.0"
+     },
+     "peak_rss_mb": 177.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-06",
+     "time_limit": 600.0,
+     "threads": 2,
+     "jobs": 1,
+     "mem_limit_mb": 2048,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "sqtrack_large_1": {
+   "file": "benchmarks/instances/sqtrack_large_1.mps",
+   "num_vars": 2331,
+   "num_cons": 150,
+   "num_nonzeros": 4542,
+   "num_integers": 2331,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 4584481.0,
+   "bound": 4584481.0,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "unknown",
+     "objective": null,
+     "bound": null,
+     "time": 600.0597177919699,
+     "raw_status": "python-bnb",
+     "nodes": 104,
+     "peak_rss_mb": 97.7
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 4584481.0,
+     "bound": 4584481.0,
+     "time": 0.3358869580551982,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": 4584481.0,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 97.7
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-06",
+     "time_limit": 600.0,
+     "threads": 2,
+     "jobs": 1,
+     "mem_limit_mb": 2048,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "sqtrack_medium_1": {
+   "file": "benchmarks/instances/sqtrack_medium_1.mps",
+   "num_vars": 334,
+   "num_cons": 52,
+   "num_nonzeros": 628,
+   "num_integers": 334,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 429692.0,
+   "bound": 429692.0,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "unknown",
+     "objective": null,
+     "bound": null,
+     "time": 600.0080983749358,
+     "raw_status": "python-bnb",
+     "nodes": 54,
+     "peak_rss_mb": 237.9
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 429692.0,
+     "bound": 429692.0,
+     "time": 0.040120458928868175,
+     "raw_status": "optimal",
+     "nodes": 1,
+     "verify": {
+      "feasible": true,
+      "objective": 429692.0,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-06",
+     "time_limit": 600.0,
+     "threads": 2,
+     "jobs": 1,
+     "mem_limit_mb": 2048,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "sqtrack_small_1": {
+   "file": "benchmarks/instances/sqtrack_small_1.mps",
+   "num_vars": 73,
+   "num_cons": 21,
+   "num_nonzeros": 131,
+   "num_integers": 73,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 4247.9999999992715,
+   "bound": 4247.9999999992715,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "unknown",
+     "objective": 4253.999999999999,
+     "bound": null,
+     "time": 0.06384079100098461,
+     "raw_status": "python-bnb",
+     "nodes": 198,
+     "verify": {
+      "feasible": true,
+      "objective": 4253.999999999999,
+      "max_viol": 1.4210854715202004e-14,
+      "worst": "var x[1,10]=22.00000000000001 > ub 22.0"
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 4247.9999999992715,
+     "bound": 4247.9999999992715,
+     "time": 1.6648716250201687,
+     "raw_status": "optimal",
+     "nodes": 23220,
+     "verify": {
+      "feasible": true,
+      "objective": 4248.0,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 58.1
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-06",
+     "time_limit": 600.0,
+     "threads": 2,
+     "jobs": 1,
+     "mem_limit_mb": 2048,
+     "solvers": [
+      "highs",
+      "scip"
+     ]
+    }
+   ]
+  },
+  "sqtrack_tiny_1": {
+   "file": "benchmarks/instances/sqtrack_tiny_1.mps",
+   "num_vars": 13,
+   "num_cons": 7,
+   "num_nonzeros": 22,
+   "num_integers": 13,
+   "num_binaries": 0,
+   "sense": "min",
+   "status": "optimal",
+   "objective": 12996.0,
+   "bound": 12996.0,
+   "agree": true,
+   "notes": [],
+   "solvers": {
+    "highs": {
+     "status": "optimal",
+     "objective": 12996.0,
+     "bound": 12996.0,
+     "time": 0.0027761670062318444,
+     "raw_status": "python-bnb",
+     "nodes": 17,
+     "verify": {
+      "feasible": true,
+      "objective": 12996.0,
+      "max_viol": 4.999999606913666e-08,
+      "worst": ""
+     },
+     "peak_rss_mb": 0.0
+    },
+    "scip": {
+     "status": "optimal",
+     "objective": 12996.0,
+     "bound": 12996.0,
+     "time": 0.020177541999146342,
+     "raw_status": "optimal",
+     "nodes": 9,
+     "verify": {
+      "feasible": true,
+      "objective": 12996.0,
+      "max_viol": 0.0,
+      "worst": ""
+     },
+     "peak_rss_mb": 0.0
+    }
+   },
+   "ref_runs": [
+    {
+     "date": "2026-11-06",
+     "time_limit": 600.0,
+     "threads": 2,
+     "jobs": 1,
+     "mem_limit_mb": 2048,
+     "solvers": [
+      "highs",
       "scip"
      ]
     }

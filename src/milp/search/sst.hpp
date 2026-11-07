@@ -28,7 +28,10 @@
 namespace milp {
 
 struct SstOptions {
-  int mode = 2;              // 1: only leaders with conflicts in their orbit; 2: any integer orbit
+  // 1: only leaders with conflicts in their orbit; 2: any integer orbit; 3: non-binary leaders only
+  // (continuous or general integer orbits, the largest first: SCIP's sstleadervartype 6 with its
+  // maximum-size orbit rule), rows only (no conflicts to fix).
+  int mode = 2;
   long long work_limit = 0;  // elementary steps (0 = automatic)
   long long max_rows = -1;   // new rows (-1 = automatic: 2 n + 1000)
   int max_leaders = 5000;

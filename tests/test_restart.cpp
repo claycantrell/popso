@@ -14,6 +14,7 @@
 
 #include "milp/core/log.hpp"
 #include "milp/core/model.hpp"
+#include "milp/io/mps_reader.hpp"
 #include "milp/presolve/presolve.hpp"
 #include "milp/search/branch_and_bound.hpp"
 #include "milp/search/mip_problem.hpp"
@@ -302,4 +303,76 @@ TEST(restart_skip_root_strong_branching_keeps_optimum) {
                   seed, a.stats.restarts, d1.stats.restarts, a.stats.nodes, d1.stats.nodes);
     }
   }
+}
+
+namespace {
+
+// Random multi-dimensional knapsack with tied profits (multiples of 5) and a few general integers: many
+// optima, and columns dominated by others (no more profit, no less weight in every row), so that a restart's
+// presolve may remove the incumbent it starts from.
+Model restart_fuzz_model(std::mt19937& rng) {
+  auto uni = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)); };
+  ModelBuilder b;
+  b.model().sense = ObjSense::Maximize;
+  const int n = uni(40, 90), m = uni(2, 4);
+  std::vector<std::vector<int>> a(m, std::vector<int>(n));
+  std::vector<double> sum(m, 0.0);
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) sum[i] += a[i][j] = uni(10, 60);
+  }
+  for (int j = 0; j < n; ++j) {
+    double v = uni(0, 30);
+    for (int i = 0; i < m; ++i) v += a[i][j] / static_cast<double>(m);
+    const bool binary = uni(0, 5) != 0;
+    b.add_col("x" + std::to_string(j), 5.0 * std::round(v / 5.0), 0.0, binary ? 1.0 : 2.0,
+              binary ? VarType::Binary : VarType::Integer);
+  }
+  for (int i = 0; i < m; ++i) {
+    const Index row = b.add_row("c" + std::to_string(i), -kInf, std::floor(0.35 * sum[i]));
+    for (int j = 0; j < n; ++j) b.add_coef(row, j, a[i][j]);
+  }
+  return b.build();
+}
+
+}  // namespace
+
+// Restarts forced at every root and in the tree on random models with tied optima: the optimum of a solve
+// without restarts, in both modes (neos-3083819-nubu: a restart's presolve removed the incumbent it started
+// from, and the rejected point's objective became the cutoff). MILP_FUZZ_ITERS / MILP_FUZZ_SEED: longer runs.
+TEST(restart_fuzz_keeps_optimum) {
+  const char* it_env = std::getenv("MILP_FUZZ_ITERS");
+  const char* seed_env = std::getenv("MILP_FUZZ_SEED");
+  const int iters = it_env ? std::atoi(it_env) : 25;
+  std::mt19937 rng(seed_env ? static_cast<unsigned>(std::atoi(seed_env)) : 20261106u);
+  int restarted = 0, compared = 0;
+  for (int it = 0; it < iters; ++it) {
+    const Model m = restart_fuzz_model(rng);
+    SolveResult ref;
+    {
+      RestartEnv env({{"MILP_MAX_RESTARTS", "0"}, {"MILP_MAX_TREE_RESTARTS", "0"}});
+      ref = solve_restart_model(m, 1, false, 1);
+    }
+    if (ref.status != Status::Optimal && ref.status != Status::Infeasible) continue;
+    RestartEnv env({{"MILP_RESTART_FRAC", "0.001"},
+                    {"MILP_RESTART_FRAC2", "0.001"},
+                    {"MILP_RESTART_MIN", "1"},
+                    {"MILP_RESTART_MINRED", "0"},
+                    {"MILP_RESTART_WORK", "1e9"},
+                    {"MILP_TREE_RESTART", "0.001"},
+                    {"MILP_TREE_RESTART_NODES", "1e9"}});
+    for (int mode = 0; mode < 2; ++mode) {
+      const SolveResult r = solve_restart_model(m, mode == 0 ? 1 : 2, mode == 1, static_cast<unsigned>(it % 5));
+      ++compared;
+      restarted += r.stats.restarts + r.stats.tree_restarts > 0;
+      if (!CHECK(r.status == ref.status) ||
+          (ref.status == Status::Optimal && !CHECK_NEAR(r.objective, ref.objective, 1e-6))) {
+        std::fprintf(stderr, "  restart fuzz case %d (%s): %s %.10g vs %s %.10g without restarts, %d + %d restarts\n", it,
+                     mode == 1 ? "deterministic" : "default", to_string(r.status), r.objective, to_string(ref.status),
+                     ref.objective, r.stats.restarts, r.stats.tree_restarts);
+        if (const char* dump = std::getenv("MILP_FUZZ_DUMP")) write_mps(m, std::string(dump) + "/restart" + std::to_string(it) + ".mps");
+      }
+    }
+  }
+  if (std::getenv("MILP_TEST_VERBOSE")) std::printf("  restart fuzz: %d solves, %d with restarts\n", compared, restarted);
+  CHECK(restarted >= compared / 4);  // the restarts happen
 }

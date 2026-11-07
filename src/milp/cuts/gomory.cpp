@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "milp/cuts/cut.hpp"
 
@@ -20,8 +21,11 @@ class GomorySeparator : public Separator {
  public:
   const char* name() const override { return "gomory"; }
   void separate(const SepaContext& ctx, std::vector<Cut>& out) override;
+  long long work() const override { return work_; }
 
  private:
+  long long work_ = 0;
+  bool all_dense_ = false;  // the last call's tableau rows gave no cut and some were too dense
   std::vector<double> alpha_, coef_;
   std::vector<Index> anz_;  // nonzero positions of alpha_ (ascending)
   std::vector<char> int_row_, mark_;
@@ -43,6 +47,8 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   const Index n = lp.num_cols(), m = lp.num_rows();
   const SparseMatrix& R = lp.row_matrix();
   const double* x = ctx.x;
+  const size_t out_size0 = out.size();
+  work_ = R.nnz();  // the pass below
 
   // Rows whose logical is integer for integer x: integer coefficients on integer columns.
   int_row_.assign(m, 1);
@@ -72,11 +78,38 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
   // rejects (cancellation through the logicals is rare): skip them before the second pass
   // (neos-960392: ~40% of the rows have 50k+ of 58k columns).
   const Index max_struct = ctx.max_nnz > 0 ? 2 * ctx.max_nnz : n + 1;
+  // Tableau entries below 1e-11 are left out of the row. That is not a relaxation: the GMI term
+  // g_j y_j >= 0 of a left-out y_j is missing from the >= cut, and a nonbasic logical of a row with a
+  // huge side (neos-4413714-turia: rhs 9e8) or a one-sided row has an (almost) unbounded y_j. The node
+  // tableau c-MIR cuts had the same drop and cut off turia's optimum (cuts/mir.cpp). So they are kept
+  // (their tiny g_j leave in clean_cut with their bounds); MILP_GOMORY_KEEP_TINY=0: the old drop. Server
+  // core A/B (4 seeds): 0.987 [0.951, 1.021], solved 210 -> 215 of 252.
+  static const double kZero = [] {
+    const char* v = std::getenv("MILP_GOMORY_KEEP_TINY");
+    return v && std::atoi(v) == 0 ? 1e-11 : 0.0;
+  }();
+  // Once rows come out too dense, the basis inverse usually is (dense cut rows in the basis). After a call
+  // whose rows gave no cut and were partly too dense, the next call skips the rest of its candidates after
+  // dense_stop rows in a row that were too dense. Each costs a pass over the rows its B^{-1} row touches and
+  // a full pass over the tableau row (neos-4413714-turia from round 5: all 500 rows of 190k columns too
+  // dense, 0.5 s per round for nothing; fast0507 likewise). Not in a call after one with cuts: the most
+  // fractional rows can be dense while later ones give cuts (cmflsp50-24-8-8's first round: 80 cuts). Nor
+  // before the call's work reaches 1e7 units (as the cut loop's separator backoff; ~10 ms): on small models
+  // the rows are cheap and stopping only changes the cuts (rococoC10-001000 lost a late bound jump).
+  // MILP_GOMORY_DENSE_STOP = k (default 20, 0: off).
+  static const int dense_stop = [] {
+    const char* v = std::getenv("MILP_GOMORY_DENSE_STOP");
+    return v ? std::atoi(v) : 20;
+  }();
+  int dense_run = 0, dense_rows = 0;
+  const bool may_stop = dense_stop > 0 && all_dense_;
   std::vector<Index> nz;
   for (const auto& [score, jb] : cand) {
+    if (may_stop && dense_run >= dense_stop && work_ >= 10000000) break;
     for (Index j : anz_) alpha_[j] = 0.0;
     anz_.clear();
     if (!lp.tableau_row(jb, alpha_, anz_)) continue;
+    work_ += lp.tableau_row_work();
     // First pass: beta and validity of the row (positions outside anz_ are zero).
     double beta = 0.0, amax = 0.0;
     bool ok = true;
@@ -84,7 +117,7 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     for (Index j : anz_) {
       if (lp.status(j) == VarStatus::Basic) continue;
       const double a = alpha_[j];
-      if (std::abs(a) < 1e-11) continue;  // numerically zero tableau entry
+      if (std::abs(a) < kZero || a == 0.0) continue;  // numerically zero tableau entry
       amax = std::max(amax, std::abs(a));
       const VarStatus st = lp.status(j);
       const double l = lp.var_lower(j), u = lp.var_upper(j);
@@ -104,6 +137,8 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
       if (!is_finite(b)) ok = false;
       beta -= a * b;
     }
+    dense_run = !ok && nstruct > max_struct ? dense_run + 1 : 0;
+    dense_rows += !ok && nstruct > max_struct;
     if (!ok || amax > 1e6) continue;
     if (std::abs(beta - x[jb]) > 1e-6 * (1.0 + std::abs(x[jb]))) continue;
     const double f0 = beta - std::floor(beta);
@@ -119,7 +154,7 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     for (Index j : anz_) {
       if (lp.status(j) == VarStatus::Basic) continue;
       const double a0 = alpha_[j];
-      if (std::abs(a0) < 1e-11) continue;
+      if (std::abs(a0) < kZero || a0 == 0.0) continue;
       const double l = lp.var_lower(j), u = lp.var_upper(j);
       if (l == u) continue;
       const bool at_upper = lp.status(j) == VarStatus::AtUpper;
@@ -162,6 +197,7 @@ void GomorySeparator::separate(const SepaContext& ctx, std::vector<Cut>& out) {
     c.rhs = -rhs;
     out.push_back(std::move(c));
   }
+  all_dense_ = out.size() == out_size0 && dense_rows > 0;
 }
 
 }  // namespace

@@ -63,15 +63,26 @@ CutLoopStats root_cut_loop(const MipProblem& p, DualSimplex& lp, const SolverPar
                            const Timer& timer, double cutoff, CutData* data, bool sub_mip,
                            std::vector<Cut>* dropped, const std::function<void(const DualSimplex&)>& on_lp,
                            const std::atomic<bool>* stop, const std::function<double()>& cutoff_fn,
-                           int max_rounds) {
+                           int max_rounds, const std::function<bool(double)>& gap_closed, long long prior_iterations,
+                           const std::function<bool(long long)>& lp_checkpoint, long long checkpoint_every,
+                           int threads,
+                           const std::function<Index(std::vector<double>&, std::vector<double>&, std::vector<Index>&)>&
+                               fix_fn) {
   if (cuts_disabled_by_env()) return CutLoopStats{};
   CutLoopOptions opt;
+  opt.threads = threads;
+  opt.fix_fn = fix_fn;
   opt.on_lp = on_lp;
+  opt.initial_checkpoint = lp_checkpoint;
+  opt.checkpoint_every = checkpoint_every;
+  opt.prior_iterations = prior_iterations;
   // Reduced-cost fixing between rounds: opt-in (MILP_CUTLOOP_RCFIX=1). Small root gains only
   // (mzzv42z, ns1830653), and Gomory cuts derived from the fixed bounds are valid below the cutoff
   // only, which root restarts (cut rows become model rows) would have to respect.
   static const bool rcfix = [] { const char* v = std::getenv("MILP_CUTLOOP_RCFIX"); return v && *v && *v != '0'; }();
   if (rcfix) opt.cutoff_fn = cutoff_fn;
+  static const bool gap_stop = [] { const char* v = std::getenv("MILP_CUT_GAP_STOP"); return !v || *v != '0'; }();
+  if (gap_stop) opt.gap_closed = gap_closed;
   opt.stop = stop;
   opt.zerohalf = !sub_mip;
   if (const char* v = std::getenv("MILP_MCF")) opt.mcf = *v != '0';
@@ -94,7 +105,16 @@ CutLoopStats root_cut_loop(const MipProblem& p, DualSimplex& lp, const SolverPar
   opt.flat_work_factor = 3.0;
   if (const char* v = std::getenv("MILP_FLAT_WORK")) opt.flat_work_factor = std::atof(v);
   if (const char* v = std::getenv("MILP_FLAT_WORK_MIN")) opt.flat_work_min = std::atof(v);
+  // MILP_SEPA_WORK=0: the loop's work estimates the separation as Gomory's (no Separator::work() counts);
+  // MILP_PLATEAU_WORK=0: no work cap on plateaus after the bound moved; MILP_SEPA_BACKOFF=0: no separator
+  // backoff, MILP_SEPA_BACKOFF_WORK: its minimum call work (CutLoopOptions).
+  if (const char* v = std::getenv("MILP_SEPA_WORK")) opt.sepa_work = *v != '0';
+  if (const char* v = std::getenv("MILP_PLATEAU_WORK")) opt.plateau_work = *v != '0';
+  if (const char* v = std::getenv("MILP_SEPA_BACKOFF")) opt.backoff = *v != '0';
+  if (const char* v = std::getenv("MILP_SEPA_BACKOFF_WORK")) opt.backoff_work = std::atof(v);
   if (const char* v = std::getenv("MILP_CHEAP_ROUNDS")) opt.max_rounds_cheap = std::atoi(v);
+  // MILP_CHEAP_SEP = f (opt-in; 0: off): CutLoopOptions::cheap_sep_factor.
+  if (const char* v = std::getenv("MILP_CHEAP_SEP")) opt.cheap_sep_factor = std::atof(v);
   if (const char* v = std::getenv("MILP_MAX_CUTS")) opt.max_cuts_per_round = std::atoi(v);
   if (const char* v = std::getenv("MILP_CHEAP_RECENT_REL")) opt.cheap_recent_rel = std::atof(v);
   // MILP_CUT_AGE = k: slack cut rows stay for k further slack re-solves (0: removed at the first).
@@ -121,6 +141,8 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   };
   const long long iters_start = lp.iterations();
   const double t_lp0 = timer.elapsed();
+  lpo.checkpoint = opt.initial_checkpoint;
+  lpo.checkpoint_every = opt.checkpoint_every;
   if (opt.time_share > 0.0 && is_finite(opt.total_time_limit)) {
     // The initial solve gets the whole remaining time; the share counts from its end.
     lpo.time_limit = std::max(0.0, opt.total_time_limit - timer.elapsed());
@@ -130,21 +152,66 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   } else if (solve() != LpStatus::Optimal) {
     return stats;
   }
+  lpo.checkpoint = nullptr;
   const long long iters0 = lp.iterations();
   if (opt.on_lp) opt.on_lp(lp);
   const double t_lp_end = timer.elapsed(), initial_lp_time = t_lp_end - t_lp0;
   log.log(2, "  initial LP: %lld iterations, %.2fs (%d rows, %d cols)\n", iters0 - iters_start, initial_lp_time,
           static_cast<int>(lp.num_rows()), static_cast<int>(lp.num_cols()));
   // Work of the loop after the initial solve (flat_work_factor): the cut probing budget (its time counts for
-  // the time cap too), per round the re-solve's iterations x (rows + columns) plus the separation, estimated
-  // as Gomory's: a tableau row (a BTRAN and a pass over the row matrix) for each fractional integer column,
-  // at most 500 (neos-960392: a flat round costs ~0.4x the initial solve, mostly Gomory).
-  const double initial_work = static_cast<double>(iters0 - iters_start) * static_cast<double>(lp.num_rows() + n);
+  // the time cap too), per round the re-solve's iterations x (rows + columns) plus the separation: the work
+  // the separators count (Separator::work(): Gomory's tableau rows, c-MIR's aggregations), or with
+  // sepa_work off estimated as Gomory's: a tableau row (a BTRAN and a pass over the row matrix) for each
+  // fractional integer column, at most 500 (neos-960392: a flat round costs ~0.4x the initial solve, mostly
+  // Gomory).
+  const long long init_iters = iters0 - iters_start + std::max<long long>(0, opt.prior_iterations);
+  const double initial_work = static_cast<double>(init_iters) * static_cast<double>(lp.num_rows() + n);
   double loop_work = 0.0;
+  double plateau_work = 0.0;  // loop work of the rounds since the bound last moved
   double lp_time = 0.0;
   int extra_rounds = 0;
   double obj = lp.objective();
   stats.bound_before = stats.bound_after = obj;
+  // Global bound tightenings against the cutoff (CutLoopOptions::fix_fn), after the initial solve and before
+  // each round: kept in the LP, which is re-solved. 0: nothing changed, 1: changed (LP optimal again), 2: the LP
+  // is not optimal any more (infeasible or cut off: no improving point is left; or a failure): no more rounds.
+  std::vector<double> fx_lb, fx_ub;
+  std::vector<Index> fx_cols;
+  double fix_gain = 0.0;  // bound gained by these re-solves (not by cuts)
+  std::vector<char> rc_changed(n, 0);  // reduced-cost fixing below
+  std::vector<std::pair<Index, std::pair<double, double>>> rc_saved;  // column, original bounds
+  auto global_fix = [&]() -> int {
+    if (!opt.fix_fn) return 0;
+    fx_lb.resize(n), fx_ub.resize(n);
+    for (Index j = 0; j < n; ++j) fx_lb[j] = lp.col_lower(j), fx_ub[j] = lp.col_upper(j);
+    fx_cols.clear();
+    if (opt.fix_fn(fx_lb, fx_ub, fx_cols) == 0 || fx_cols.empty()) return 0;
+    for (Index j : fx_cols) {
+      lp.set_col_bounds(j, fx_lb[j], fx_ub[j]);
+      if (!rc_changed[j]) continue;
+      // Restored at the end only as far as the new bounds allow.
+      for (auto& [c, b] : rc_saved) {
+        if (c == j) b.first = std::max(b.first, fx_lb[j]), b.second = std::min(b.second, fx_ub[j]);
+      }
+    }
+    stats.global_fixed += static_cast<long long>(fx_cols.size());
+    const long long it0 = lp.iterations();
+    const double before = lp.objective();
+    const LpStatus st = solve();
+    log.log(2, "  objective propagation with cliques: %zu columns fixed, LP %s %.10g -> %.10g, %lld iterations\n",
+            fx_cols.size(), to_string(st), p.display_sense * (before + p.offset), p.display_sense * (lp.objective() + p.offset),
+            lp.iterations() - it0);
+    if (st != LpStatus::Optimal) return 2;
+    if (opt.on_lp) opt.on_lp(lp);
+    fix_gain += lp.objective() - before;
+    obj = lp.objective();
+    stats.bound_after = obj;
+    return 1;
+  };
+  if (const int g = global_fix(); g == 2 || (g == 1 && opt.gap_closed && opt.gap_closed(obj))) {
+    if (g == 1) log.log(2, "  gap closed by the incumbent, no round\n");
+    return stats;
+  }
 
   std::vector<std::unique_ptr<Separator>> seps;
   if (opt.gomory) seps.push_back(make_gomory_separator());
@@ -301,14 +368,18 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   // rounds separate a tighter LP. Changing the opposite bound of a nonbasic column keeps the basis
   // optimal; the original bounds are restored at the end. Cuts derived from these bounds (Gomory)
   // are valid for solutions better than the cutoff, as the search's own reduced-cost fixings.
-  std::vector<std::pair<Index, std::pair<double, double>>> rc_saved;  // column, original bounds
-  std::vector<char> rc_changed(n, 0);
   auto rc_fix = [&]() {
     if (!opt.cutoff_fn) return;
     static const char* diag = std::getenv("MILP_CL_CUTOFF");  // diagnostics: a known cutoff (internal sense, no offset)
     const double co = diag ? std::min(std::atof(diag), opt.cutoff_fn()) : opt.cutoff_fn();
     const double z = lp.objective(), slack = co - z;
     if (!is_finite(co) || !(slack >= 0.0)) return;
+    bool unsafe = false;  // z is not confirmed by the LP's safe dual bound: z + d bounds nothing
+    lp.safe_objective(opt.tol.dual_feas, &unsafe);
+    if (unsafe) {
+      log.log(2, "  reduced-cost fixing skipped: LP objective %.10g above its safe bound\n", p.display_sense * (z + p.offset));
+      return;
+    }
     rc_cutoff = std::min(rc_cutoff, co);
     for (Index j = 0; j < n; ++j) {
       if (!p.is_int[j]) continue;
@@ -348,21 +419,46 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   const bool initial_degenerate = last_degenerate;
   log.log(2, "  initial LP %s dual degenerate\n", initial_degenerate ? "is" : "is not");
   std::vector<double> sep_time(seps.size(), 0.0);
+  // MILP_CUT_PROFILE=1 (diagnostics, verbosity 2): per round and separator the separation time, its
+  // candidates, those the pool kept, those selected and those binding after the re-solve.
+  static const bool profile = [] { const char* v = std::getenv("MILP_CUT_PROFILE"); return v && *v && *v != '0'; }();
+  // Separator backoff (opt.backoff): on large models some separators run every round without a cut selected
+  // (opm2-z10-s4: clique cuts, 2.4 s per round, none found; snp-02-004-104 and uccase12: c-MIR ~1 s per round
+  // after round 3; proteindesign121hz512p9: Gomory cuts all too dense for the pool), over a third of the
+  // separation time of the 41 large-LP MIPLIB roots. Per separator: failed calls in a row, next round to call.
+  std::vector<int> sepa_fails(seps.size(), 0), sepa_next(seps.size(), 1);
+  const double matrix_pass = static_cast<double>(p.A.index.size()) + static_cast<double>(n + m0);
+  double work_std = -1.0;  // loop_work after the first max_rounds rounds (cheap_sep_factor)
   auto cheap = [&]() {
-    return lp.iterations() - iters0 <= std::max<long long>(opt.cheap_work * (iters0 - iters_start), 20000);
+    if (opt.cheap_sep_factor > 0.0 && work_std > 0.0 && loop_work - work_std > opt.cheap_sep_factor * work_std) {
+      return false;
+    }
+    return lp.iterations() - iters0 <= std::max<long long>(opt.cheap_work * init_iters, 20000);
   };
   for (int round = 1; round <= std::max(opt.max_rounds, opt.max_rounds_cheap); ++round) {
     if (timer.elapsed() >= opt.time_limit) break;
     if ((opt.stop && opt.stop->load()) || interrupted()) break;
+    if (opt.gap_closed && opt.gap_closed(lp.objective())) {
+      log.log(2, "  gap closed by the incumbent, no further round\n");
+      break;
+    }
     if (round > opt.max_rounds && !cheap()) break;
     rc_fix();
+    if (const int g = global_fix(); g == 2) {
+      lp_optimal = false;
+      break;
+    } else if (g == 1 && opt.gap_closed && opt.gap_closed(obj)) {
+      log.log(2, "  gap closed by the incumbent, no further round\n");
+      break;
+    }
     const double* x = lp.x();
     bool frac = false;
     for (Index j = 0; j < n && !frac; ++j) {
       if (p.is_int[j]) frac = std::abs(x[j] - std::round(x[j])) > itol;
     }
     if (!frac) break;
-    if (opt.flat_work_factor > 0.0) {
+    const double round_work0 = loop_work;
+    if (opt.flat_work_factor > 0.0 && !opt.sepa_work) {
       Index nfrac = 0;
       for (Index j = 0; j < n; ++j) nfrac += p.is_int[j] && std::abs(x[j] - std::round(x[j])) > itol;
       loop_work += static_cast<double>(std::min<Index>(nfrac, 500)) *
@@ -372,6 +468,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     // Separate. Cuts dropped earlier for slack compete again when violated (on
     // degenerate LPs the solution otherwise cycles between alternative optima).
     SepaContext ctx{p, lp, x, m0, data, round, popt.max_nnz};
+    ctx.threads = opt.threads;
     // On dual degenerate LPs (cuts mostly move the solution between alternative optima, many cheap
     // rounds are typical) separators skip their expensive variants (c-MIR paths through integer
     // columns): neos-3381206-awhea's flat rounds are capped by time, and once its bound moves the
@@ -388,13 +485,22 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
       copy.pool_id = static_cast<int>(k);
       from_pool += pool.add(std::move(copy), x);
     }
+    double round_sep_time[16] = {0.0};
+    bool called[16] = {false};
     for (size_t s = 0; s < seps.size(); ++s) {
+      if (opt.backoff && round < sepa_next[s]) continue;
+      called[s] = true;
       cand.clear();
       const double ts = timer.elapsed();
       seps[s]->separate(ctx, cand);
-      sep_time[s] += timer.elapsed() - ts;
+      round_sep_time[s] = timer.elapsed() - ts;
+      sep_time[s] += round_sep_time[s];
       raw[s] = static_cast<int>(cand.size());
-      for (Cut& c : cand) found[s] += pool.add(std::move(c), x);
+      if (opt.sepa_work) loop_work += static_cast<double>(seps[s]->work());
+      for (Cut& c : cand) {
+        c.sepa = static_cast<int>(s);
+        found[s] += pool.add(std::move(c), x);
+      }
     }
     const int pool_candidates = static_cast<int>(pool.size());
     std::vector<Cut> cuts = pool.select();
@@ -419,6 +525,21 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
       tr_added += static_cast<long long>(cuts.size());
       tr_readded += tr_round_readd, tr_resep += tr_round_resep;
     }
+    int sel[16] = {0};  // selected fresh cuts per separator
+    std::vector<int> cut_sepa;  // profile
+    for (const Cut& c : cuts) {
+      if (c.pool_id < 0 && c.sepa >= 0) ++sel[c.sepa];
+      if (profile) cut_sepa.push_back(c.pool_id < 0 ? c.sepa : -1);
+    }
+    for (size_t s = 0; s < seps.size(); ++s) {
+      if (!called[s]) continue;
+      if (sel[s] > 0 || std::max(static_cast<double>(seps[s]->work()), matrix_pass) < opt.backoff_work) {
+        sepa_fails[s] = 0, sepa_next[s] = round + 1;
+      } else {
+        ++sepa_fails[s];
+        sepa_next[s] = round + (1 << std::min(sepa_fails[s] - 1, 20));
+      }
+    }
     {
       // Selected pool cuts leave the pool (they become rows again).
       std::vector<char> taken(dropped.size(), 0);
@@ -426,6 +547,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
       for (Cut& c : cuts) {
         if (c.pool_id >= 0) taken[c.pool_id] = 1, any = true;
         c.pool_id = -1;
+        c.sepa = -1;
       }
       if (any) {
         size_t w = 0;
@@ -471,7 +593,9 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     // iterations, not time, so that deterministic runs stay reproducible.
     const long long resolve_iters = lp.iterations() - round_iters;
     loop_work += static_cast<double>(resolve_iters) * static_cast<double>(lp.num_rows() + n);
-    if (resolve_iters > std::max<long long>(5000, (iters0 - iters_start) / 10) && popt.max_cuts > 50) {
+    stats.resolve_iterations += resolve_iters;
+    stats.resolve_time += round_lp_time;
+    if (resolve_iters > std::max<long long>(5000, init_iters / 10) && popt.max_cuts > 50) {
       popt.max_cuts = std::max(50, popt.max_cuts / 2);
       log.log(2, "  slow LP re-solve (%lld iterations): at most %d cuts per round\n", resolve_iters, popt.max_cuts);
     }
@@ -503,7 +627,44 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     if (opt.on_lp) opt.on_lp(lp);
     obj = lp.objective();
     stats.bound_after = obj;
+    if (obj - history.back() > 1e-9 * std::max(1.0, std::abs(obj))) {
+      plateau_work = 0.0;
+    } else {
+      plateau_work += loop_work - round_work0;
+    }
 
+    if (profile && log.verbosity() >= 2) {
+      int bind[16] = {0}, sel_pool = 0;
+      long long sel_nnz[16] = {0};
+      for (size_t k = 0; k < cuts.size(); ++k) {
+        const int s = cut_sepa[k];
+        if (s < 0) {
+          ++sel_pool;
+        } else {
+          bind[s] += !lp.row_is_basic(first_new + static_cast<Index>(k));
+          sel_nnz[s] += static_cast<long long>(cuts[k].idx.size());
+        }
+      }
+      char buf[1000];
+      int len = 0;
+      double total = 0.0;
+      for (size_t s = 0; s < seps.size(); ++s) {
+        total += round_sep_time[s];
+        if (!called[s]) {
+          len += std::snprintf(buf + len, sizeof(buf) - len, " %s -", seps[s]->name());
+          continue;
+        }
+        if (raw[s] == 0 && round_sep_time[s] < 0.005) continue;
+        len += std::snprintf(buf + len, sizeof(buf) - len, " %s %.3fs %d/%d/%d/%d w=%.3g", seps[s]->name(),
+                             round_sep_time[s], raw[s], found[s], sel[s], bind[s],
+                             static_cast<double>(seps[s]->work()));
+        if (sel[s] > 0) len += std::snprintf(buf + len, sizeof(buf) - len, " (nnz %lld)", sel_nnz[s] / sel[s]);
+      }
+      log.log(2, "  profile round %2d: separation %.3fs:%s (raw/kept/selected/binding)%s; re-solve %.3fs %lld iters "
+              "w=%.3g; gain %.4g; init w=%.3g\n", round, total, buf, sel_pool ? " other" : "", round_lp_time,
+              resolve_iters, static_cast<double>(resolve_iters) * static_cast<double>(lp.num_rows() + n),
+              lp.objective() - history.back(), initial_work);
+    }
     // Drop cuts that are no longer binding (basic logical with positive slack), after cut_age further slack
     // re-solves (see remove_slack).
     int tr_age[4] = {0, 0, 0, 0};
@@ -534,6 +695,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
     }
 
     history.push_back(obj);
+    if (round == opt.max_rounds) work_std = loop_work;
     const size_t h = history.size();
     if (h > static_cast<size_t>(opt.stall_rounds)) {
       const double old = history[h - 1 - opt.stall_rounds];
@@ -552,7 +714,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
         }
         if (flat && dual_degenerate && !flat_time_ok) break;
         if (flat && dual_degenerate && extra_rounds < opt.degenerate_rounds &&
-            lp.iterations() - iters0 <= 5 * std::max<long long>(iters0 - iters_start, 1000)) {
+            lp.iterations() - iters0 <= 5 * std::max<long long>(init_iters, 1000)) {
           ++extra_rounds;
         } else {
           // Cheap rounds. Mostly degenerate LPs: many weak rounds are typical (awhea), keep going
@@ -572,6 +734,15 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
             }
           }
           if (!(more && cheap())) break;
+          // A plateau after the bound moved gets the work budget of the flat rounds at the start
+          // (lectsched-5-obj: bound 14 -> 15 in 4 rounds, then 19 rounds / 17 s without gain;
+          // neos-3555904-turama: 20 rounds).
+          if (opt.plateau_work && !flat && opt.flat_work_factor > 0.0 &&
+              plateau_work > std::max(opt.flat_work_min, opt.flat_work_factor * initial_work)) {
+            log.log(2, "  no bound change for %.3g work units (initial LP %.3g): no further round\n", plateau_work,
+                    initial_work);
+            break;
+          }
         }
       }
     }
@@ -612,7 +783,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   }
   // Cuts that did not move the bound only make node LPs larger: drop them all.
   if (stats.rounds > 0 && lp.num_rows() > first_removable &&
-      stats.bound_after - stats.bound_before <= 1e-6 * std::max(1.0, std::abs(stats.bound_before))) {
+      stats.bound_after - stats.bound_before - fix_gain <= 1e-6 * std::max(1.0, std::abs(stats.bound_before))) {
     std::vector<Index> rows;
     for (Index i = first_removable; i < lp.num_rows(); ++i) rows.push_back(i);
     lp.remove_rows(rows);

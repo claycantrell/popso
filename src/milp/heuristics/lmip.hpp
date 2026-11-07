@@ -43,6 +43,10 @@ struct LocalMipLimits {
   // Only points with cost^T x < cutoff (without offset) are reported; the search aims below it.
   double cutoff = kInf;
   long long restart_steps = 1000000;  // restart from the best point after this many steps without a new best
+  // > 0: after the first report, a better point is reported only once this much effort has passed since the
+  // last report (the best point then; the search itself is unchanged, and the best point is reported at the
+  // end). 0: every new best at once.
+  long long report_effort = 0;
 };
 
 struct LocalMipStats {

@@ -767,6 +767,38 @@ def build_miqp_rand(rng, n, m, frac_int=0.5, imax=5):
     return md
 
 
+def build_sqtrack(rng, products, plants, short=0.15):
+    """Production targets in squares (integer QP, separable): integer production x[f,p] >= 0 on plants
+    with capacity rows (and per-product maxima), free integer errors e_p = sum_f x[f,p] - T_p, minimize
+    sum_p e_p^2. The targets exceed the capacity by about `short`, so some errors stay large."""
+    md = _model("sqtrack")
+    use = rng.integers(1, 6, (plants, products))          # capacity used per unit
+    able = rng.random((plants, products)) < 0.6           # which plant makes which product
+    for p in range(products):
+        able[rng.integers(0, plants), p] = True
+    x = {}
+    for f in range(plants):
+        for p in range(products):
+            if able[f, p]:
+                x[f, p] = md.add_var(lb=0.0, ub=float(rng.integers(20, 60)), vtype="I", name=f"x[{f},{p}]")
+    cap = []
+    for f in range(plants):
+        ps = [p for p in range(products) if able[f, p]]
+        c = float(round(0.5 * sum(use[f, p] * x[f, p].ub for p in ps)))
+        cap.append(c)
+        md.add_constr(_lin([float(use[f, p]) for p in ps], [x[f, p] for p in ps]) <= c, f"cap[{f}]")
+    # Targets: a random split of the total capacity (in units), raised by `short`.
+    units = sum(cap) / float(np.mean(use))
+    share = rng.dirichlet(np.ones(products))
+    for p in range(products):
+        fs = [f for f in range(plants) if able[f, p]]
+        target = int(round((1.0 + short) * units * share[p]))
+        e = md.add_var(lb=-INF, ub=INF, vtype="I", name=f"e[{p}]")
+        md.add_constr(qsum(x[f, p] for f in fs) - e == target, f"target[{p}]")
+        md.add_quad(e, e, 1.0)
+    return md
+
+
 BUILDERS = {
     "knapsack": build_knapsack,
     "mkp": build_mkp,
@@ -795,4 +827,5 @@ BUILDERS = {
     "lsq": build_lsq,
     "miqpport": build_miqp_portfolio,
     "miqprand": build_miqp_rand,
+    "sqtrack": build_sqtrack,
 }

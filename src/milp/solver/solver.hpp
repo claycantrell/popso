@@ -67,7 +67,36 @@ struct SolverParams {
   // in deterministic mode they come at deterministic points of the search. Returning true asks the
   // solve to stop (as an interrupt: Status::Interrupted). Not for quadratic objectives.
   std::function<bool(const std::vector<double>& x, double objective, double bound)> on_incumbent;
+  // Record SolveResult::incumbent_trace (popso --profile). It only notes what the search reports
+  // (no postsolve, no callback), so a deterministic search is the same with and without it.
+  bool trace_incumbents = false;
   Tolerances tol;
+};
+
+// The presolve of the problem solved (the model after the logical reformulation, if any): its size
+// before and after the first presolve (later ones run at restarts) and that presolve's time. For
+// MILPs and LPs the MILP presolve, for quadratic objectives the QP presolve.
+struct PresolveSummary {
+  bool ran = false;
+  Index rows_before = 0, cols_before = 0, nnz_before = 0;
+  Index rows = 0, cols = 0, nnz = 0;
+  double time = 0.0;
+};
+
+// New incumbents of a solve (SolverParams::trace_incumbents). Local search can improve thousands of
+// times within milliseconds, so a run of improvements from the same source, each within 1% of the
+// elapsed time (at least 10 ms) of the one before, is one event: the first incumbent's time and
+// objective, how many there were and the last (best) one's.
+struct IncumbentEvent {
+  double time = 0.0;       // seconds since the solve began
+  double objective = 0.0;  // in the model's sense, as the search computed it (before postsolve)
+  // What found it: the search's names, e.g. "feasibility jump", "local mip", "RENS", "RINS", a dive
+  // ("... diving"), "LP" (an integral relaxation, root or node), "rounding", "start" (the user's),
+  // "restart"; "final": the solution returned, better than the last one traced (e.g. presolve
+  // solved the problem, or a continuous model).
+  std::string source;
+  int count = 1;
+  double last_time = 0.0, last_objective = 0.0;
 };
 
 struct SolveStats {
@@ -77,6 +106,7 @@ struct SolveStats {
   double root_bound = -kInf;
   long long barrier_iterations = 0;  // interior-point iterations (QP and MIQP relaxations)
   int restarts = 0, tree_restarts = 0;  // root and in-tree restarts of the MILP search
+  PresolveSummary presolve;
 };
 
 struct SolveResult {
@@ -99,6 +129,10 @@ struct SolveResult {
   std::vector<int8_t> col_basis, row_basis;
   bool fixed_mip_duals = false;  // the duals are those of the MILP with its integers fixed
   SolveStats stats;
+  // With SolverParams::trace_incumbents: the incumbents in the order found (runs merged, see
+  // IncumbentEvent), each better than the one before by more than a relative 1e-9 (a restarted
+  // search accepts its start again, and racing searches report their own improvements).
+  std::vector<IncumbentEvent> incumbent_trace;
 };
 
 // Models with a quadratic objective (Model::q_*) are presolved by qp/qp_presolve.hpp and solved as
