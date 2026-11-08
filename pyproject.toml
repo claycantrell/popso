@@ -1,0 +1,45 @@
+# Python package: the popso command and the ctypes bindings (python/popso) with the shared library, built by CMake
+# through scikit-build-core. `pip install .` builds from source; the release workflow builds the wheels.
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "popso"
+dynamic = ["version"]
+description = "Open-source LP / MILP / QP / MIQP / QCQP / SOCP solver: the popso command and Python bindings"
+readme = "python/README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Marcin Polkowski"}]
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/gozwei/popso"
+Changelog = "https://github.com/gozwei/popso/blob/main/CHANGELOG.md"
+Benchmarks = "https://github.com/gozwei/popso/blob/main/BENCHMARKS.md"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.packages = ["python/popso"]
+# ctypes, no CPython extension: one wheel per platform serves every Python 3.
+wheel.py-api = "py3"
+cmake.build-type = "Release"
+sdist.exclude = ["benchmarks", "docs", "tests", "tools", ".github", "private", "PLAN.md"]
+
+[tool.scikit-build.cmake.define]
+POPSO_BUILD_TESTS = "OFF"
+POPSO_BUILD_SHARED = "ON"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\(popso LANGUAGES CXX VERSION (?P<value>[0-9.]+)\)'

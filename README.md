@@ -374,14 +374,15 @@ Ctrl-C during `solve()` stops the solve cleanly: `solve()` returns the result wi
 runs on a helper thread while the main thread waits). `m.interrupt()` does the same from another
 thread. An exception raised in the incumbent callback stops the solve and is re-raised by `solve()`.
 
-To use it from a source checkout, add `python/` to `PYTHONPATH`. The library is then found in
-`build/`; you can also point `POPSO_LIBRARY` at it. To install the package, copy the library into the
-package and run pip:
+Install it with pip; the package also puts the `popso` command on your PATH:
 
 ```sh
-cp build/libpopso.dylib python/popso/     # libpopso.so on Linux, popso.dll on Windows
-pip install ./python
+pip install popso          # wheels for Linux x86_64, macOS (Apple silicon and Intel), Windows
+pip install .              # from a source checkout: builds with CMake (3.20+, a C++20 compiler)
 ```
+
+From a source checkout without installing, add `python/` to `PYTHONPATH`. The library is then
+found in `build/`, or you can point `POPSO_LIBRARY` at it.
 
 ## What's inside
 

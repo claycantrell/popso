@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.1 — 2026-11
+
+`pip install popso`: wheels for Linux (x86_64), macOS (Apple silicon and Intel, 11+) and Windows (x86_64) with the
+`popso` command and the Python bindings, published to PyPI by the release workflow; `pip install .` builds from a
+source checkout (CMake, a C++20 compiler). The Python package's metadata moved to the top-level `pyproject.toml`
+(scikit-build-core; the version comes from CMakeLists.txt). No solver changes.
+
 ## v0.8.0 — 2026-11
 
 Quadratic constraints and cones: convex quadratically constrained models (QCQP / MIQCQP) and second-order cone

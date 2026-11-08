@@ -1,0 +1,67 @@
+name: release
+
+# Wheels (the popso command + the Python bindings) for PyPI, built by cibuildwheel. A published GitHub release
+# builds and uploads them (PyPI Trusted Publishing: no token; the PyPI project's publisher is this workflow with the
+# environment "pypi"); a manual run only builds and tests them.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    if: github.repository == 'gozwei/popso'
+    name: wheels ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, macos-13, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v2.23.3
+        env:
+          # One py3-none-<platform> wheel per platform (ctypes, no CPython extension): build it once.
+          CIBW_BUILD: cp312-*
+          CIBW_SKIP: "*-musllinux_* *-win32 *_i686"
+          CIBW_ARCHS_LINUX: x86_64
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=11.0
+          CIBW_TEST_COMMAND: >
+            popso --version &&
+            python -c "import popso; m = popso.Model('t'); x = m.add_var(ub=10, vtype=popso.INTEGER);
+            y = m.add_var(); m.add_constr(x + 2 * y <= 14); m.add_constr(3 * x - y >= 0);
+            m.set_objective(3 * x + 4 * y, sense=popso.MAXIMIZE); r = m.solve();
+            assert r.status == 'OPTIMAL' and abs(r.objective - 38) < 1e-6, (r.status, r.objective)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    if: github.repository == 'gozwei/popso'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    if: github.repository == 'gozwei/popso' && github.event_name == 'release'
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

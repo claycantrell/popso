@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(popso LANGUAGES CXX VERSION 0.8.0)
+project(popso LANGUAGES CXX VERSION 0.8.1)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,7 +82,12 @@ endif()
 # cmake --install: the popso executable (bin), and with POPSO_BUILD_SHARED the shared library and include/popso.h
 # (src/api). The executable links the solver statically and needs nothing else at run time.
 include(GNUInstallDirs)
-install(TARGETS popso RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(SKBUILD)
+  # Python wheel: the executable as a command on the user's PATH (pip install popso gives `popso`).
+  install(TARGETS popso RUNTIME DESTINATION ${SKBUILD_SCRIPTS_DIR})
+else()
+  install(TARGETS popso RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 if(POPSO_BUILD_SHARED)
   add_subdirectory(src/api)
