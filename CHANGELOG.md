@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.2 — 2026-11
+
+The first release on PyPI (`pip install popso`; v0.8.1's wheels were never uploaded). macOS wheels (Apple silicon
+and Intel, macOS 11+) build on the current GitHub macOS runners: number parsing and formatting fall back to
+`strtod` / `snprintf` where the macOS deployment target predates the system library's floating-point `from_chars`
+(macOS 26) or `to_chars` (13.3). No solver changes.
+
 ## v0.8.1 — 2026-11
 
 `pip install popso`: wheels for Linux (x86_64), macOS (Apple silicon and Intel, 11+) and Windows (x86_64) with the

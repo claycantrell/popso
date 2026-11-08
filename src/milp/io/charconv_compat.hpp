@@ -30,6 +30,19 @@
 #define MILP_HAS_FP_TO_CHARS 0
 #endif
 
+// Apple: the system libc++ has them only from a macOS version on (floating-point from_chars 26.0, to_chars 13.3);
+// a build for an older deployment target (the Python wheels: macOS 11) takes the fallback.
+#if defined(__APPLE__) && defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 260000
+#undef MILP_HAS_FP_FROM_CHARS
+#define MILP_HAS_FP_FROM_CHARS 0
+#endif
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 130300
+#undef MILP_HAS_FP_TO_CHARS
+#define MILP_HAS_FP_TO_CHARS 0
+#endif
+#endif
+
 namespace milp::io_detail {
 
 // Parses the whole token as a double. Accepts a leading '+', decimal and
