@@ -36,9 +36,26 @@ the setup, per-instance results, the hard instances, the full benchmark set, the
 families, the quadratic models and popso's progress across versions, and
 **[CHANGELOG.md](CHANGELOG.md)** for what each version can do.
 
+## Install
+
+```sh
+pip install popso                    # the popso command and the Python API
+brew install gozwei/popso/popso      # the popso command, the C library and popso.h (macOS, Linux)
+```
+
+The pip wheels cover Linux (x86_64), macOS 11+ (Apple silicon and Intel) and Windows (x86_64); on
+other platforms pip builds from source, which needs CMake and a C++20 compiler. The Homebrew formula
+builds the release from source. Then:
+
+```sh
+popso model.mps --time-limit 60      # MPS, LP or CBF files, plain or gzipped
+popso --help
+```
+
 ## Build
 
-You need CMake ≥ 3.20 and a C++20 compiler (clang, gcc or MSVC). No other dependencies.
+To build from a source checkout, you need CMake ≥ 3.20 and a C++20 compiler (clang, gcc or MSVC). No
+other dependencies.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPOPSO_BUILD_TESTS=ON
