@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "milp/core/timer.hpp"
@@ -78,6 +80,16 @@ ConvexityResult check_convexity(const SparseMatrix& Q) {
       if (i == j || v == 0.0) continue;
       if (cmap[i] < 0 || cmap[j] < 0) {
         if (std::abs(v) <= tiny) continue;
+        if (std::abs(v) <= 1e-6 * maxabs) {
+          // A tiny cross term on a column without a square term (QPLIB_8515: 1.5625e-8 x2 x3, no x3^2; an eigenvalue
+          // of -1.5e-17): |v| on both diagonals makes [|v| v; v |v|] PSD, the rest is tested without the term.
+          if (r.diag_shift.empty()) r.diag_shift.assign(static_cast<size_t>(n), 0.0);
+          r.diag_shift[i] += std::abs(v);
+          r.diag_shift[j] += std::abs(v);
+          r.perturbed = true;
+          r.message = "Q is positive semidefinite only up to a relative 1e-6; its diagonal was increased by that much";
+          continue;
+        }
         r.convex = false;
         r.message = "the quadratic objective is not convex: columns " + std::to_string(std::min(i, j)) + " and " +
                     std::to_string(std::max(i, j)) + " have a cross term but one of them has no square term";
@@ -146,6 +158,98 @@ ConvexityResult check_convexity(const SparseMatrix& Q) {
 }
 
 namespace {
+
+// Row activities of x.
+std::vector<double> activities(const MipProblem& p, const std::vector<double>& x) {
+  std::vector<double> act(static_cast<size_t>(p.num_rows()), 0.0);
+  for (Index j = 0; j < p.num_cols(); ++j)
+    for (Index k = p.A.begin(j); k < p.A.end(j); ++k) act[p.A.index[k]] += p.A.value[k] * x[j];
+  return act;
+}
+
+double row_violation(const MipProblem& p, const std::vector<double>& act) {
+  double viol = 0.0;
+  for (Index i = 0; i < p.num_rows(); ++i) viol = std::max({viol, p.row_lb[i] - act[i], act[i] - p.row_ub[i]});
+  return viol;
+}
+
+// Feasibility polish of an interior-point result that violates rows (by more than tol): a projection onto the rows
+// that are violated or active (equalities, and rows within 1e-9 relative of a side): dx = A_V' (A_V A_V')^-1 r_V with
+// r_V the distance to the side (0 for an active row that holds), over the columns not clipped at a bound in an earlier
+// round, then clipped to the bounds; a few rounds, kept only while the violation falls. Without the active rows the
+// correction breaks them (QPLIB_10034: 2.2e-6 -> 7e-3). The objective moves by about grad' dx, small next to the
+// point's own error (QPLIB_9002: the barrier's point violated a row by 5e-5 at objective 5.7e9).
+void polish_rows(const MipProblem& p, const std::vector<double>& lb, const std::vector<double>& ub, std::vector<double>& x,
+                 double tol) {
+  const Index n = p.num_cols(), m = p.num_rows();
+  std::vector<double> act = activities(p, x);
+  double viol = row_violation(p, act);
+  if (!(viol > tol)) return;
+  const bool debug = std::getenv("MILP_POLISH_DEBUG") != nullptr;
+  std::vector<char> clipped(static_cast<size_t>(n), 0);
+  for (int round = 0; round < 6 && viol > tol; ++round) {
+    std::vector<Index> V, pos(static_cast<size_t>(m), -1);
+    std::vector<double> r;
+    for (Index i = 0; i < m; ++i) {
+      const double lo = p.row_lb[i], hi = p.row_ub[i];
+      const double near_lo = 1e-9 * (1.0 + std::abs(lo)), near_hi = 1e-9 * (1.0 + std::abs(hi));
+      if (is_finite(lo) && act[i] < lo + near_lo) pos[i] = static_cast<Index>(V.size()), V.push_back(i), r.push_back(lo - act[i]);
+      else if (is_finite(hi) && act[i] > hi - near_hi) pos[i] = static_cast<Index>(V.size()), V.push_back(i), r.push_back(hi - act[i]);
+    }
+    if (V.empty()) return;
+    // M = A_V A_V' over the movable columns (lower triangle triplets, by columns of A).
+    const Index v = static_cast<Index>(V.size());
+    std::vector<Index> J, I;
+    std::vector<double> Vv;
+    double work = 0.0;
+    std::vector<std::pair<Index, double>> colv;
+    for (Index j = 0; j < n; ++j) {
+      if (clipped[j] || !(lb[j] < ub[j])) continue;
+      colv.clear();
+      for (Index k = p.A.begin(j); k < p.A.end(j); ++k) {
+        if (pos[p.A.index[k]] >= 0) colv.emplace_back(pos[p.A.index[k]], p.A.value[k]);
+      }
+      work += static_cast<double>(colv.size()) * colv.size();
+      if (work > 5e7) return;
+      for (size_t a = 0; a < colv.size(); ++a) {
+        for (size_t b = 0; b <= a; ++b) {
+          const Index ra = std::max(colv[a].first, colv[b].first), rb = std::min(colv[a].first, colv[b].first);
+          J.push_back(rb), I.push_back(ra), Vv.push_back(colv[a].second * colv[b].second);
+        }
+      }
+    }
+    double dmax = 0.0;
+    for (size_t t = 0; t < Vv.size(); ++t) {
+      if (I[t] == J[t]) dmax = std::max(dmax, Vv[t]);
+    }
+    if (!(dmax > 0.0)) return;
+    for (Index a = 0; a < v; ++a) J.push_back(a), I.push_back(a), Vv.push_back(1e-12 * dmax);
+    const SparseMatrix M = SparseMatrix::from_triplets(v, v, J, I, Vv);  // CSC, minor >= major: lower triangle
+    SparseCholesky chol;
+    if (!chol.analyze(v, M.start, M.index) || !chol.factorize(M.value)) return;
+    std::vector<double> w = r;
+    chol.solve(w);
+    std::vector<double> y = x;
+    for (Index j = 0; j < n; ++j) {
+      if (clipped[j] || !(lb[j] < ub[j])) continue;
+      double t = 0.0;
+      for (Index k = p.A.begin(j); k < p.A.end(j); ++k) {
+        if (pos[p.A.index[k]] >= 0) t += p.A.value[k] * w[pos[p.A.index[k]]];
+      }
+      y[j] += t;
+    }
+    for (Index j = 0; j < n; ++j) {
+      const double c = std::min(std::max(y[j], lb[j]), ub[j]);
+      if (c != y[j]) clipped[j] = 1;
+      y[j] = c;
+    }
+    std::vector<double> act2 = activities(p, y);
+    const double viol2 = row_violation(p, act2);
+    if (debug) std::fprintf(stderr, "polish round %d: %d rows, violation %.3g -> %.3g\n", round, static_cast<int>(v), viol, viol2);
+    if (!(viol2 < viol)) continue;  // the clipped columns are out next round
+    x.swap(y), act.swap(act2), viol = viol2;
+  }
+}
 
 // Feasibility of the rows and bounds by the dual simplex: 1 feasible, 0 infeasible, -1 unknown.
 int lp_feasible(const MipProblem& p, const std::vector<double>& lb, const std::vector<double>& ub, double time_limit) {
@@ -240,7 +344,10 @@ QpSolution solve_qp(const MipProblem& p, const std::vector<double>& lb, const st
   }
   int feasible = -1;  // rows and bounds: 1 feasible, 0 infeasible (simplex), -1 not known
   auto remaining = [&] { return opt.time_limit - timer.elapsed(); };
-  // Attempts: default settings, then without scaling on the augmented system.
+  // Attempts: default settings, then without scaling on the augmented system. An optimal point that violates the rows
+  // a little is kept for the case that the second attempt does no better.
+  IpmResult kept;
+  bool have_kept = false;
   for (int attempt = 0; attempt < 2; ++attempt) {
     IpmOptions io;
     io.tol = opt.tol;
@@ -256,8 +363,16 @@ QpSolution solve_qp(const MipProblem& p, const std::vector<double>& lb, const st
       io.scale = false;
       io.kkt = 2;
     }
-    const IpmResult r = ipm_solve(p.A, p.cost, lb, ub, p.row_lb, p.row_ub, io, &Q);
+    IpmResult r = ipm_solve(p.A, p.cost, lb, ub, p.row_lb, p.row_ub, io, &Q);
     sol.iterations += r.iterations;
+    bool finite = r.status == IpmStatus::Optimal;
+    for (double v : r.x) finite = finite && std::isfinite(v);
+    if (r.status == IpmStatus::Optimal && !finite) r.status = IpmStatus::NumericalError;
+    if (attempt == 1 && r.status != IpmStatus::Optimal && have_kept && r.status != IpmStatus::TimeLimit) {
+      if (opt.log) opt.log->log(2, "QP: the second attempt ended with '%s': the first point\n", to_string(r.status));
+      r = std::move(kept);
+      r.approximate = true;
+    }
     // A point that is clearly infeasible in the original problem (the barrier's measures are
     // scaled) is not accepted; the next attempt runs without scaling.
     double bmax = 1.0;
@@ -265,14 +380,28 @@ QpSolution solve_qp(const MipProblem& p, const std::vector<double>& lb, const st
       if (is_finite(p.row_lb[i])) bmax = std::max(bmax, std::abs(p.row_lb[i]));
       if (is_finite(p.row_ub[i])) bmax = std::max(bmax, std::abs(p.row_ub[i]));
     }
-    if (r.status == IpmStatus::Optimal && r.primal_infeas > 1e-6 * bmax) {
+    if (r.status == IpmStatus::Optimal && r.primal_infeas > 1e-6 * bmax && !(attempt == 1 && r.approximate && have_kept)) {
+      // The projection onto the active rows often repairs it (then no retry is needed).
+      std::vector<double> xp = r.x;
+      for (Index j = 0; j < n; ++j) xp[j] = std::min(std::max(xp[j], lb[j]), ub[j]);
+      polish_rows(p, lb, ub, xp, 1e-7);
+      const double pv = row_violation(p, activities(p, xp));
+      if (pv <= 1e-6 * bmax) {
+        if (opt.log) opt.log->log(2, "QP: barrier point violated the rows by %.3g, %.3g after the projection\n", r.primal_infeas, pv);
+        r.x = std::move(xp);
+        r.primal_infeas = pv;
+      }
+    }
+    if (r.status == IpmStatus::Optimal && r.primal_infeas > 1e-6 * bmax && !(attempt == 1 && r.approximate && have_kept)) {
       if (opt.log) opt.log->log(2, "QP: barrier point violates the rows by %.3g; retrying\n", r.primal_infeas);
+      if (attempt == 0 && r.primal_infeas <= 1e-4 * bmax) kept = r, have_kept = true;
       continue;
     }
     if (r.status == IpmStatus::Optimal) {
       sol.x = r.x;
       sol.y = r.y;
       for (Index j = 0; j < n; ++j) sol.x[j] = std::min(std::max(sol.x[j], lb[j]), ub[j]);
+      polish_rows(p, lb, ub, sol.x, 1e-7);
       sol.objective = p.objective(sol.x);
       sol.dual_bound = sol.objective - r.rel_gap * (1.0 + std::abs(sol.objective - p.offset));
       sol.approximate = r.approximate;

@@ -440,7 +440,8 @@ TEST(mps_errors) {
                        "objective (N) row"));
   CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nBOUNDS\n XX BND x 1\nENDATA\n", "invalid bound type"));
   CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nBOUNDS\n UP BND x\nENDATA\n", "BOUNDS: expected"));
-  CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nQCMATRIX c\n x x 1\nENDATA\n", "quadratic constraints are not supported"));
+  CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nQCMATRIX c\n x x 1\nENDATA\n", "QCMATRIX for unknown row 'c'"));
+  CHECK(error_contains("NAME t\nROWS\n N obj\nCOLUMNS\n x obj 1\nQCMATRIX obj\n x x 1\nENDATA\n", "QCMATRIX for the objective row"));
   CHECK(error_contains("NAME t\nFOO\nENDATA\n", "unknown MPS section 'FOO'"));
   CHECK(error_contains("  x obj 1\n", "data line outside of a section"));
   CHECK(error_contains("NAME t\nROWS\n N obj\n L c\nCOLUMNS\n x c 1\nRHS\n RHS c 1 d 2\nENDATA\n", "unknown row 'd'"));
@@ -591,4 +592,30 @@ TEST(mps_ranged_rows_exact) {
     CHECK(inexact == 0);
     CHECK(b.row_lb[0] == lo && b.row_ub[0] == hi);
   }
+}
+
+// Quadratic constraints: QCMATRIX (the symmetric matrix of x' Q x, no 1/2) and CPLEX's QSECTION naming a row read into
+// monomial coefficients (Model::qr_*); terms of a free row other than the objective are dropped; written back as
+// QCMATRIX, the model reads back the same.
+TEST(mps_quadratic_constraints) {
+  const std::string text =
+      "NAME qc\nROWS\n N obj\n L c1\n G c2\n N free\nCOLUMNS\n x obj 1 c1 1\n y obj 1 c2 1\nRHS\n RHS c1 4 c2 1\n"
+      "QCMATRIX c1\n x x 1\n x y 1\n y x 1\n y y 3\nQSECTION c2\n x x 2\nQCMATRIX free\n x y 7\nENDATA\n";
+  const Model m = read_mps_string(text);
+  CHECK(m.has_quadratic_rows());
+  CHECK(!m.has_quadratic());
+  // c1: x + x^2 + 2 x y + 3 y^2 <= 4; c2: y + 2 x^2 >= 1.
+  const std::vector<double> x{1.0, 0.5};
+  const std::vector<double> act = m.row_activity(x);
+  REQUIRE(act.size() == 2);
+  CHECK_NEAR(act[0], 1.0 + 1.0 + 1.0 + 0.75, 1e-12);
+  CHECK_NEAR(act[1], 0.5 + 2.0, 1e-12);
+  CHECK(m.violation(x).row <= 0.0);
+  CHECK_NEAR(m.violation(std::vector<double>{1.5, 0.5}).row, 1.5 + 2.25 + 1.5 + 0.75 - 4.0, 1e-12);
+  const Model b = read_mps_string(write_mps_string(m));
+  for (const std::vector<double>& p : {x, std::vector<double>{-0.3, 2.0}, std::vector<double>{0.7, -1.1}}) {
+    const std::vector<double> a1 = m.row_activity(p), a2 = b.row_activity(p);
+    for (size_t i = 0; i < a1.size(); ++i) CHECK_NEAR(a1[i], a2[i], 1e-12);
+  }
+  CHECK(error_contains("NAME t\nROWS\n N obj\n L c\nCOLUMNS\n x obj 1 c 1\nQCMATRIX\n x x 1\nENDATA\n", "QCMATRIX"));
 }

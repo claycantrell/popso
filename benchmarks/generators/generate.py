@@ -155,6 +155,17 @@ CONFIG = [
     ("sqtrack", "medium", 1, dict(products=40, plants=12)),
     ("sqtrack", "large", 1, dict(products=120, plants=30)),
     ("sqtrack", "hard", 1, dict(products=265, plants=60)),
+    # ---- quadratic constraints: convex MIQCQP (outer approximation in the MILP search)
+    ("portqc", "tiny", 1, dict(n=8, K=3)),
+    ("portqc", "small", 1, dict(n=30, K=5)),
+    ("portqc", "medium", 1, dict(n=60, K=6)),
+    ("portqc", "large", 1, dict(n=150, K=10, factor_form=True)),
+    ("qcrand", "tiny", 1, dict(n=6, m=3, q=1)),
+    ("qcrand", "small", 1, dict(n=20, m=8, q=3)),
+    ("qcrand", "medium", 1, dict(n=40, m=15, q=6)),
+    ("qcrand", "large", 1, dict(n=80, m=30, q=10)),
+    ("portqc", "hard", 1, dict(n=400, K=15)),
+    ("qcrand", "hard", 1, dict(n=120, m=40, q=30, rank=6)),
 ]
 
 

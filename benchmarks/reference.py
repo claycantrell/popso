@@ -43,6 +43,7 @@ from pathlib import Path
 BENCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCH))
 
+import slots  # noqa: E402
 from lib import mps  # noqa: E402
 from lib.solfile import INF_OR_UNBD, INFEASIBLE, OPTIMAL, TIMELIMIT, UNBOUNDED  # noqa: E402
 
@@ -114,7 +115,8 @@ def run_task(solver, path, time_limit, threads, mem_mb):
 
     cmd = [sys.executable, str(Path(__file__).resolve()), "--worker", solver, str(path),
            "--time-limit", str(time_limit), "--threads", str(threads), "--mem-limit", str(mem_mb)]
-    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+    # POPSO_SLOTS: each solve holds its threads and memory in the shared pool (slots.py), as run.py's do.
+    with slots.slot(threads, mem_mb or 0), tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         # grace: the worker also reads the model in Python (minutes for the largest MIPLIB files)
         rc, reason, wall, peak = run_capped(cmd, time_limit * 1.5 + 300, mem_mb * 1.1 if mem_mb else None,
                                             stdout=out, stderr=err)

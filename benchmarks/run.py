@@ -155,6 +155,7 @@ def load_references(ref_path, solu_path):
         for n, e in d["instances"].items():
             refs[n] = {
                 "status": e["status"], "objective": e["objective"], "bound": e.get("bound"),
+                "opt_tol": e.get("opt_tol"),
                 "source": "reference",
                 # a reference solver whose status contradicts the consensus counts as unsolved; the MIQP
                 # references from a Python branch-and-bound on HiGHS QP relaxations are not HiGHS's times
@@ -236,7 +237,9 @@ def classify(sense, v, sol, ref, args):
         return UNSOLVED if st == TIMELIMIT else NOREF, f"no reference, status {st}", details
 
     rst, rz = ref["status"], ref["objective"]
-    tol = args.opt_tol
+    # A reference may widen the tolerance where the optimum depends on the feasibility tolerance itself (its notes
+    # say why: e.g. cones of radius 7e-4, where an absolute 1e-6 is worth 1.7% of the objective).
+    tol = max(args.opt_tol, ref.get("opt_tol") or 0.0)
     if rst == OPTIMAL and rz is not None:
         if obj is not None:
             details["gap_to_ref"] = abs(obj - rz) / max(1.0, abs(rz))

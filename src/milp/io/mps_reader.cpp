@@ -1,11 +1,14 @@
 #include "milp/io/mps_reader.hpp"
 
 #include <algorithm>
+#include <tuple>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
+#include <fstream>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -122,14 +125,21 @@ struct RowInfo {
 
 class MpsParser {
  public:
-  MpsParser(string_view text, std::string source, std::vector<std::string>* warnings)
-      : text_(text),
-        source_(std::move(source)),
+  // size_hint: the (expected) size of the text, for the tables' first capacity. The text comes in by feed() (any
+  // pieces; lines may span them), then finish() builds the model; parse(text) does both at once.
+  MpsParser(size_t size_hint, std::string source, std::vector<std::string>* warnings)
+      : source_(std::move(source)),
         warnings_(warnings),
-        rows_(text.size() / 400 + 16),
-        cols_(text.size() / 200 + 16) {}
+        rows_(size_hint / 400 + 16),
+        cols_(size_hint / 200 + 16) {
+    trip_col_.reserve(size_hint / 24);
+    trip_row_.reserve(size_hint / 24);
+    trip_val_.reserve(size_hint / 24);
+  }
 
-  Model parse();
+  void feed(const char* data, size_t n);
+  Model finish();
+  Model parse(string_view text);
 
  private:
   [[noreturn]] void error(const std::string& msg) const {
@@ -177,7 +187,7 @@ class MpsParser {
   bool accept_set(string_view set, string_view& chosen, bool& warned, const char* what) {
     if (set.empty()) return true;
     if (chosen.empty()) {
-      chosen = set;
+      chosen = keep(set);
       return true;
     }
     if (set == chosen) return true;
@@ -188,7 +198,13 @@ class MpsParser {
     return false;
   }
 
-  string_view text_;
+  std::string carry_;  // the unfinished line of the previous feed()
+  // Names that outlive their line (rows, columns, the objective row, set names): the text is streamed.
+  std::deque<std::string> arena_;
+  string_view keep(string_view s) {
+    arena_.emplace_back(s);
+    return arena_.back();
+  }
   std::string source_;
   std::vector<std::string>* warnings_;
   size_t line_no_ = 0;
@@ -229,6 +245,11 @@ class MpsParser {
   std::vector<double> q_val_;
   bool quad_full_ = false;
   const char* quad_name_ = "QUADOBJ";
+  // The row of the current quadratic section: kObjRow (the objective), a constraint row (QCMATRIX, or QSECTION
+  // naming one) or kDroppedRow (a free row other than the objective: its terms are read and dropped).
+  Index quad_row_ = kObjRow;
+  std::vector<Index> qr_row_, qr_i_, qr_j_;  // quadratic constraint terms (Model::qr_*)
+  std::vector<double> qr_val_;
   std::vector<Index> trip_col_, trip_row_;
   std::vector<double> trip_val_;
   bool in_int_block_ = false;
@@ -239,19 +260,47 @@ class MpsParser {
   bool rhs_warned_ = false, ranges_warned_ = false, bounds_warned_ = false;
 };
 
-Model MpsParser::parse() {
-  trip_col_.reserve(text_.size() / 24);
-  trip_row_.reserve(text_.size() / 24);
-  trip_val_.reserve(text_.size() / 24);
-  const char* p = text_.data();
-  const char* end = p + text_.size();
+void MpsParser::feed(const char* data, size_t n) {
+  const char* p = data;
+  const char* end = data + n;
+  if (!carry_.empty()) {
+    // Complete the previous piece's last line.
+    const char* nl = static_cast<const char*>(std::memchr(p, '\n', n));
+    if (!nl) {
+      carry_.append(p, n);
+      return;
+    }
+    carry_.append(p, static_cast<size_t>(nl - p));
+    if (!seen_end_) {
+      ++line_no_;
+      process_line(carry_.data(), carry_.data() + carry_.size());
+    }
+    carry_.clear();
+    p = nl + 1;
+  }
   while (p < end && !seen_end_) {
     const char* nl = static_cast<const char*>(std::memchr(p, '\n', static_cast<size_t>(end - p)));
-    const char* le = nl ? nl : end;
+    if (!nl) {
+      carry_.assign(p, static_cast<size_t>(end - p));
+      return;
+    }
     ++line_no_;
-    process_line(p, le);
-    p = nl ? nl + 1 : end;
+    process_line(p, nl);
+    p = nl + 1;
   }
+}
+
+Model MpsParser::parse(string_view text) {
+  feed(text.data(), text.size());
+  return finish();
+}
+
+Model MpsParser::finish() {
+  if (!carry_.empty() && !seen_end_) {
+    ++line_no_;
+    process_line(carry_.data(), carry_.data() + carry_.size());
+  }
+  carry_.clear();
   if (!seen_end_) warn("missing ENDATA");
   if (!obj_name_.empty() && !have_obj_) error("OBJNAME row '" + std::string(obj_name_) + "' not found in ROWS");
   if (!warnings_ && num_warnings_ > kMaxPrintedWarnings)
@@ -297,6 +346,11 @@ Model MpsParser::parse() {
   m.q_row = std::move(q_row_);
   m.q_col = std::move(q_col_);
   m.q_val = std::move(q_val_);
+  m.qr_row = std::move(qr_row_);
+  m.qr_i = std::move(qr_i_);
+  m.qr_j = std::move(qr_j_);
+  m.qr_val = std::move(qr_val_);
+  m.compact_qrows();
   if (!indicators_.empty()) {
     // Rows named in INDICATORS are indicator constraints, not ordinary rows.
     const SparseMatrix R = m.A.transpose();
@@ -362,7 +416,7 @@ void MpsParser::process_line(const char* begin, const char* end) {
       parse_sense(tok_[0]);
       break;
     case Section::ObjName:
-      obj_name_ = tok_[0];
+      obj_name_ = keep(tok_[0]);
       break;
     case Section::Rows: parse_rows(); break;
     case Section::Columns: parse_columns(); break;
@@ -396,7 +450,7 @@ bool MpsParser::handle_header(string_view line) {
   }
   if (iequals(kw, "OBJNAME")) {
     section_ = Section::ObjName;
-    if (ntok_ >= 2) obj_name_ = tok_[1];
+    if (ntok_ >= 2) obj_name_ = keep(tok_[1]);
     return true;
   }
   if (iequals(kw, "ENDATA")) {
@@ -436,18 +490,31 @@ bool MpsParser::handle_header(string_view line) {
       if (in_data) return false;
       error("unexpected fields after section " + std::string(kw));
     }
+    quad_row_ = kObjRow;
     if (qsection && ntok_ == 2) {
       const Index* r = rows_.find(tok_[1]);
-      if (!r || *r != kObjRow) {
-        error("quadratic constraints are not supported yet (QSECTION for row '" + std::string(tok_[1]) + "')");
-      }
+      if (!r) error("QSECTION for unknown row '" + std::string(tok_[1]) + "'");
+      quad_row_ = *r;
     }
     section_ = Section::Quad;
     quad_full_ = !iequals(kw, "QUADOBJ");
     quad_name_ = iequals(kw, "QUADOBJ") ? "QUADOBJ" : qsection ? "QSECTION" : "QMATRIX";
     return true;
   }
-  if (iequals(kw, "QCMATRIX")) error("quadratic constraints are not supported yet (QCMATRIX section)");
+  if (iequals(kw, "QCMATRIX")) {
+    if (ntok_ != 2) {
+      if (in_data && ntok_ > 2) return false;  // a data line naming a column QCMATRIX
+      error("QCMATRIX: expected 'QCMATRIX <row>'");
+    }
+    const Index* r = rows_.find(tok_[1]);
+    if (!r) error("QCMATRIX for unknown row '" + std::string(tok_[1]) + "'");
+    if (*r == kObjRow) error("QCMATRIX for the objective row (use QUADOBJ or QMATRIX)");
+    quad_row_ = *r;
+    section_ = Section::Quad;
+    quad_full_ = true;
+    quad_name_ = "QCMATRIX";
+    return true;
+  }
   static const char* const kUnsupported[] = {"LAZYCONS", "USERCUTS", "GENCONS", "PWLOBJ", "CSECTION", "BRANCH", "SETS"};
   for (const char* u : kUnsupported) {
     if (iequals(kw, u)) error("unsupported MPS section '" + std::string(kw) + "'");
@@ -482,9 +549,11 @@ void MpsParser::parse_rows() {
   } else {
     error("ROWS: invalid row type '" + std::string(t) + "'");
   }
-  if (!rows_.insert(name, value)) error("duplicate row '" + std::string(name) + "'");
+  if (rows_.find(name)) error("duplicate row '" + std::string(name) + "'");
+  const string_view kept = keep(name);
+  rows_.insert(kept, value);
   if (value >= 0) {
-    row_names_.push_back(name);
+    row_names_.push_back(kept);
     RowInfo r;
     r.type = type;
     row_info_.push_back(r);
@@ -502,8 +571,10 @@ void MpsParser::parse_columns() {
   const string_view name = tok_[0];
   if (cur_col_ < 0 || name != cur_col_name_) {
     const Index next = static_cast<Index>(col_names_.size());
-    if (cols_.insert(name, next)) {
-      col_names_.push_back(name);
+    if (!cols_.find(name)) {
+      const string_view kept = keep(name);
+      cols_.insert(kept, next);
+      col_names_.push_back(kept);
       obj_.push_back(0.0);
       lb_.push_back(0.0);
       ub_.push_back(kInf);
@@ -515,7 +586,7 @@ void MpsParser::parse_columns() {
     } else {
       cur_col_ = *cols_.find(name);  // non-contiguous column: entries are merged
     }
-    cur_col_name_ = name;
+    cur_col_name_ = col_names_[cur_col_];
   }
   for (int k = 1; k + 1 < ntok_; k += 2) {
     const Index r = row_index(tok_[k]);
@@ -697,22 +768,21 @@ void MpsParser::parse_quadratic() {
   const Index a = col_index(tok_[0], quad_name_), b = col_index(tok_[1], quad_name_);
   double v = number(tok_[2]);
   if (!std::isfinite(v)) error(std::string(quad_name_) + ": coefficient must be finite");
+  if (quad_row_ == kDroppedRow) return;
+  if (quad_row_ != kObjRow) {
+    // A constraint's x' Q x (no 1/2): the listed entries of x_a x_b add up (both (a, b) and (b, a) are listed).
+    qr_row_.push_back(quad_row_);
+    qr_i_.push_back(std::max(a, b));
+    qr_j_.push_back(std::min(a, b));
+    qr_val_.push_back(v);
+    return;
+  }
   if (quad_full_ && a != b) v *= 0.5;  // (a, b) and (b, a) are both listed
   q_row_.push_back(std::max(a, b));
   q_col_.push_back(std::min(a, b));
   q_val_.push_back(v);
 }
 
-std::string read_file(const std::string& path) {
-  // Plain or gzip-compressed (detected by the magic bytes).
-  try {
-    return read_maybe_gzipped_file(path);
-  } catch (const std::bad_alloc&) {
-    throw;
-  } catch (const std::exception& e) {
-    throw MpsError(e.what());
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Writer
@@ -777,14 +847,59 @@ bool ranged_row(double lo, double hi, char* type, double* rhs, double* range) {
 }  // namespace
 
 Model read_mps_string(const std::string& text, std::vector<std::string>* warnings) {
-  MpsParser parser(text, "<string>", warnings);
-  return parser.parse();
+  MpsParser parser(text.size(), "<string>", warnings);
+  return parser.parse(text);
 }
 
+// The file is streamed through the parser (gzip data decompressed in pieces): the whole text is never in memory
+// (QPLIB_10007: a dense QCMATRIX of 19 million lines, 1.58 GB peak when read at once).
 Model read_mps(const std::string& path, std::vector<std::string>* warnings) {
-  const std::string data = read_file(path);
-  MpsParser parser(data, path, warnings);
-  return parser.parse();
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw MpsError("cannot open '" + path + "'");
+  in.seekg(0, std::ios::end);
+  const auto fsize = static_cast<size_t>(std::max<std::streamoff>(0, in.tellg()));
+  in.seekg(0);
+  unsigned char magic[2] = {0, 0};
+  in.read(reinterpret_cast<char*>(magic), 2);
+  const bool gz = in.gcount() == 2 && is_gzip(magic, 2);
+  in.clear();
+  in.seekg(0);
+  MpsParser parser(gz ? 6 * fsize : fsize, path, warnings);
+  try {
+    if (gz) {
+      uint64_t total = 0;
+      gunzip(
+          [&](unsigned char* buf, size_t cap) {
+            in.read(reinterpret_cast<char*>(buf), static_cast<std::streamsize>(cap));
+            return static_cast<size_t>(in.gcount());
+          },
+          [&](const char* data, size_t n) {
+            // The output limit of gzip.hpp holds here too (a small corrupt or malicious file would otherwise make the
+            // parser run for a very long time), although nothing is kept.
+            total += n;
+            if (total > gzip_max_output()) {
+              throw MpsError(path + ": decompressed data exceeds the limit of " + std::to_string(gzip_max_output()) +
+                             " bytes");
+            }
+            parser.feed(data, n);
+          });
+    } else {
+      std::vector<char> buf(size_t{1} << 22);
+      while (in) {
+        in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+        const auto got = static_cast<size_t>(in.gcount());
+        if (got == 0) break;
+        parser.feed(buf.data(), got);
+      }
+    }
+  } catch (const MpsError&) {
+    throw;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& e) {
+    throw MpsError(path + ": " + e.what());
+  }
+  return parser.finish();
 }
 
 std::string write_mps_string(const Model& model_in, Index* inexact_ranges) {
@@ -942,6 +1057,39 @@ std::string write_mps_string(const Model& model_in, Index* inexact_ranges) {
     out += "QUADOBJ\n";
     for (Index j = 0; j < Q.num_major; ++j)
       for (Index p = Q.begin(j); p < Q.end(j); ++p) append_entry(out, cn[j], cn[Q.index[p]], Q.value[p]);
+  }
+  if (model.has_quadratic_rows()) {
+    // One QCMATRIX section per row with quadratic terms: the symmetric matrix of x' Q x, an off-diagonal monomial
+    // coefficient split into its two entries (halving is exact), duplicates summed first.
+    std::vector<size_t> order(model.qr_val.size());
+    for (size_t k = 0; k < order.size(); ++k) order[k] = k;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+      return std::tie(model.qr_row[a], model.qr_i[a], model.qr_j[a]) < std::tie(model.qr_row[b], model.qr_i[b], model.qr_j[b]);
+    });
+    for (size_t t = 0; t < order.size();) {
+      const Index r = model.qr_row[order[t]];
+      bool header = false;
+      while (t < order.size() && model.qr_row[order[t]] == r) {
+        const Index i = model.qr_i[order[t]], j = model.qr_j[order[t]];
+        double v = 0.0;
+        for (; t < order.size() && model.qr_row[order[t]] == r && model.qr_i[order[t]] == i && model.qr_j[order[t]] == j; ++t) {
+          v += model.qr_val[order[t]];
+        }
+        if (v == 0.0) continue;
+        if (!header) {
+          out += "QCMATRIX   ";
+          out += rn[r];
+          out += '\n';
+          header = true;
+        }
+        if (i == j) {
+          append_entry(out, cn[i], cn[j], v);
+        } else {
+          append_entry(out, cn[i], cn[j], 0.5 * v);
+          append_entry(out, cn[j], cn[i], 0.5 * v);
+        }
+      }
+    }
   }
   if (!model.sos.empty()) {
     out += "SOS\n";

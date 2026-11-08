@@ -30,6 +30,11 @@ class LuFactor {
   // nonsingular; the caller must update its basis accordingly.
   Index factorize(Index m, const std::vector<Index>& start, const std::vector<Index>& index,
                   const std::vector<double>& value, std::vector<std::pair<Index, Index>>* replaced = nullptr);
+  // With interruptible set, factorize() gives up (aborted() true, the factors unusable) once the solve is interrupted
+  // or the thread's deadline passes (core/interrupt.hpp), checked every 64 pivots: a large basis can take minutes
+  // (crossover of a 49800-row root LP ran 3 minutes past the time limit). Only for callers that stop then.
+  bool interruptible = false;
+  bool aborted() const { return aborted_; }
 
   // In-place solves on dense vectors of size m.
   void ftran(std::vector<double>& v) const;
@@ -159,6 +164,7 @@ class LuFactor {
   std::vector<Index> eta_pos_, eta_start_{0}, eta_index_;
   std::vector<double> eta_pivot_, eta_value_;
   double factor_work_ = 0.0, eta_work_ = 0.0;
+  bool aborted_ = false;
 };
 
 }  // namespace milp

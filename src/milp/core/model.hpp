@@ -74,6 +74,12 @@ struct Model {
   std::vector<Index> q_row, q_col;
   std::vector<double> q_val;
 
+  // Quadratic constraint terms: entry k adds qr_val[k] * x[qr_i[k]] * x[qr_j[k]] to the activity of row qr_row[k]
+  // (a monomial coefficient, no 1/2 factor: as in LP-format constraint brackets and MPS QCMATRIX, whose
+  // symmetric listing gives both (i, j) and (j, i)). qr_i >= qr_j; duplicates are summed. Empty: linear rows.
+  std::vector<Index> qr_row, qr_i, qr_j;
+  std::vector<double> qr_val;
+
   // Logical constraints.
   std::vector<SosConstraint> sos;
   std::vector<IndicatorConstraint> indicators;
@@ -87,6 +93,14 @@ struct Model {
   bool has_logical() const { return !sos.empty() || !indicators.empty() || num_semi() > 0; }
   bool is_mip() const { return num_integers() > 0 || has_logical(); }
   bool has_quadratic() const;  // some nonzero Q entry
+  bool has_quadratic_rows() const;  // some nonzero quadratic constraint term
+  // Adds v * x_i * x_j to row `row`'s activity (stored with i >= j).
+  void add_qrow(Index row, Index i, Index j, double v);
+  // Merges duplicate quadratic constraint terms (summed, in their input order) and drops zeros; the terms end sorted
+  // by (row, i, j). The readers call it (MPS QCMATRIX lists every off-diagonal pair twice).
+  void compact_qrows();
+  // Row activities of x (linear and quadratic terms).
+  std::vector<double> row_activity(const std::vector<double>& x) const;
 
   // Adds v to Q_ij (and Q_ji): stored at the lower triangle position.
   void add_q(Index i, Index j, double v);

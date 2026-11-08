@@ -287,9 +287,42 @@ class TestQuadratic(unittest.TestCase):
         self.assertEqual((x ** 2 - q).quad, {(0, 0): -1.0, (1, 0): -3.0})
         self.assertEqual((q / 2).quad[(0, 0)], 1.0)
         with self.assertRaises(TypeError):
-            m.add_constr(x * y <= 1)
+            x * y == 1  # noqa: B015 (a quadratic equality)
         with self.assertRaises(TypeError):
             x * y * x  # noqa: B018 (degree 3)
+
+    def test_quadratic_constraints(self):
+        m = popso.Model()
+        x = m.add_var(lb=-10, ub=10, name="x")
+        y = m.add_var(lb=-10, ub=10, name="y")
+        disk = m.add_constr(x * x + y ** 2 <= 2, name="disk")
+        self.assertEqual(m.get_qrow_terms(disk), [(0, 0, 1.0), (1, 1, 1.0)])
+        self.assertEqual(m.get_qrow_terms(0), [(0, 0, 1.0), (1, 1, 1.0)])
+        m.set_objective(x + y, sense=popso.MAXIMIZE)
+        r = m.solve(threads=1)
+        self.assertEqual(r.status, "OPTIMAL")
+        self.assertAlmostEqual(r.objective, 2.0, places=5)
+        self.assertLessEqual(r[x * x + y ** 2], 2.0 + 1e-6)
+        self.assertAlmostEqual(r.dual(disk), 0.5, places=5)  # maximizing: (1, 1) = 0.5 grad(x^2 + y^2)
+        # An epigraph with the quadratic on the right: t >= (z - 2.6)^2, z integer -> z = 3, t = 0.16.
+        e = popso.Model()
+        z = e.add_var(lb=0, ub=10, vtype=popso.INTEGER, name="z")
+        t = e.add_var(lb=-100, ub=100, name="t")
+        row = e.add_constr(t >= (z - 2.6) * (z - 2.6))  # reflected: (z - 2.6)^2 - t <= 0
+        self.assertEqual(e.get_qrow_terms(row), [(0, 0, 1.0)])
+        e.set_objective(t)
+        r = e.solve(threads=1)
+        self.assertEqual(r.status, "OPTIMAL")
+        self.assertAlmostEqual(r[z], 3.0, places=6)
+        self.assertAlmostEqual(r.objective, 0.16, places=6)
+        # Nonconvex: a convex quadratic bounded from below.
+        n = popso.Model()
+        a, b = n.add_var(lb=-1, ub=1), n.add_var(lb=-1, ub=1)
+        n.add_constr(a * a + b * b >= 1)
+        n.set_objective(a + b)
+        self.assertEqual(n.solve(threads=1).status, "NONCONVEX")
+        with self.assertRaises(IndexError):
+            n.get_qrow_terms(5)
 
     def test_qp_and_miqp(self):
         m = popso.Model()

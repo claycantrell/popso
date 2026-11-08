@@ -1,17 +1,126 @@
 # Changelog
 
-## v0.7.1 — 2026-11
+## v0.8.0 — 2026-11
 
-Build and test fixes for the continuous-integration platforms; no solver changes. The benchmark numbers
-of v0.7.0 apply.
+Quadratic constraints and cones: convex quadratically constrained models (QCQP / MIQCQP) and second-order cone
+programs (SOCP / MISOCP), read from MPS `QCMATRIX`, LP-format brackets in constraints or the conic benchmark format
+CBF, solved by outer approximation inside the MILP search with a new conic interior-point method for continuous
+models and root relaxations; products of binaries in constraints and objectives are linearized exactly, so
+nonconvex models over binaries are solved as MILPs. Continuous QPs go through the conic method first, MIQPs race the
+MIQP search against the outer approximation. On QPLIB and CBLIB (1 thread, 120 s) popso solves 186 of 346 models,
+SCIP 101 (from its 300 s references). The MILP search is unchanged apart from fixes (core set: no regression).
 
-**Fixes**
-- Linux, gcc 15: an uninitialized-variable warning in the MPS writer, an error with `-Werror`.
-- Linux, clang with libstdc++ 15: a test's JSON helper (a vector of pairs with an incomplete type) did not
-  compile.
-- Windows: two randomized tests compared objectives at exactly the feasibility tolerance (a point 1e-6
-  better than the optimum at the tolerance's edge) or took a numerical failure of the reference MIQP search
-  as a mismatch.
+**Quadratic constraints (convex)**
+- Models may have quadratic terms in their constraints: MPS `QCMATRIX` (and CPLEX's `QSECTION <row>`), LP-format
+  `[ ... ]` on a constraint's left side; they are written back as `QCMATRIX` and carried by `--write-anon`.
+- Solved by outer approximation inside the MILP search, for continuous and mixed-integer models alike: each convex
+  quadratic row (positive semidefinite towards a finite upper side, negative semidefinite towards a finite lower side;
+  ranged or nonconvex rows are reported as such) is kept out of the LP and represented by gradient cuts, from tangent
+  planes at the start, the root cut loop, and at every node while the LP point violates it; every candidate point is
+  checked against the rows, and one that only violates them gets its continuous part from the fixed-integer outer
+  approximation. A convex quadratic objective goes along as the epigraph row 1/2 x' Q x - eta <= 0. Presolve,
+  symmetry handling and restarts are off for these models for now. 240 random convex MIQCQPs (2 to 9 columns,
+  continuous / integer / binary, quadratic objectives in a quarter) agree with SCIP 10 within 1e-5, except three
+  where SCIP's answer profits from its 1e-6 tolerance on a degenerate row.
+- Second-order cones written as quadratic rows are accepted although their quadratic part is indefinite:
+  `x'x <= t^2` (and with weights, shifts and a constant: one sheet of a hyperboloid) over `t >= 0`, and the rotated
+  `x'x <= c u v` over `u, v >= 0`. Their cuts are tangents of the norm form `||x|| - t <= 0`, and a point is judged
+  by that form too: the squared form's tolerance would let a column reach `sqrt(1e-6)` at the cone's apex. The
+  benchmark harness's verifier does the same (a SCIP point with `x^2 <= t^2 + 9e-10` at `t = 0`, i.e. `|x| = 3e-5`,
+  no longer passes as a better optimum).
+- A conic interior-point method (homogeneous self-dual embedding, Nesterov-Todd scaling, Mehrotra predictor-corrector,
+  as in ECOS) solves the continuous relaxation in second-order cone form: convex quadratic rows become rotated cones
+  through a factor of their matrix, cones stay cones. Continuous models are solved by it outright (the 13 continuous
+  convex QCQPs of QPLIB in 0.03 to 4.2 s each, objectives within 1e-6 of QPLIB's; the outer approximation solved one
+  of them in 60 s); with integer variables, its optimum gives the first tangents, so the root LP starts at the
+  relaxation's bound. `MILP_CONIC=0` turns it off. A convex quadratic objective enters the conic method directly
+  (Clarabel's embedding), not through a cone.
+- Continuous QPs are solved by the conic method first, with row duals and reduced costs from its duals; anything but
+  an optimum or the time limit goes to the QP barrier (it claimed three feasible Maros-Meszaros QPs with objectives of
+  1e9-1e12 infeasible). The barrier stalls on some QPs (QPLIB_8559 / 8567: no solution in 60 s; conic 5 s). QPLIB QPs
+  (server, 120 s): 20 -> 22 of 25 solved, shifted geomean 0.83; Maros-Meszaros (132, 60 s): 123 -> 125, 0.96, the same
+  objectives. `MILP_QP_CONIC=0`: the barrier only.
+- MIQP (default mode, 2 threads or more): the MIQP branch-and-bound (1 thread) races the outer approximation in the
+  MILP search (the other threads); the first conclusive answer stops the other, else the better incumbent with the
+  tighter bound. QPLIB MIQP + generated MIQPs (120 s): the same 19 solved at the same speed, and incumbents where
+  neither finishes (QPLIB_5577 / 5924: none before, now within 0.03% / 0.2% of QPLIB's optimum). `MILP_MIQP_RACE=0`
+  turns it off.
+- Quadratic rows: the fixed-integer repair of a candidate point (its continuous part re-solved with the integers
+  fixed, the conic method as the fallback) is remembered by integer assignment, so a repeated assignment costs
+  nothing. Deterministic mode, which has no node outer approximation, repaired the same points node after node:
+  portqc_hard_1 went from the time limit at 60 s to optimal in 2.2 s (3 repairs, 1021 repeats).
+- The LP-guided sub-MIP heuristic's dive re-solves (restoring an LP point after a failed fixing) respect its time
+  budget: on CBLIB uflquad-nopsc-30-300 (45300 rows) one ran 30 s past a 1.4 s budget, ending a 30 s run at 49 s.
+- Deterministic mode: a round of the parallel search ends at its next node once the time limit has passed. Nodes
+  whose work the round budget does not count (the fixed-integer repair of an integral point that violates quadratic
+  rows) made one round run past the limit: portqc_hard_1 at 60 s ended after 91.7 s, now 60.3 s.
+- Outer approximation at nodes: a fractional LP point is branched on once the quadratic rows' violations are below
+  1e-4 (was 1e-7; integral points still need 1e-7): CBLIB (157, 30 s) solved 96 -> 102, shifted geomean 0.85; at 1e-7
+  sssd-strong-20-8 spent about 13 rounds of cuts per node (37.9 -> 4.3 s). `MILP_OA_NODE_TOL` sets it.
+- Conic method: a stall ends it (the worst residual or gap not halved in 10 iterations on the way to an optimum: its
+  best iterate within 1e-6, else a numerical error and the caller's fallback): QPLIB_10038 crept for 45 iterations of
+  0.9 s to the time limit, now the QP barrier takes over after 22 s.
+- Conic method: optimal also requires the primal and dual objectives to agree, relative to the objective with its
+  constant (Clarabel's gap): s'z alone, relative to `c'x + 1/2 x'Px`, let Maros-Meszaros GOULDQP3 (a constant of
+  ~29648 cancelling it) end at 2.062811 against the optimum 2.062784.
+- Products of binaries are linearized exactly: in a quadratic row whose terms all involve binaries (a product of two
+  binaries becomes a column y with y >= x_i + x_j - 1, y <= x_i, y <= x_j; a binary's square the binary; a binary
+  times a column with finite bounds a column with the four McCormick rows; a term with a fixed column a linear term),
+  convex or not, the row becomes linear; likewise a nonconvex objective whose terms all qualify, so such models (QPLIB
+  classes QBL, QBN, LBQ, QBQ) are solved as MILPs instead of reported `NONCONVEX`. On QPLIB's quadratic knapsack rows
+  (class LMC) the linear rows propagate and cut much better than tangent planes: QPLIB_10010 optimal in 10 s
+  (2.3% gap at 60 s before), 8 of 10 within 60 s (2.5 to 29 s; SCIP 6 of 12 in 300 s). Only the side of y = x_i x_j
+  that a row or the objective needs is written (one row per product in a <= row with positive coefficients). `MILP_QBIN_LINEARIZE=0` turns it off (else: at most
+  that many new columns, default 200000), `MILP_QBIN_CONT=0` keeps binary-bounded products quadratic,
+  `MILP_QBIN_OBJ=2` linearizes convex objectives too (0: none).
+- MIQP: when the MIQP search's QP relaxations fail numerically without a solution, the outer approximation in the
+  MILP search takes over (QPLIB_10040 / 10057 / 10060, nearly singular Q accepted as convex up to the 1e-6
+  perturbation: NUMERIC in 0.1 s, now OPTIMAL in 0.1-0.4 s).
+- A cone row's violation is its norm form's distance relative to the cone's constants only (as a linear row's to its
+  side), no longer relative to the head: a rotated cone written as `(u - v)^2 + 4 x^2 <= (u + v)^2` (CBLIB's clay
+  instances, through affine member columns) let `x` reach 1.5 at `u = 0, v = 6575`, and clay0304h ended "optimal"
+  6% below its optimum (37877.8 vs 40262.39). The benchmark harness verifies cones the same way.
+- The reported bound of a search ended by an incumbent within the gap of the root LP bound (or the trivial bound) is
+  that bound, no longer the incumbent itself (which claimed a zero gap while the optimum could lie up to the gap
+  below it).
+- QP: a barrier iterate with a NaN part could be kept as the best one and reported optimal with objective `nan`
+  (QPLIB_10034: after its first point was retried for violating the rows by 2e-6); now such an iterate is a
+  numerical error, and when the retry fails the first point is returned (marked approximate).
+- QP: a barrier point that violates the rows by more than 1e-6 is first projected onto the violated and active rows
+  (a sparse least-squares correction, the columns clipped to their bounds), before the slower retry without scaling
+  (QPLIB_9002: 5e-5 -> 6e-7, 0.14 s instead of 2.0 s; QPLIB_10034: 2.2e-6 -> 9e-10 where the retry failed).
+- QP convexity check: a cross term of at most 1e-6 (relative) on a column without a square term is accepted with that
+  much added to the two diagonals (QPLIB_8515: `1.5625e-8 x2 x3` with no `x3^2`, reported nonconvex; QPLIB counts it
+  convex), within the tolerance already documented for round-off in Q.
+- Duals for continuous models with quadratic constraints, from the conic method: row duals (a quadratic row's
+  multiplier included) and reduced costs `d = c + Qx - A'y - sum_q y_q grad q(x)` (`--duals`, `popso_get_duals`, Python
+  `Result.duals`).
+- MPS files are read as a stream (gzip data decompressed in pieces, names kept, the rest of each line dropped): the
+  whole text is no longer in memory (QPLIB_10007, a dense `QCMATRIX` of 19 million lines: 1.59 -> 1.06 GB peak).
+- MILP: the feasibility-jump helper reports its best point at most every 3e7 effort units (~0.1 s) after the first
+  (`MILP_FJ_REPORT`, before 0: every improving point; savsched1's 2335 points cost 8.4 s of checks). Core set, 4 seeds:
+  time ratio 0.986 [0.955, 1.019], solved 218 -> 219 of 252.
+- CBF input (the conic benchmark format of CBLIB, versions 1-3): `.cbf` / `.cbf.gz` or `--format cbf`; cones F, L+,
+  L-, L=, Q and QR on variables and rows become bounds, linear rows and cone rows.
+- A fixed-integer subproblem whose outer approximation stops short of the quadratic rows' tolerance (a cone's apex) is
+  solved by the conic method instead (CBLIB estein4_A ended NUMERIC: nodes dropped as failed LPs).
+- Time limit: the crossover's LU factorization now stops at the deadline (every 64 pivots); a large root basis kept
+  highschool1-aigio running 3 minutes past a 120 s limit at 12 threads.
+- Mixed-integer conic models: the relaxation's integers rounded and fixed, the continuous rest by the conic method,
+  give a first incumbent when feasible.
+- C API: `popso_add_qrow_terms`, `popso_num_qrow_terms`, `popso_get_qrow_terms` (monomial coefficients: `(i, j, c)`
+  is `c x_i x_j`). Python: comparing a quadratic expression with `<=` / `>=` gives a quadratic constraint
+  (`m.add_constr(x * x + y ** 2 <= 2)`), `Model.get_qrow_terms(row)` reads one back; a quadratic `==` is a
+  `TypeError` (not convex).
+- `MILP_MIQP_OA=1` (opt-in): other convex MIQPs the same way instead of the MIQP branch-and-bound. Correct on the
+  generated MIQP families (objectives within 1e-7 of the MIQP search), but much slower on their dense objectives
+  (miqprand_medium 11 s against 0.02 s): gradient cuts are a weak model of a dense quadratic, which the MIQP search
+  solves exactly at every node.
+- Benchmarks: generated MIQCQP families `portqc` (cardinality-constrained portfolio under a risk budget, a dense or
+  factor-model quadratic row) and `qcrand` (random convex quadratic rows over general integers), tiny to hard, with
+  SCIP references; the harness's MPS reader and verifier take `QCMATRIX` / `QSECTION <row>`.
+  `benchmarks/tools/qplib.py` fetches QPLIB's convex instances and converts them to MPS, checking each conversion
+  against QPLIB's published solution point.
 
 ## v0.7.0 — 2026-11
 

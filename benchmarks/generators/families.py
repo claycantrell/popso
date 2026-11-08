@@ -799,6 +799,82 @@ def build_sqtrack(rng, products, plants, short=0.15):
     return md
 
 
+# ------------------------------------------------- quadratic constraints (convex MIQCQP)
+
+def build_portqc(rng, n, K, k=4, lmin=0.02, umax=0.4, factor_form=False):
+    """Cardinality-constrained portfolio with a risk budget (convex MIQCQP): max mu'x subject to
+    x'Sigma x <= v, sum x = 1, at most K assets held (z binary), lmin z_j <= x_j <= umax z_j.
+    Dense Sigma in one quadratic row, or with factor_form the exposures y = F'x as variables
+    (a diagonal quadratic row). The budget v lies between the risk of the equal split over the K
+    least volatile assets (feasible) and that over the K best returns, so it binds. The risk row is
+    written divided by v (right-hand side 1), so that absolute feasibility tolerances are relative."""
+    F, d = _covariance(rng, n, k)
+    S = F @ F.T + np.diag(d)
+    mu = rng.uniform(0.0, 0.15, n) + 0.3 * (F @ rng.uniform(0.0, 1.0, k))
+    md = _model("portqc")
+    md.sense = "max"
+    x = [md.add_var(lb=0.0, ub=umax, obj=float(mu[j]), name=f"x{j}") for j in range(n)]
+    z = [md.add_var(vtype="B", name=f"z{j}") for j in range(n)]
+    md.add_constr(qsum(x) == 1.0, "budget")
+    md.add_constr(qsum(z) <= K, "card")
+    for j in range(n):
+        md.add_constr(x[j] - umax * z[j] <= 0.0, f"on{j}")
+        md.add_constr(x[j] - lmin * z[j] >= 0.0, f"min{j}")
+
+    def split_risk(sel):
+        w = np.zeros(n)
+        w[sel] = 1.0 / K
+        return float(w @ S @ w)
+
+    v_lo = split_risk(np.argsort(np.diag(S))[:K])
+    v_hi = split_risk(np.argsort(-mu)[:K])
+    v = float(f"{v_lo + 0.4 * max(0.0, v_hi - v_lo):.6g}") * (1.0 + 1e-6)
+    risk = md.add_constr(qsum([]) <= 1.0, "risk")
+    if factor_form:
+        for f in range(k):
+            y = md.add_var(lb=-INF, ub=INF, name=f"y{f}")
+            md.add_constr(_lin([float(F[j, f]) for j in range(n)], x) - y == 0.0, f"factor{f}")
+            md.add_qterm(risk, y, y, 1.0 / v)
+        for j in range(n):
+            md.add_qterm(risk, x[j], x[j], float(d[j]) / v)
+    else:
+        for i in range(n):
+            md.add_qterm(risk, x[i], x[i], float(S[i, i]) / v)
+            for j in range(i):
+                md.add_qterm(risk, x[i], x[j], 2.0 * float(S[i, j]) / v)
+    return md
+
+
+def build_qcrand(rng, n, m, q, rank=3, frac_int=0.5, imax=5):
+    """Random convex MIQCQP: linear objective, q quadratic rows x'(G G^T)x + a'x <= b with low-rank
+    G over a random support, m linear rows, general integers and continuous columns in
+    [-imax, imax]; every row is feasible at a random point with some slack."""
+    md = _model("qcrand")
+    x0 = rng.uniform(-imax, imax, n)
+    xs = []
+    for j in range(n):
+        vt = "I" if rng.random() < frac_int else "C"
+        xs.append(md.add_var(lb=-imax, ub=imax, vtype=vt, obj=float(np.round(rng.normal(0, 5), 2)), name=f"x{j}"))
+    for i in range(m):
+        idx = rng.choice(n, max(2, n // 3), replace=False)
+        a = np.round(rng.normal(0.0, 3.0, len(idx)), 2)
+        act = float(a @ x0[idx])
+        md.add_constr(_lin(a, [xs[j] for j in idx]) <= round(act + abs(rng.normal(0, 2)), 2), f"r{i}")
+    for i in range(q):
+        idx = np.sort(rng.choice(n, min(n, max(3, n // 4)), replace=False))
+        G = np.round(rng.normal(0.0, 1.0, (len(idx), rank)), 2)
+        Q = G @ G.T
+        a = np.round(rng.normal(0.0, 2.0, len(idx)), 2)
+        xi = x0[idx]
+        act = float(xi @ Q @ xi + a @ xi)
+        con = md.add_constr(_lin(a, [xs[j] for j in idx]) <= round(act + abs(rng.normal(0, 5)) + 1.0, 2), f"q{i}")
+        for s_ in range(len(idx)):
+            md.add_qterm(con, xs[idx[s_]], xs[idx[s_]], float(Q[s_, s_]))
+            for t in range(s_):
+                md.add_qterm(con, xs[idx[s_]], xs[idx[t]], 2.0 * float(Q[s_, t]))
+    return md
+
+
 BUILDERS = {
     "knapsack": build_knapsack,
     "mkp": build_mkp,
@@ -828,4 +904,6 @@ BUILDERS = {
     "miqpport": build_miqp_portfolio,
     "miqprand": build_miqp_rand,
     "sqtrack": build_sqtrack,
+    "portqc": build_portqc,
+    "qcrand": build_qcrand,
 }

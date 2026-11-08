@@ -1066,9 +1066,11 @@ IpmResult Ipm::run() {
       status = IpmStatus::DualInfeasible;
       break;
     }
+    // std::max passes a NaN over unless it comes first: test every part (QPLIB_10034: a NaN iterate with merit 0
+    // became the "best" one, reported optimal with objective nan).
     const double merit = std::max({pinf, dinf, gap});
     if (iter == 0) pinf0 = pinf, dinf0 = dinf, mu0 = mu_;
-    if (!std::isfinite(merit)) {
+    if (!std::isfinite(pinf) || !std::isfinite(dinf) || !std::isfinite(gap) || !std::isfinite(merit)) {
       status = IpmStatus::NumericalError;
       break;
     }

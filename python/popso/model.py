@@ -186,8 +186,9 @@ class LinExpr:
 
 class QuadExpr:
     """A quadratic expression: sum(coef * x_i * x_j) + a linear part. Built by multiplying variables or
-    linear expressions (x * y, x * x, x ** 2, (x + y) * (x - 2 * z)); only allowed as an objective
-    (quadratic constraints are not supported)."""
+    linear expressions (x * y, x * x, x ** 2, (x + y) * (x - 2 * z)). As an objective it must be convex
+    (concave when maximizing); compared with <=, >= it gives a quadratic constraint, which must be
+    convex (x ** 2 + y ** 2 <= 4, not >=; == is not allowed)."""
 
     __slots__ = ("quad", "linear")
 
@@ -263,10 +264,27 @@ class QuadExpr:
     def __pos__(self):
         return self
 
-    def _no_constraint(self, other):
-        raise TypeError("quadratic constraints are not supported yet (a QuadExpr can only be an objective)")
+    def _relation(self, other, kind):
+        if isinstance(other, QuadExpr):
+            d = self - other
+        else:
+            o = LinExpr._of(other)
+            if o is None:
+                return NotImplemented
+            d = self - o  # d <= 0 or d >= 0
+        rhs = -d.constant
+        d = QuadExpr(d.quad, LinExpr(d.linear.terms, 0.0, d._model))
+        return Constraint(d, -INF, rhs) if kind == "le" else Constraint(d, rhs, INF)
 
-    __le__ = __ge__ = __eq__ = _no_constraint
+    def __le__(self, other):
+        return self._relation(other, "le")
+
+    def __ge__(self, other):
+        return self._relation(other, "ge")
+
+    def __eq__(self, other):
+        raise TypeError("a quadratic equality is not convex (use <= or >=)")
+
     __hash__ = None
 
     def value(self, result):
@@ -721,13 +739,33 @@ class Model:
             if lb is not None or ub is not None:
                 raise ValueError("lb/ub cannot be combined with a comparison")
             lhs, lb, ub = lhs.expr, lhs.lb, lhs.ub
+        quad = None
+        if isinstance(lhs, QuadExpr):
+            if lhs._model is not None and lhs._model is not self:
+                raise ValueError("expression of another model")
+            quad, lhs = lhs.quad, lhs.linear
         idx, val, const = self._coeffs(lhs)
         lb = -INF if lb is None else float(lb) - const
         ub = INF if ub is None else float(ub) - const
         out = ctypes.c_int()
         n = len(idx)
         self._check(lib.popso_add_row(self._h, n, _iarray(idx), _darray(val), lb, ub, _enc(name), ctypes.byref(out)))
+        if quad:
+            terms = [(i, j, c) for (i, j), c in quad.items() if c != 0.0]
+            self._check(lib.popso_add_qrow_terms(self._h, out.value, len(terms), _iarray([t[0] for t in terms]),
+                                                 _iarray([t[1] for t in terms]), _darray([t[2] for t in terms])))
         return Constr(self, out.value)
+
+    def get_qrow_terms(self, row):
+        """A row's quadratic terms as a list of (i, j, coef) meaning coef * x_i * x_j, i >= j (empty for a
+        linear row); row is a Constr or a row index."""
+        r = row.index if isinstance(row, Constr) else int(row)
+        n = lib.popso_num_qrow_terms(self._h, r)
+        if n < 0:
+            raise IndexError("row %d out of range" % r)
+        a, b, v = (ctypes.c_int * n)(), (ctypes.c_int * n)(), (ctypes.c_double * n)()
+        self._check(lib.popso_get_qrow_terms(self._h, r, n, a, b, v))
+        return [(a[k], b[k], v[k]) for k in range(n)]
 
     def add_sos(self, vars, weights=None, type=SOS1, name=None):
         """Adds an SOS1 (at most one nonzero) or SOS2 (at most two nonzeros, adjacent in the order of the

@@ -32,7 +32,8 @@ def _num(v):
 
 
 def has_quadratic_objective(path):
-    """True if an MPS file has a QUADOBJ / QMATRIX / QSECTION section (an LP file a '[')."""
+    """True if an MPS file has a QUADOBJ / QMATRIX / QSECTION / QCMATRIX section (an LP file a '['): a quadratic
+    objective or quadratic constraints."""
     import gzip
 
     path = str(path)
@@ -43,7 +44,7 @@ def has_quadratic_objective(path):
             if lp:
                 if b"[" in line:
                     return True
-            elif line[:1] in (b"Q", b"q") and line.split()[0].upper() in (b"QUADOBJ", b"QMATRIX", b"QSECTION"):
+            elif line[:1] in (b"Q", b"q") and line.split()[0].upper() in (b"QUADOBJ", b"QMATRIX", b"QSECTION", b"QCMATRIX"):
                 return True
     return False
 
@@ -175,7 +176,8 @@ def solve_scip(path, time_limit, threads=1, want_solution=False, mem_mb=None):
     m.setParam("randomization/randomseedshift", 0)
     if has_quadratic_objective(path):
         # The quadratic objective becomes a nonlinear constraint on an auxiliary variable: with the
-        # default feasibility tolerance 1e-6 SCIP's "optimum" undercuts the true one by ~1e-7.
+        # default feasibility tolerance 1e-6 SCIP's "optimum" undercuts the true one by ~1e-7. Quadratic
+        # constraints likewise, and much more at a cone's apex (x^2 <= t^2 at t = 0 lets x reach 1e-3).
         m.setParam("numerics/feastol", 1e-9)
     if mem_mb:
         m.setParam("limits/memory", float(mem_mb) * 0.8)

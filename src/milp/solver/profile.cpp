@@ -364,6 +364,25 @@ std::string profile_json(const Model& model, const SolverParams& params, const S
     }
     for (char c : in_q) q_cols += c;
   }
+  // Quadratic constraint terms (Model::qr_*), merged per (row, i, j).
+  long long qr_rows = 0, qr_terms = 0, qr_diag = 0, qr_cols = 0, qr_max = 0;
+  AbsRange qr_range;
+  {
+    Model qm;
+    qm.qr_row = model.qr_row, qm.qr_i = model.qr_i, qm.qr_j = model.qr_j, qm.qr_val = model.qr_val;
+    qm.compact_qrows();
+    std::vector<char> in_q(static_cast<size_t>(n), 0);
+    long long run = 0;
+    for (size_t k = 0; k < qm.qr_val.size(); ++k) {
+      if (k == 0 || qm.qr_row[k] != qm.qr_row[k - 1]) ++qr_rows, run = 0;
+      qr_max = std::max(qr_max, ++run);
+      ++qr_terms;
+      qr_diag += qm.qr_i[k] == qm.qr_j[k];
+      in_q[qm.qr_i[k]] = in_q[qm.qr_j[k]] = 1;
+      qr_range.add(qm.qr_val[k]);
+    }
+    for (char c : in_q) qr_cols += c;
+  }
 
   js.begin("model", '{');
   js.str("sense", model.sense == ObjSense::Maximize ? "maximize" : "minimize");
@@ -406,6 +425,13 @@ std::string profile_json(const Model& model, const SolverParams& params, const S
   js.integer("diagonal", q_diag);
   js.integer("cols", q_cols);
   js.end('}');
+  js.begin("quadratic_rows", '{', true);
+  js.integer("rows", qr_rows);
+  js.integer("terms", qr_terms);
+  js.integer("diagonal", qr_diag);
+  js.integer("cols", qr_cols);
+  js.integer("max_row_terms", qr_max);
+  js.end('}');
   js.end('}');
 
   js.begin("numerics", '{');
@@ -414,6 +440,7 @@ std::string profile_json(const Model& model, const SolverParams& params, const S
   bound_range.write(js, "bounds");
   rhs_range.write(js, "rhs");
   q_range.write(js, "quadratic");
+  qr_range.write(js, "quadratic_rows");
   js.integer("rows_coef_range_above_1e6", wide_range);
   js.integer("rows_with_tiny_entries", tiny_entries);
   write_lengths(js, "row_length", std::move(row_len));

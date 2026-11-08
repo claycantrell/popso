@@ -1,0 +1,18 @@
+# QPLIB convex MIQPs (classes DML, CBL, CML; benchmarks/tools/qplib.py)
+benchmarks/qplib/QPLIB_10050.mps.gz  # CBL
+benchmarks/qplib/QPLIB_10056.mps.gz  # CBL
+benchmarks/qplib/QPLIB_10069.mps.gz  # CBL
+benchmarks/qplib/QPLIB_3547.mps.gz  # DML
+benchmarks/qplib/QPLIB_3694.mps.gz  # DML
+benchmarks/qplib/QPLIB_3698.mps.gz  # DML
+benchmarks/qplib/QPLIB_3708.mps.gz  # DML
+benchmarks/qplib/QPLIB_3792.mps.gz  # DML
+benchmarks/qplib/QPLIB_3861.mps.gz  # DML
+benchmarks/qplib/QPLIB_3871.mps.gz  # DML
+benchmarks/qplib/QPLIB_3913.mps.gz  # CBL
+benchmarks/qplib/QPLIB_3980.mps.gz  # CBL
+benchmarks/qplib/QPLIB_4270.mps.gz  # CML
+benchmarks/qplib/QPLIB_5527.mps.gz  # DML
+benchmarks/qplib/QPLIB_5543.mps.gz  # DML
+benchmarks/qplib/QPLIB_5577.mps.gz  # DML
+benchmarks/qplib/QPLIB_5924.mps.gz  # DML

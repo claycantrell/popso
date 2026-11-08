@@ -96,7 +96,7 @@ bool solve_sub_mip(const MipProblem& p, const std::vector<double>& lb, const std
     return e ? std::atoll(e) : 20000LL;
   }();
   // (Presolve does not know the implications of logical constraints.)
-  const bool presolve = !no_presolve && p.A.nnz() >= presolve_nnz && p.implications.empty();
+  const bool presolve = !no_presolve && p.A.nnz() >= presolve_nnz && p.implications.empty() && p.quad_rows.empty();
   // Unbounded (or skipped): solve the unreduced problem, which classifies it precisely.
   const PresolveStatus ps = presolve ? pre.run(q, po, log) : PresolveStatus::Unbounded;
   const double t_presolve = timer.elapsed();
@@ -285,7 +285,7 @@ namespace {
 // this when the fixings are at the LP point's own values (puriri: every sub-MIP with the integral
 // LP values fixed was infeasible in presolve, its LP feasible).
 bool presolve_infeasible(const MipProblem& p, const std::vector<double>& lb, const std::vector<double>& ub) {
-  if (!p.implications.empty()) return false;
+  if (!p.implications.empty() || !p.quad_rows.empty()) return false;
   MipProblem q = p;
   q.col_lb = lb;
   q.col_ub = ub;
@@ -432,6 +432,9 @@ bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const 
           undo(mark);
           LpOptions ropt;
           if (dive_budget >= 0) ropt.iteration_limit = std::max<long long>(1000, dive_budget);
+          // Within the call's time too (CBLIB uflquad-nopsc-30-300, 45300 rows: this re-solve ran 30 s past a 1.4 s
+          // budget and the 30 s time limit).
+          ropt.time_limit = std::max(0.0, limits.time_limit - timer.elapsed());
           lp_ok = lp.solve(ropt) == LpStatus::Optimal;  // limits: restore an LP point, stop the dive
           break;
         }
@@ -456,6 +459,7 @@ bool lp_rens(const MipProblem& p, const DualSimplex& root, double cutoff, const 
       }
       LpOptions opt;  // back to the LP point of the restored bounds
       if (dive_budget >= 0) opt.iteration_limit = std::max<long long>(1000, dive_budget - (lp.iterations() - it_start));
+      opt.time_limit = std::max(0.0, limits.time_limit - timer.elapsed());
       lp_ok = lp.solve(opt) == LpStatus::Optimal;
     }
     st.dive_iterations += lp.iterations() - it_start;

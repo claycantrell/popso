@@ -57,6 +57,9 @@ class SparseCholesky {
 
   // A pivot d of column j is dropped if d <= pivot_tol * (the column's diagonal entry of M).
   double pivot_tol = 1e-14;
+  // > 0: such a pivot becomes this value (with the column's sign) instead of being dropped (dynamic
+  // regularization, for callers that refine every solve against the exact matrix: conic/socp.cpp).
+  double dynamic_reg = 0.0;
   // Relaxed supernode amalgamation: merge a child into its parent if the merged supernode has at
   // most relax_small columns, or at most relax_cols columns and at most relax_zeros of its
   // stored entries are explicit zeros.

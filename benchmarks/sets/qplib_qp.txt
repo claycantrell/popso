@@ -1,0 +1,18 @@
+# QPLIB convex continuous QPs (classes DCL, CCL, CCB; benchmarks/tools/qplib.py)
+benchmarks/qplib/QPLIB_10034.mps.gz  # DCL
+benchmarks/qplib/QPLIB_10038.mps.gz  # DCL
+benchmarks/qplib/QPLIB_8495.mps.gz  # DCL
+benchmarks/qplib/QPLIB_8500.mps.gz  # DCL
+benchmarks/qplib/QPLIB_8515.mps.gz  # CCL
+benchmarks/qplib/QPLIB_8559.mps.gz  # CCL
+benchmarks/qplib/QPLIB_8567.mps.gz  # CCL
+benchmarks/qplib/QPLIB_8602.mps.gz  # DCL
+benchmarks/qplib/QPLIB_8616.mps.gz  # DCL
+benchmarks/qplib/QPLIB_8785.mps.gz  # DCL
+benchmarks/qplib/QPLIB_8790.mps.gz  # CCB
+benchmarks/qplib/QPLIB_8792.mps.gz  # CCB
+benchmarks/qplib/QPLIB_8845.mps.gz  # CCL
+benchmarks/qplib/QPLIB_8906.mps.gz  # CCL
+benchmarks/qplib/QPLIB_8938.mps.gz  # DCL
+benchmarks/qplib/QPLIB_8991.mps.gz  # CCB
+benchmarks/qplib/QPLIB_9002.mps.gz  # DCL

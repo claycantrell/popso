@@ -4,11 +4,14 @@ How the solver compares with the open-source solvers [HiGHS](https://highs.dev) 
 [SCIP](https://www.scipopt.org). Every answer is checked independently: the returned
 solution must be feasible, and its objective must match the known optimum.
 
-_Last updated 2026-11-07 for popso v0.7.0._
+_Last updated 2026-11-07 for popso v0.8.0. The hard-instance and 240-instance MIPLIB runs are
+v0.7.0's: v0.8.0 changes nothing in the MILP search beyond fixes, and its 63-instance numbers below
+are new._
 
 ## Setup
 
-- Machine: Apple M4 Pro (12 cores, 24 GB), macOS (the 240-instance run: see its section).
+- Machine: Apple M4 Pro (12 cores, 24 GB), macOS (the 240-instance run and the quadratic models:
+  see their sections).
 - Versions: HiGHS 1.15.1 (highspy) and SCIP 10.0 (PySCIPOpt), with default settings.
 - Time limit: 120 s per instance. Memory cap: 2–2.8 GB per solver process.
 - Scoring:
@@ -19,7 +22,8 @@ _Last updated 2026-11-07 for popso v0.7.0._
 - Gap tolerance: popso runs at a relative gap of 1e-6; the reference solvers run at 1e-9.
 - Caveats:
   - The popso MIPLIB numbers come from a single seed.
-  - The v0.7.0 numbers were measured with the release code (only the version string differs).
+  - The v0.8.0 numbers were measured with the release candidate. The release adds only a gcc-15
+    build fix, and conic QP points clipped to their bounds (a change of ~1e-16).
   - The reference times were measured separately, partly while other jobs were running.
   - Read small differences as noise.
 
@@ -40,82 +44,82 @@ set](#full-miplib-2017-benchmark-set-240-instances) is below.
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| popso | 61/63 | 9.4 |
+| popso | 62/63 | 8.8 |
 | HiGHS | 53/63 | 18.9 |
 | SCIP | 50/63 | 21.3 |
 
-popso is fastest on 41 of the 63 instances. The table is seed 0. Over seeds 0, 1 and 2 popso
-solves 61 / 60 / 63 instances with a shifted geometric mean of 9.4 / 8.7 / 7.9 s (v0.6.0: 59 / 61
-/ 59 and 9.0 / 9.2 / 9.0 s); over all 189 runs 184 solved and 8.7 s against 179 and 9.0 s. Single runs
+popso is fastest on 44 of the 63 instances. The table is seed 0. Over seeds 0, 1 and 2 popso
+solves 62 / 60 / 62 instances with a shifted geometric mean of 8.8 / 8.4 / 8.1 s (v0.7.0: 61 / 60
+/ 63 and 9.4 / 8.7 / 7.9 s); over all 189 runs 184 solved and 8.5 s against 184 and 8.7 s. Single runs
 of the instances close to the time limit vary a lot between seeds.
 
 <details><summary>Per instance (seconds; TL = time limit; bold = fastest)</summary>
 
 | instance | popso | HiGHS | SCIP |
 |---|---|---|---|
-| 30n20b8 | **59.5** | TL | 116.6 |
-| CMS750_4 | 114.3 | TL | **77.0** |
-| air05 | **15.8** | 16.8 | 21.8 |
-| app1-1 | 24.1 | 14.7 | **3.8** |
-| beasleyC3 | 18.2 | 12.3 | **9.1** |
-| binkar10_1 | **2.6** | 23.0 | 16.6 |
-| cbs-cta | **2.9** | 31.7 | 13.5 |
-| cod105 | **1.0** | 62.9 | 32.7 |
-| dano3_3 | **22.4** | 38.4 | 58.8 |
-| dano3_5 | **47.5** | TL | TL |
-| decomp2 | **0.3** | 2.1 | 1.0 |
-| drayage-100-23 | 2.3 | **0.3** | 3.9 |
-| drayage-25-23 | 19.5 | **0.9** | 8.7 |
-| eil33-2 | 82.6 | 54.2 | **47.8** |
-| enlight_hard | 1.4 | 6.4 | **0.0** |
+| 30n20b8 | **62.6** | TL | 116.6 |
+| CMS750_4 | TL | TL | **77.0** |
+| air05 | **13.5** | 16.8 | 21.8 |
+| app1-1 | 20.0 | 14.7 | **3.8** |
+| beasleyC3 | 11.8 | 12.3 | **9.1** |
+| binkar10_1 | **2.2** | 23.0 | 16.6 |
+| cbs-cta | **3.6** | 31.7 | 13.5 |
+| cod105 | **0.9** | 62.9 | 32.7 |
+| dano3_3 | **20.2** | 38.4 | 58.8 |
+| dano3_5 | **59.5** | TL | TL |
+| decomp2 | **0.2** | 2.1 | 1.0 |
+| drayage-100-23 | 2.5 | **0.3** | 3.9 |
+| drayage-25-23 | 18.3 | **0.9** | 8.7 |
+| eil33-2 | **41.8** | 54.2 | 47.8 |
+| enlight_hard | 1.1 | 6.4 | **0.0** |
 | exp-1-500-5-5 | **0.3** | 2.5 | 1.3 |
-| fiball | **2.2** | 57.1 | TL |
-| h80x6320d | 34.4 | **8.5** | 71.9 |
-| irp | **2.7** | 13.8 | 10.8 |
-| mas76 | **12.6** | 59.2 | 34.9 |
-| mc11 | 21.7 | 22.9 | **9.6** |
-| mik-250-20-75-4 | **3.0** | 8.6 | 17.1 |
-| mzzv11 | **13.0** | 44.4 | TL |
+| fiball | **2.0** | 57.1 | TL |
+| h80x6320d | 34.3 | **8.5** | 71.9 |
+| irp | **2.6** | 13.8 | 10.8 |
+| mas76 | **17.3** | 59.2 | 34.9 |
+| mc11 | 21.5 | 22.9 | **9.6** |
+| mik-250-20-75-4 | **3.3** | 8.6 | 17.1 |
+| mzzv11 | **12.4** | 44.4 | TL |
 | mzzv42z | **3.8** | 26.1 | 69.3 |
-| n2seq36q | **22.6** | 50.7 | 78.2 |
-| n5-3 | 13.2 | **11.0** | 29.4 |
+| n2seq36q | **23.5** | 50.7 | 78.2 |
+| n5-3 | 16.6 | **11.0** | 29.4 |
 | neos-1122047 | **1.3** | 2.9 | 1.8 |
-| neos-1171448 | **5.3** | 79.4 | 6.0 |
-| neos-1445765 | **17.3** | 43.3 | 20.0 |
-| neos-1582420 | **6.1** | 14.5 | 16.9 |
-| neos-2978193-inde | **11.5** | 21.5 | TL |
-| neos-3004026-krka | **0.4** | TL | 35.1 |
+| neos-1171448 | **5.5** | 79.4 | 6.0 |
+| neos-1445765 | **17.5** | 43.3 | 20.0 |
+| neos-1582420 | **5.8** | 14.5 | 16.9 |
+| neos-2978193-inde | **15.9** | 21.5 | TL |
+| neos-3004026-krka | **0.5** | TL | 35.1 |
 | neos-3083819-nubu | **2.6** | 5.3 | 3.9 |
-| neos-3381206-awhea | 3.0 | **0.4** | 1.4 |
-| neos-3627168-kasai | **21.3** | 48.7 | 74.4 |
-| neos-4738912-atrato | **67.2** | TL | TL |
-| neos-827175 | 4.5 | **2.0** | 2.8 |
-| neos-911970 | **2.6** | 4.8 | 6.1 |
+| neos-3381206-awhea | 2.8 | **0.4** | 1.4 |
+| neos-3627168-kasai | **20.1** | 48.7 | 74.4 |
+| neos-4738912-atrato | **40.4** | TL | TL |
+| neos-827175 | 4.2 | **2.0** | 2.8 |
+| neos-911970 | **2.8** | 4.8 | 6.1 |
 | neos-950242 | **1.3** | 19.0 | TL |
-| neos-960392 | 7.9 | **4.8** | TL |
-| neos17 | **1.0** | 4.7 | 3.5 |
-| neos5 | **20.6** | 45.4 | TL |
-| neos859080 | **0.3** | 0.7 | 0.3 |
-| ns1208400 | **7.4** | 37.7 | TL |
-| ns1830653 | **38.8** | TL | 72.0 |
-| nu25-pr12 | 9.2 | **1.9** | 2.1 |
-| p200x1188c | 4.5 | **0.3** | 2.4 |
-| pg | 4.8 | **3.0** | 11.9 |
-| pg5_34 | TL | TL | TL |
-| piperout-08 | **2.1** | 10.4 | 7.7 |
-| piperout-27 | **6.2** | 15.5 | 6.4 |
-| pk1 | **8.5** | TL | 57.8 |
-| qap10 | 37.9 | **35.5** | 68.3 |
-| rmatr100-p10 | **12.2** | 41.8 | 87.8 |
-| rocI-4-11 | TL | TL | **46.3** |
-| rococoC10-001000 | **60.9** | TL | TL |
-| roll3000 | 24.2 | **19.5** | 28.6 |
-| seymour1 | **16.8** | 79.0 | 33.7 |
+| neos-960392 | 7.4 | **4.8** | TL |
+| neos17 | **1.1** | 4.7 | 3.5 |
+| neos5 | **23.4** | 45.4 | TL |
+| neos859080 | **0.2** | 0.7 | 0.3 |
+| ns1208400 | **8.0** | 37.7 | TL |
+| ns1830653 | **49.3** | TL | 72.0 |
+| nu25-pr12 | 7.6 | **1.9** | 2.1 |
+| p200x1188c | 4.6 | **0.3** | 2.4 |
+| pg | 4.2 | **3.0** | 11.9 |
+| pg5_34 | **87.2** | TL | TL |
+| piperout-08 | **1.9** | 10.4 | 7.7 |
+| piperout-27 | **5.8** | 15.5 | 6.4 |
+| pk1 | **5.8** | TL | 57.8 |
+| qap10 | 36.2 | **35.5** | 68.3 |
+| rmatr100-p10 | **11.6** | 41.8 | 87.8 |
+| rocI-4-11 | 117.4 | TL | **46.3** |
+| rococoC10-001000 | **50.3** | TL | TL |
+| roll3000 | 23.1 | **19.5** | 28.6 |
+| seymour1 | **14.4** | 79.0 | 33.7 |
 | sp150x300d | 0.1 | **0.0** | 0.2 |
-| swath1 | **7.6** | 8.8 | 8.6 |
-| swath3 | 88.7 | **60.4** | TL |
-| timtab1 | **8.3** | 35.1 | 27.9 |
-| unitcal_7 | **48.6** | 102.6 | TL |
+| swath1 | **7.3** | 8.8 | 8.6 |
+| swath3 | **21.8** | 60.4 | TL |
+| timtab1 | **7.3** | 35.1 | 27.9 |
+| unitcal_7 | **51.5** | 102.6 | TL |
 
 </details>
 
@@ -125,7 +129,7 @@ The 63 instances above were selected from a wider 106-instance set (MIPLIB 2017 
 "easy", at most about 200k nonzeros). The remaining 43 are the ones that none of popso, HiGHS or
 SCIP solved within 120 s. They are listed in
 [`benchmarks/sets/miplib_hard.txt`](benchmarks/sets/miplib_hard.txt) and were run with a
-600 s limit, otherwise with the same settings as above. All have known optimal values, so every
+600 s limit (popso v0.7.0), otherwise with the same settings as above. All have known optimal values, so every
 answer is checked.
 
 ![MIPLIB hard instances: instances solved vs. time](docs/miplib_hard.svg)
@@ -202,7 +206,7 @@ four that popso does not (blp-ic98, csched007, csched008, sct2), SCIP one (csche
 All 240 instances of the official MIPLIB 2017 benchmark set, without selection
 ([`benchmarks/sets/miplib_benchmark.txt`](benchmarks/sets/miplib_benchmark.txt)). The reference
 values are MIPLIB's own (232 optimal, 7 infeasible, 1 best known), so every answer is checked.
-This run used a second machine:
+This run (popso v0.7.0) used a second machine:
 
 - Machine: AMD EPYC 4465P (12 cores, 24 hardware threads, 62 GB), Linux; six solver runs at a time.
 - Versions and scoring as above; 120 s per instance, 4 threads (SCIP's branch-and-bound is
@@ -476,7 +480,7 @@ neos-4722843-widden, rail507, rocI-4-11, supportcase33 and unitcal_7.
 
 ## Generated instances
 
-153 models from random families of increasing size
+163 models from random families of increasing size
 ([`benchmarks/instances/`](benchmarks/instances), produced by
 [`benchmarks/generators/`](benchmarks/generators)):
 - scheduling and lot-sizing (job shop, lot sizing, time-indexed);
@@ -492,66 +496,69 @@ neos-4722843-widden, rail507, rocI-4-11, supportcase33 and unitcal_7.
 - convex quadratic programs: portfolio optimization (`portfolio`), constrained least squares
   (`lsq`), and the MIQPs cardinality-constrained portfolio (`miqpport`), random
   convex MIQPs (`miqprand`) and production targets in squares of integers (`sqtrack`);
+- convex quadratic constraints (since v0.8): portfolios with a risk constraint and cardinality
+  limits (`portqc`) and random convex MIQCQPs (`qcrand`);
 - hand-written LP/MIP edge cases (infeasible, unbounded, degenerate, empty rows, free
   variables, objective sense).
 
 All solvers use 1 thread. HiGHS cannot read the 8 models with SOS or indicator constraints and has
-no MIQP solver; its counts are over the other 130 models. Three MIQPs have no proven reference
+no MIQP solver and no quadratic constraints; its counts are over the other 130 models. Three MIQPs have no proven reference
 optimum; popso's optimal answers there are consistent with the known bounds and count as solved.
 
 ![Generated instances: instances solved vs. time](docs/generated.svg)
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| popso | 152/153 | 0.8 |
+| popso | 161/163 | 0.8 |
 | HiGHS | 125/130 | 1.3 |
-| SCIP | 139/153 | 2.0 |
+| SCIP | 145/163 | 2.1 |
 
-popso leaves gap_hard_1 unsolved (v0.6.0 also binpack_hard_1, now 10.5 s; that one depends on the seed:
-the bound of 18 bins is proved at once, and finding an 18-bin packing within the limit is a matter of
-luck). The `sqtrack` models take 0.02-0.14 s each (the squares as a MILP with tangent rows; the MIQP
-search did not finish the large and hard ones in 60 s).
+popso leaves gap_hard_1 and qcrand_hard_1 unsolved (SCIP neither; HiGHS times out on gap_hard_1 and
+does not read qcrand_hard_1). The
+`sqtrack` models take 0.02-0.14 s each (the squares as a MILP with tangent rows), the quadratic-constraint
+families `portqc` and `qcrand` 0.0-1.0 s up to the large ones (SCIP: time limits on portqc_large,
+portqc_hard and qcrand_large).
 
 <details><summary>Per instance (seconds; TL = time limit; bold = fastest)</summary>
 
 | instance | popso | HiGHS | SCIP |
 |---|---|---|---|
-| binpack_hard_1 | 10.5 | 26.8 | **3.1** |
+| binpack_hard_1 | 10.6 | 26.8 | **3.1** |
 | binpack_large_1 | **0.0** | 0.1 | 0.3 |
 | binpack_medium_1 | 0.0 | **0.0** | 0.0 |
 | binpack_small_1 | 0.0 | 0.0 | **0.0** |
 | binpack_tiny_1 | 0.0 | 0.0 | **0.0** |
-| cflp_hard_1 | 55.2 | **47.7** | TL |
-| cflp_large_1 | 34.5 | **25.7** | TL |
-| cflp_medium_1 | 7.0 | **6.0** | 8.3 |
+| cflp_hard_1 | 54.9 | **47.7** | TL |
+| cflp_large_1 | 33.9 | **25.7** | TL |
+| cflp_medium_1 | 6.9 | **6.0** | 8.3 |
 | cflp_small_1 | **0.2** | 0.8 | 0.6 |
 | cflp_tiny_1 | 0.0 | 0.0 | **0.0** |
-| cvrp_large_1 | **4.8** | 9.0 | 10.5 |
-| cvrp_medium_1 | 1.8 | **1.2** | 2.1 |
-| cvrp_small_1 | 0.2 | 0.1 | **0.1** |
+| cvrp_large_1 | **4.9** | 9.0 | 10.5 |
+| cvrp_medium_1 | 1.6 | **1.2** | 2.1 |
+| cvrp_small_1 | 0.1 | 0.1 | **0.1** |
 | cvrp_tiny_1 | 0.0 | 0.0 | **0.0** |
 | gap_hard_1 | TL | TL | TL |
 | gap_large_1 | **8.1** | 12.6 | 82.4 |
-| gap_medium_1 | **1.6** | 12.1 | 5.1 |
-| gap_small_1 | **0.2** | 0.6 | 0.4 |
+| gap_medium_1 | **1.5** | 12.1 | 5.1 |
+| gap_small_1 | **0.1** | 0.6 | 0.4 |
 | gap_tiny_1 | 0.0 | 0.0 | **0.0** |
 | indsched_large_1 | 0.3 | - | **0.0** |
 | indsched_medium_1 | 0.0 | - | **0.0** |
-| indsched_small_1 | 0.0 | - | **0.0** |
+| indsched_small_1 | **0.0** | - | 0.0 |
 | indsched_tiny_1 | 0.0 | - | **0.0** |
 | jobshop_hard_1 | **5.3** | 17.2 | 37.1 |
-| jobshop_large_1 | **14.8** | 25.4 | 28.2 |
-| jobshop_medium_1 | 2.0 | **0.3** | 8.0 |
+| jobshop_large_1 | **14.6** | 25.4 | 28.2 |
+| jobshop_medium_1 | 1.9 | **0.3** | 8.0 |
 | jobshop_small_1 | 0.1 | **0.0** | 0.5 |
 | jobshop_tiny_1 | 0.0 | 0.0 | **0.0** |
 | knapsack_large_1 | **0.0** | 0.1 | 0.3 |
 | knapsack_medium_1 | 0.0 | 0.0 | **0.0** |
 | knapsack_small_1 | 0.0 | 0.0 | **0.0** |
 | knapsack_tiny_1 | 0.0 | 0.0 | **0.0** |
-| lotsize_hard_1 | **43.6** | 92.7 | 82.1 |
-| lotsize_large_1 | **10.6** | 11.9 | 14.9 |
-| lotsize_medium_1 | **5.5** | 6.6 | 6.9 |
-| lotsize_small_1 | **0.1** | 0.3 | 0.5 |
+| lotsize_hard_1 | **45.3** | 92.7 | 82.1 |
+| lotsize_large_1 | **10.7** | 11.9 | 14.9 |
+| lotsize_medium_1 | **5.7** | 6.6 | 6.9 |
+| lotsize_small_1 | **0.2** | 0.3 | 0.5 |
 | lotsize_tiny_1 | 0.0 | 0.0 | **0.0** |
 | lpsanity_beale_cycling_0 | 0.0 | **0.0** | 0.0 |
 | lpsanity_degenerate_0 | 0.0 | **0.0** | 0.0 |
@@ -576,7 +583,7 @@ search did not finish the large and hard ones in 60 s).
 | lpsanity_mip_mixed_bounds_0 | 0.0 | 0.0 | **0.0** |
 | lpsanity_mip_negative_ub_0 | **0.0** | TL | TL |
 | lpsanity_mip_parity_infeasible_0 | 0.0 | 0.0 | **0.0** |
-| lpsanity_mip_unbounded_0 | 0.0 | **0.0** | 0.1 |
+| lpsanity_mip_unbounded_0 | **0.0** | 0.0 | 0.1 |
 | lpsanity_negative_lb_0 | 0.0 | **0.0** | 0.0 |
 | lpsanity_negative_ub_0 | **0.0** | TL | TL |
 | lpsanity_objoffset_0 | 0.0 | 0.0 | **0.0** |
@@ -591,24 +598,24 @@ search did not finish the large and hard ones in 60 s).
 | lsq_medium_1 | **0.1** | 0.1 | TL |
 | lsq_small_1 | 0.0 | **0.0** | 0.3 |
 | lsq_tiny_1 | 0.0 | **0.0** | 0.0 |
-| miqpport_hard_1 | **0.8** | - | TL |
+| miqpport_hard_1 | **0.9** | - | TL |
 | miqpport_large_1 | **0.2** | - | 13.4 |
-| miqpport_medium_1 | **0.1** | - | 1.2 |
+| miqpport_medium_1 | **0.0** | - | 1.2 |
 | miqpport_small_1 | **0.0** | - | 0.6 |
 | miqpport_tiny_1 | **0.0** | - | 0.1 |
-| miqprand_hard_1 | **2.4** | - | TL |
+| miqprand_hard_1 | **2.5** | - | TL |
 | miqprand_large_1 | **0.3** | - | TL |
 | miqprand_medium_1 | **0.0** | - | 35.6 |
 | miqprand_small_1 | **0.0** | - | TL |
 | miqprand_tiny_1 | **0.0** | - | 0.1 |
-| mkp_hard_1 | **5.9** | 43.9 | 22.6 |
+| mkp_hard_1 | **5.7** | 43.9 | 22.6 |
 | mkp_large_1 | **1.0** | 4.5 | 3.1 |
-| mkp_medium_1 | **0.8** | 2.3 | 4.7 |
-| mkp_small_1 | **0.0** | 0.1 | 0.1 |
+| mkp_medium_1 | **0.7** | 2.3 | 4.7 |
+| mkp_small_1 | **0.1** | 0.1 | 0.1 |
 | mkp_tiny_1 | 0.0 | 0.0 | **0.0** |
 | netdesign_hard_1 | **18.9** | 30.9 | 36.4 |
 | netdesign_large_1 | **0.6** | 5.4 | 4.1 |
-| netdesign_medium_1 | **0.2** | 0.4 | 1.2 |
+| netdesign_medium_1 | **0.3** | 0.4 | 1.2 |
 | netdesign_small_1 | 0.0 | 0.0 | **0.0** |
 | netdesign_tiny_1 | 0.0 | 0.0 | **0.0** |
 | pigeon_large_1 | 0.0 | **0.0** | 0.2 |
@@ -616,32 +623,42 @@ search did not finish the large and hard ones in 60 s).
 | pigeon_small_1 | 0.0 | **0.0** | 0.0 |
 | pigeon_tiny_1 | 0.0 | 0.0 | **0.0** |
 | portfolio_large_1 | 0.0 | **0.0** | 1.2 |
-| portfolio_medium_1 | 0.0 | **0.0** | 7.9 |
+| portfolio_medium_1 | 0.1 | **0.0** | 7.9 |
 | portfolio_small_1 | 0.0 | **0.0** | 0.0 |
 | portfolio_tiny_1 | 0.0 | **0.0** | 0.0 |
-| pwlnet_large_1 | **1.5** | - | 5.1 |
+| portqc_hard_1 | **1.0** | - | TL |
+| portqc_large_1 | **0.1** | - | TL |
+| portqc_medium_1 | **0.0** | - | 1.0 |
+| portqc_small_1 | **0.0** | - | 0.4 |
+| portqc_tiny_1 | **0.0** | - | 0.0 |
+| pwlnet_large_1 | **1.2** | - | 5.1 |
 | pwlnet_medium_1 | **0.1** | - | 0.2 |
-| pwlnet_small_1 | 0.1 | - | **0.0** |
+| pwlnet_small_1 | 0.0 | - | **0.0** |
 | pwlnet_tiny_1 | 0.0 | - | **0.0** |
-| randlp_large_1 | **19.6** | 39.9 | 65.1 |
+| qcrand_hard_1 | TL | - | TL |
+| qcrand_large_1 | **0.2** | - | TL |
+| qcrand_medium_1 | **0.0** | - | 0.4 |
+| qcrand_small_1 | **0.0** | - | 0.2 |
+| qcrand_tiny_1 | 0.0 | - | **0.0** |
+| randlp_large_1 | **19.3** | 39.9 | 65.1 |
 | randlp_medium_1 | 0.1 | **0.0** | 0.5 |
 | randlp_small_1 | 0.0 | **0.0** | 0.0 |
 | randmilp_hard_1 | **62.5** | TL | 71.9 |
-| randmilp_large_1 | **10.9** | 25.3 | 21.2 |
+| randmilp_large_1 | **9.9** | 25.3 | 21.2 |
 | randmilp_medium_1 | **0.1** | 0.2 | 0.2 |
 | randmilp_small_1 | 0.0 | 0.0 | **0.0** |
 | randmilp_tiny_1 | 0.0 | 0.0 | **0.0** |
 | semilot_large_1 | 5.1 | **1.3** | TL |
 | semilot_medium_1 | 0.1 | 0.1 | **0.0** |
-| semilot_small_1 | 0.0 | 0.0 | **0.0** |
+| semilot_small_1 | 0.1 | 0.0 | **0.0** |
 | semilot_tiny_1 | 0.0 | 0.0 | **0.0** |
 | setcover_hard_1 | **0.5** | 2.7 | 3.8 |
 | setcover_large_1 | **0.8** | 2.4 | 4.2 |
-| setcover_medium_1 | **0.1** | 1.1 | 0.7 |
+| setcover_medium_1 | **0.2** | 1.1 | 0.7 |
 | setcover_small_1 | 0.0 | 0.0 | **0.0** |
 | setcover_tiny_1 | 0.0 | 0.0 | **0.0** |
-| setpack_hard_1 | **56.6** | TL | TL |
-| setpack_large_1 | **3.0** | 9.9 | 8.5 |
+| setpack_hard_1 | **57.8** | TL | TL |
+| setpack_large_1 | **2.9** | 9.9 | 8.5 |
 | setpack_medium_1 | **0.2** | 1.1 | 1.0 |
 | setpack_small_1 | 0.0 | 0.0 | **0.0** |
 | setpack_tiny_1 | 0.0 | 0.0 | **0.0** |
@@ -649,11 +666,11 @@ search did not finish the large and hard ones in 60 s).
 | sqtrack_large_1 | **0.0** | - | 0.3 |
 | sqtrack_medium_1 | **0.0** | - | 0.0 |
 | sqtrack_small_1 | **0.0** | - | 1.7 |
-| sqtrack_tiny_1 | 0.0 | - | **0.0** |
+| sqtrack_tiny_1 | **0.0** | - | 0.0 |
 | subsetsum_medium_1 | **1.2** | 3.6 | 3.9 |
-| subsetsum_small_1 | 0.0 | 0.0 | **0.0** |
-| timeidx_hard_1 | 19.6 | **18.0** | 34.3 |
-| timeidx_large_1 | **7.7** | 11.9 | 27.0 |
+| subsetsum_small_1 | **0.0** | 0.0 | 0.0 |
+| timeidx_hard_1 | 19.1 | **18.0** | 34.3 |
+| timeidx_large_1 | **7.4** | 11.9 | 27.0 |
 | timeidx_medium_1 | 0.6 | 1.1 | **0.3** |
 | timeidx_small_1 | 0.1 | 0.0 | **0.0** |
 | timeidx_tiny_1 | 0.0 | 0.0 | **0.0** |
@@ -662,13 +679,422 @@ search did not finish the large and hard ones in 60 s).
 | transport_large_1 | **0.1** | 0.4 | 2.7 |
 | transport_medium_1 | 0.0 | **0.0** | 0.0 |
 | transport_small_1 | 0.0 | **0.0** | 0.0 |
-| tsp_hard_1 | **61.7** | 106.1 | TL |
-| tsp_large_1 | 98.4 | **68.9** | 115.1 |
-| tsp_medium_1 | 4.3 | 6.3 | **3.7** |
+| tsp_hard_1 | **61.0** | 106.1 | TL |
+| tsp_large_1 | 105.7 | **68.9** | 115.1 |
+| tsp_medium_1 | 4.6 | 6.3 | **3.7** |
 | tsp_small_1 | **0.3** | 0.4 | 0.3 |
 | tsp_tiny_1 | 0.0 | 0.0 | **0.0** |
 | unbdmilp_medium_1 | 0.0 | **0.0** | 0.2 |
 | unbdmilp_small_1 | 0.0 | **0.0** | 0.0 |
+
+</details>
+
+## Quadratic constraints and cones (QPLIB, CBLIB)
+
+v0.8 adds quadratic constraints and second-order cones. These are measured on public libraries:
+
+- [QPLIB](https://qplib.zib.de) (CC BY 4.0), converted from its LP files with
+  [`benchmarks/tools/qplib.py`](benchmarks/tools/qplib.py). Each conversion is checked with QPLIB's
+  published solution point, which must be feasible with the published objective. The sets are:
+  - the 27 convex QCQP / MIQCQP instances (13 continuous, 14 mixed-integer);
+  - 17 convex QPs;
+  - 17 convex MIQPs;
+  - the 128 nonconvex instances whose variables are all binary (classes QBL, QBN, LBQ, QBQ).
+    popso linearizes their products exactly.
+- [CBLIB](https://cblib.zib.de): 157 mixed-integer second-order cone programs, converted from CBF
+  with [`benchmarks/tools/cblib.py`](benchmarks/tools/cblib.py).
+
+Setup:
+- Machine: AMD EPYC 4465P (12 cores, Linux), twelve 1-thread runs at a time.
+- popso v0.8.0: 1 thread, 120 s, gap 1e-6.
+- SCIP 10.0: 1 thread, 300 s, feasibility tolerance 1e-9; a SCIP time counts as solved if it is at
+  most 120 s.
+- HiGHS has no quadratic constraints; it appears only on the QPs (300 s).
+- Every returned point is verified. Quadratic rows are checked to 1e-6, scaled by their terms'
+  magnitude; a cone is checked by the distance in its norm form, so a point near a cone's tip
+  cannot use the squared form's looser tolerance. Reference points that fail this check (SCIP's on
+  some cones) are dropped.
+- Six references carry a wider comparison tolerance, with a note: models where the 1e-6
+  feasibility tolerance itself moves the optimum, such as cones of radius 7e-4.
+
+![Quadratic constraints and cones: instances solved vs. time](docs/quadratic.svg)
+
+| set | instances | popso solved (geomean s) | SCIP | HiGHS |
+|---|---|---|---|---|
+| QPLIB convex QCQP / MIQCQP | 27 | 21 (12.1) | 6 (90.2) | - |
+| QPLIB convex QP | 17 | 15 (4.0) | 0 (120.0) | 7/17 (45.1) |
+| QPLIB convex MIQP | 17 | 4 (45.0) | 0 (120.0) | - |
+| QPLIB nonconvex over binaries | 128 | 38 (48.0) | 8 (113.5) | - |
+| CBLIB MISOCP | 157 | 108 (14.4) | 87 (23.5) | - |
+| **all** | 346 | **186** (22.3) | 101 (55.2) | |
+
+Shifted geometric means of the run times: shift 1 s, an unsolved instance counts as 120 s.
+
+Notes:
+- **Continuous QCQPs:** the conic interior-point method solves QPLIB's 13 continuous convex QCQPs
+  in 0.1 to 15 s each; SCIP solves 1 of them within 300 s (verified).
+- **Quadratic knapsack rows (QPLIB class LMC):** one dense quadratic row over binaries. Linearized
+  exactly, it is solved as a MILP; popso solves 8 of 12 within 120 s, SCIP 5 (6 within 300 s).
+- **Nonconvex models over binaries:** with 300 s and 4 threads, popso proves 47 of the 128
+  optimal and SCIP 13 (1 thread). Where both finish, their objectives are equal, and equal to
+  QPLIB's. Where neither finishes, popso's solution is better on 68 of 70.
+- **CBLIB:** by family, popso solves more instances than SCIP in 11 of the 26 families and fewer
+  in 5: the layout families `no7` and `o7`, `shortfall`, `sssd-strong` and `uflquad-nopsc`.
+  On `b1bigflowc`, whose cones sit on free member columns defined by equations, popso finds no
+  solution for a long time.
+- **QPs:** popso tries the conic method first and falls back to the QP barrier. SCIP finishes none
+  of the 17 within 300 s; HiGHS finishes 7, with the same objectives where both finish (to 1e-5).
+
+<details><summary>Per instance (seconds; TL = time limit; - = no reference run)</summary>
+
+| instance | set | popso | SCIP | HiGHS |
+|---|---|---|---|---|
+| QPLIB_10001 | QCQP | **7.5** | 13.7 | - |
+| QPLIB_10002 | QCQP | **27.0** | 41.7 | - |
+| QPLIB_10003 | QCQP | 78.7 | TL | - |
+| QPLIB_10004 | QCQP | TL | TL | - |
+| QPLIB_10005 | QCQP | TL | TL | - |
+| QPLIB_10006 | QCQP | TL | TL | - |
+| QPLIB_10007 | QCQP | TL | TL | - |
+| QPLIB_10008 | QCQP | **58.8** | 96.9 | - |
+| QPLIB_10009 | QCQP | 31.8 | **25.4** | - |
+| QPLIB_10010 | QCQP | 32.8 | **14.9** | - |
+| QPLIB_10011 | QCQP | 80.9 | TL | - |
+| QPLIB_10012 | QCQP | 59.2 | TL | - |
+| QPLIB_2456 | QCQP | 0.8 | TL | - |
+| QPLIB_2468 | QCQP | 3.0 | TL | - |
+| QPLIB_2482 | QCQP | 0.1 | TL | - |
+| QPLIB_2519 | QCQP | 0.6 | TL | - |
+| QPLIB_2626 | QCQP | 2.2 | TL | - |
+| QPLIB_2676 | QCQP | **0.1** | 57.8 | - |
+| QPLIB_2784 | QCQP | 0.2 | TL | - |
+| QPLIB_2862 | QCQP | 4.9 | TL | - |
+| QPLIB_3029 | QCQP | 0.2 | TL | - |
+| QPLIB_3088 | QCQP | 0.2 | TL | - |
+| QPLIB_3105 | QCQP | 3.1 | TL | - |
+| QPLIB_3185 | QCQP | 1.4 | TL | - |
+| QPLIB_3312 | QCQP | 14.6 | TL | - |
+| QPLIB_3678 | QCQP | TL | TL | - |
+| QPLIB_7579 | QCQP | TL | TL | - |
+| QPLIB_10034 | QP | 24.1 | - | TL |
+| QPLIB_10038 | QP | 40.6 | - | TL |
+| QPLIB_8495 | QP | 1.6 | - | TL |
+| QPLIB_8500 | QP | TL | - | TL |
+| QPLIB_8515 | QP | 0.2 | - | TL |
+| QPLIB_8559 | QP | **14.7** | - | 30.5 |
+| QPLIB_8567 | QP | **10.3** | - | 28.0 |
+| QPLIB_8602 | QP | TL | - | TL |
+| QPLIB_8616 | QP | **0.2** | - | 26.0 |
+| QPLIB_8785 | QP | 4.5 | - | TL |
+| QPLIB_8790 | QP | 0.6 | - | TL |
+| QPLIB_8792 | QP | **0.4** | - | 3.1 |
+| QPLIB_8845 | QP | 0.3 | - | TL |
+| QPLIB_8906 | QP | 0.6 | - | **0.2** |
+| QPLIB_8938 | QP | **0.2** | - | 76.0 |
+| QPLIB_8991 | QP | **0.2** | - | 2.0 |
+| QPLIB_9002 | QP | 1.2 | - | TL |
+| QPLIB_10050 | MIQP | 0.3 | TL | - |
+| QPLIB_10056 | MIQP | 0.2 | TL | - |
+| QPLIB_10069 | MIQP | 0.2 | TL | - |
+| QPLIB_3547 | MIQP | TL | TL | - |
+| QPLIB_3694 | MIQP | TL | TL | - |
+| QPLIB_3698 | MIQP | TL | TL | - |
+| QPLIB_3708 | MIQP | 7.3 | TL | - |
+| QPLIB_3792 | MIQP | TL | TL | - |
+| QPLIB_3861 | MIQP | TL | TL | - |
+| QPLIB_3871 | MIQP | TL | TL | - |
+| QPLIB_3913 | MIQP | TL | TL | - |
+| QPLIB_3980 | MIQP | TL | TL | - |
+| QPLIB_4270 | MIQP | TL | TL | - |
+| QPLIB_5527 | MIQP | TL | TL | - |
+| QPLIB_5543 | MIQP | TL | TL | - |
+| QPLIB_5577 | MIQP | TL | TL | - |
+| QPLIB_5924 | MIQP | TL | TL | - |
+| QPLIB_0067 | binary | **13.3** | 14.3 | - |
+| QPLIB_0633 | binary | TL | TL | - |
+| QPLIB_0752 | binary | TL | TL | - |
+| QPLIB_10040 | binary | 0.2 | TL | - |
+| QPLIB_10041 | binary | 2.1 | TL | - |
+| QPLIB_10042 | binary | 0.1 | TL | - |
+| QPLIB_10043 | binary | 0.5 | TL | - |
+| QPLIB_10044 | binary | 1.0 | TL | - |
+| QPLIB_10045 | binary | 2.2 | TL | - |
+| QPLIB_10046 | binary | 0.1 | TL | - |
+| QPLIB_10047 | binary | 2.1 | TL | - |
+| QPLIB_10048 | binary | 41.6 | TL | - |
+| QPLIB_10049 | binary | 2.2 | TL | - |
+| QPLIB_10051 | binary | 2.2 | TL | - |
+| QPLIB_10052 | binary | 1.2 | TL | - |
+| QPLIB_10053 | binary | 1.0 | TL | - |
+| QPLIB_10054 | binary | 22.3 | TL | - |
+| QPLIB_10055 | binary | 0.8 | TL | - |
+| QPLIB_10057 | binary | 0.5 | TL | - |
+| QPLIB_10058 | binary | 67.3 | TL | - |
+| QPLIB_10059 | binary | TL | TL | - |
+| QPLIB_10060 | binary | 0.6 | TL | - |
+| QPLIB_10061 | binary | TL | TL | - |
+| QPLIB_10062 | binary | 2.5 | TL | - |
+| QPLIB_10063 | binary | TL | TL | - |
+| QPLIB_10064 | binary | 2.9 | TL | - |
+| QPLIB_10065 | binary | 1.2 | TL | - |
+| QPLIB_10066 | binary | 0.4 | TL | - |
+| QPLIB_10067 | binary | 0.6 | TL | - |
+| QPLIB_10068 | binary | TL | TL | - |
+| QPLIB_10070 | binary | TL | TL | - |
+| QPLIB_10071 | binary | 0.4 | TL | - |
+| QPLIB_10072 | binary | 0.4 | TL | - |
+| QPLIB_10073 | binary | 0.8 | TL | - |
+| QPLIB_10074 | binary | 10.4 | TL | - |
+| QPLIB_1976 | binary | TL | TL | - |
+| QPLIB_2017 | binary | TL | TL | - |
+| QPLIB_2022 | binary | TL | TL | - |
+| QPLIB_2029 | binary | TL | TL | - |
+| QPLIB_2036 | binary | TL | TL | - |
+| QPLIB_2047 | binary | TL | TL | - |
+| QPLIB_2055 | binary | TL | TL | - |
+| QPLIB_2060 | binary | TL | TL | - |
+| QPLIB_2067 | binary | TL | TL | - |
+| QPLIB_2073 | binary | TL | TL | - |
+| QPLIB_2077 | binary | TL | TL | - |
+| QPLIB_2085 | binary | TL | TL | - |
+| QPLIB_2087 | binary | TL | TL | - |
+| QPLIB_2096 | binary | TL | TL | - |
+| QPLIB_2315 | binary | TL | TL | - |
+| QPLIB_2357 | binary | TL | TL | - |
+| QPLIB_2359 | binary | TL | TL | - |
+| QPLIB_2492 | binary | TL | TL | - |
+| QPLIB_2512 | binary | TL | TL | - |
+| QPLIB_2733 | binary | TL | TL | - |
+| QPLIB_2880 | binary | TL | TL | - |
+| QPLIB_2957 | binary | TL | TL | - |
+| QPLIB_3307 | binary | TL | TL | - |
+| QPLIB_3347 | binary | TL | TL | - |
+| QPLIB_3361 | binary | TL | TL | - |
+| QPLIB_3380 | binary | 68.0 | TL | - |
+| QPLIB_3402 | binary | TL | TL | - |
+| QPLIB_3413 | binary | TL | TL | - |
+| QPLIB_3506 | binary | TL | TL | - |
+| QPLIB_3565 | binary | TL | 63.1 | - |
+| QPLIB_3584 | binary | TL | TL | - |
+| QPLIB_3587 | binary | TL | TL | - |
+| QPLIB_3614 | binary | TL | TL | - |
+| QPLIB_3642 | binary | TL | TL | - |
+| QPLIB_3650 | binary | TL | TL | - |
+| QPLIB_3693 | binary | TL | TL | - |
+| QPLIB_3703 | binary | TL | TL | - |
+| QPLIB_3705 | binary | TL | TL | - |
+| QPLIB_3706 | binary | TL | TL | - |
+| QPLIB_3709 | binary | TL | TL | - |
+| QPLIB_3714 | binary | **28.5** | 79.8 | - |
+| QPLIB_3738 | binary | TL | TL | - |
+| QPLIB_3745 | binary | TL | TL | - |
+| QPLIB_3750 | binary | TL | TL | - |
+| QPLIB_3751 | binary | TL | TL | - |
+| QPLIB_3752 | binary | TL | TL | - |
+| QPLIB_3757 | binary | TL | TL | - |
+| QPLIB_3762 | binary | **50.8** | 76.4 | - |
+| QPLIB_3772 | binary | TL | TL | - |
+| QPLIB_3775 | binary | TL | TL | - |
+| QPLIB_3803 | binary | TL | TL | - |
+| QPLIB_3815 | binary | 91.5 | **55.6** | - |
+| QPLIB_3822 | binary | TL | TL | - |
+| QPLIB_3832 | binary | TL | TL | - |
+| QPLIB_3834 | binary | TL | TL | - |
+| QPLIB_3838 | binary | TL | TL | - |
+| QPLIB_3841 | binary | TL | TL | - |
+| QPLIB_3850 | binary | TL | TL | - |
+| QPLIB_3852 | binary | **59.5** | 75.4 | - |
+| QPLIB_3860 | binary | TL | TL | - |
+| QPLIB_3865 | binary | TL | TL | - |
+| QPLIB_3877 | binary | TL | TL | - |
+| QPLIB_3883 | binary | TL | TL | - |
+| QPLIB_3923 | binary | TL | TL | - |
+| QPLIB_3931 | binary | TL | TL | - |
+| QPLIB_5721 | binary | TL | TL | - |
+| QPLIB_5725 | binary | TL | TL | - |
+| QPLIB_5755 | binary | 2.4 | TL | - |
+| QPLIB_5875 | binary | TL | TL | - |
+| QPLIB_5881 | binary | TL | TL | - |
+| QPLIB_5882 | binary | TL | TL | - |
+| QPLIB_5909 | binary | TL | TL | - |
+| QPLIB_5922 | binary | TL | TL | - |
+| QPLIB_5935 | binary | TL | TL | - |
+| QPLIB_5944 | binary | **59.5** | 68.2 | - |
+| QPLIB_5962 | binary | TL | TL | - |
+| QPLIB_5971 | binary | TL | TL | - |
+| QPLIB_5980 | binary | 107.4 | TL | - |
+| QPLIB_6324 | binary | TL | TL | - |
+| QPLIB_6487 | binary | TL | TL | - |
+| QPLIB_6597 | binary | TL | TL | - |
+| QPLIB_6647 | binary | TL | TL | - |
+| QPLIB_6757 | binary | TL | TL | - |
+| QPLIB_6764 | binary | TL | TL | - |
+| QPLIB_6799 | binary | TL | TL | - |
+| QPLIB_6941 | binary | TL | TL | - |
+| QPLIB_7127 | binary | **0.5** | 20.1 | - |
+| QPLIB_7139 | binary | 59.0 | TL | - |
+| QPLIB_7144 | binary | TL | TL | - |
+| QPLIB_7149 | binary | TL | TL | - |
+| QPLIB_7154 | binary | TL | TL | - |
+| QPLIB_7159 | binary | TL | TL | - |
+| QPLIB_7164 | binary | TL | TL | - |
+| achtziger_stolpe06-6.1flowc | CBLIB | 0.5 | TL | - |
+| achtziger_stolpe06-6.2flowc | CBLIB | TL | TL | - |
+| achtziger_stolpe06-6.5bflowc | CBLIB | TL | TL | - |
+| achtziger_stolpe06-6.5flowc | CBLIB | TL | TL | - |
+| achtziger_stolpe07-5.1flowc | CBLIB | TL | TL | - |
+| achtziger_stolpe07-5.2bflowc | CBLIB | TL | TL | - |
+| achtziger_stolpe07-5.2flowc | CBLIB | TL | TL | - |
+| achtziger_stolpe07-5.3flowc | CBLIB | 6.6 | TL | - |
+| b1bigflowc | CBLIB | TL | TL | - |
+| classical_200_0 | CBLIB | TL | TL | - |
+| classical_200_1 | CBLIB | TL | TL | - |
+| classical_50_0 | CBLIB | TL | TL | - |
+| classical_50_1 | CBLIB | 45.1 | TL | - |
+| classical_50_2 | CBLIB | 37.3 | TL | - |
+| classical_50_3 | CBLIB | TL | TL | - |
+| classical_50_4 | CBLIB | 74.5 | TL | - |
+| clay0203h | CBLIB | 1.6 | **1.3** | - |
+| clay0203m | CBLIB | 1.3 | **0.6** | - |
+| clay0204h | CBLIB | 8.6 | **7.6** | - |
+| clay0204m | CBLIB | 5.5 | **1.5** | - |
+| clay0205h | CBLIB | 41.4 | **30.7** | - |
+| clay0205m | CBLIB | 69.0 | **9.7** | - |
+| clay0303h | CBLIB | 2.2 | TL | - |
+| clay0303m | CBLIB | 2.1 | **1.1** | - |
+| clay0304h | CBLIB | 8.5 | TL | - |
+| clay0304m | CBLIB | 12.3 | **3.8** | - |
+| clay0305h | CBLIB | 85.4 | **34.2** | - |
+| clay0305m | CBLIB | TL | 14.1 | - |
+| du-opt | CBLIB | 4.9 | **3.1** | - |
+| du-opt5 | CBLIB | 5.3 | **1.4** | - |
+| estein4_A | CBLIB | 0.1 | TL | - |
+| estein4_B | CBLIB | **0.2** | 0.9 | - |
+| estein4_C | CBLIB | 0.1 | TL | - |
+| estein4_nr22 | CBLIB | 0.1 | TL | - |
+| estein5_A | CBLIB | 4.2 | TL | - |
+| estein5_B | CBLIB | 1.4 | TL | - |
+| estein5_C | CBLIB | 1.3 | TL | - |
+| estein5_nr1 | CBLIB | 1.7 | TL | - |
+| estein5_nr21 | CBLIB | 2.4 | TL | - |
+| ex1223a | CBLIB | **0.0** | 0.0 | - |
+| fac3 | CBLIB | 0.1 | TL | - |
+| flay02h | CBLIB | 0.2 | TL | - |
+| flay02m | CBLIB | 0.1 | TL | - |
+| flay03h | CBLIB | 0.9 | TL | - |
+| flay03m | CBLIB | 0.3 | TL | - |
+| flay04h | CBLIB | 8.7 | TL | - |
+| flay04m | CBLIB | 6.9 | TL | - |
+| flay05h | CBLIB | TL | TL | - |
+| flay05m | CBLIB | TL | TL | - |
+| flay06h | CBLIB | TL | TL | - |
+| flay06m | CBLIB | TL | TL | - |
+| gbd | CBLIB | **0.0** | 0.0 | - |
+| m3 | CBLIB | **0.1** | 0.2 | - |
+| m6 | CBLIB | **1.7** | 1.8 | - |
+| m7 | CBLIB | 4.3 | **3.2** | - |
+| m7_ar25_1 | CBLIB | 4.1 | **2.8** | - |
+| m7_ar2_1 | CBLIB | 9.7 | **6.8** | - |
+| m7_ar3_1 | CBLIB | 10.7 | **5.6** | - |
+| m7_ar4_1 | CBLIB | 2.6 | **2.6** | - |
+| m7_ar5_1 | CBLIB | 16.4 | **10.5** | - |
+| netmod_dol2 | CBLIB | **22.0** | 25.3 | - |
+| netmod_kar1 | CBLIB | **3.9** | 8.2 | - |
+| netmod_kar2 | CBLIB | **4.6** | 7.8 | - |
+| no7_ar25_1 | CBLIB | TL | 44.2 | - |
+| no7_ar2_1 | CBLIB | 85.7 | **21.1** | - |
+| no7_ar3_1 | CBLIB | TL | 73.1 | - |
+| no7_ar4_1 | CBLIB | TL | TL | - |
+| no7_ar5_1 | CBLIB | 97.3 | **62.0** | - |
+| nvs03 | CBLIB | **0.0** | 0.0 | - |
+| o7 | CBLIB | TL | TL | - |
+| o7_2 | CBLIB | TL | TL | - |
+| o7_ar25_1 | CBLIB | TL | TL | - |
+| o7_ar2_1 | CBLIB | TL | 84.3 | - |
+| o7_ar3_1 | CBLIB | TL | TL | - |
+| o7_ar4_1 | CBLIB | TL | TL | - |
+| o7_ar5_1 | CBLIB | TL | TL | - |
+| o8_ar4_1 | CBLIB | TL | TL | - |
+| o9_ar4_1 | CBLIB | TL | TL | - |
+| pp-n10-d10 | CBLIB | **0.0** | 0.1 | - |
+| pp-n10-d10000 | CBLIB | **0.0** | 3.3 | - |
+| pp-n100-d10 | CBLIB | **3.1** | 5.4 | - |
+| pp-n100-d10000 | CBLIB | TL | TL | - |
+| pp-n1000-d10 | CBLIB | TL | TL | - |
+| pp-n1000-d10000 | CBLIB | TL | TL | - |
+| robust_100_0 | CBLIB | TL | TL | - |
+| robust_100_1 | CBLIB | TL | TL | - |
+| robust_50_0 | CBLIB | **0.9** | 1.3 | - |
+| robust_50_1 | CBLIB | 1.8 | TL | - |
+| robust_50_2 | CBLIB | 1.7 | TL | - |
+| robust_50_3 | CBLIB | 2.5 | TL | - |
+| robust_50_4 | CBLIB | 21.0 | TL | - |
+| shortfall_100_0 | CBLIB | TL | TL | - |
+| shortfall_100_1 | CBLIB | TL | TL | - |
+| shortfall_50_0 | CBLIB | TL | 35.2 | - |
+| shortfall_50_1 | CBLIB | 38.9 | **3.9** | - |
+| shortfall_50_2 | CBLIB | 45.4 | **6.1** | - |
+| shortfall_50_3 | CBLIB | 119.0 | **26.5** | - |
+| shortfall_50_4 | CBLIB | 87.2 | **11.6** | - |
+| slay04h | CBLIB | **0.5** | 1.7 | - |
+| slay04m | CBLIB | **0.3** | 0.5 | - |
+| slay05h | CBLIB | **0.9** | 1.1 | - |
+| slay05m | CBLIB | **0.5** | 0.6 | - |
+| slay06h | CBLIB | **3.8** | 4.4 | - |
+| slay06m | CBLIB | **1.2** | 1.3 | - |
+| slay07h | CBLIB | 10.2 | **3.6** | - |
+| slay07m | CBLIB | 1.2 | **1.0** | - |
+| slay08h | CBLIB | 9.3 | **6.3** | - |
+| slay08m | CBLIB | 2.1 | **1.6** | - |
+| slay09h | CBLIB | 35.7 | **15.1** | - |
+| slay09m | CBLIB | 5.9 | **1.2** | - |
+| slay10h | CBLIB | 100.2 | TL | - |
+| slay10m | CBLIB | 36.4 | **12.4** | - |
+| sssd-strong-15-4 | CBLIB | 7.1 | **3.3** | - |
+| sssd-strong-15-8 | CBLIB | **16.9** | 23.4 | - |
+| sssd-strong-20-4 | CBLIB | 2.4 | **1.7** | - |
+| sssd-strong-20-8 | CBLIB | **11.7** | 78.0 | - |
+| sssd-strong-25-4 | CBLIB | **0.5** | 5.1 | - |
+| sssd-strong-25-8 | CBLIB | TL | TL | - |
+| sssd-strong-30-4 | CBLIB | 8.8 | **5.0** | - |
+| sssd-strong-30-8 | CBLIB | TL | 69.0 | - |
+| sssd-weak-15-4 | CBLIB | 5.1 | **3.7** | - |
+| sssd-weak-15-8 | CBLIB | **8.0** | 13.3 | - |
+| sssd-weak-20-4 | CBLIB | **0.8** | 3.5 | - |
+| sssd-weak-20-8 | CBLIB | 43.2 | **38.7** | - |
+| sssd-weak-25-4 | CBLIB | 1.9 | **1.8** | - |
+| sssd-weak-25-8 | CBLIB | 102.4 | TL | - |
+| sssd-weak-30-4 | CBLIB | **6.7** | 8.1 | - |
+| sssd-weak-30-8 | CBLIB | 75.0 | TL | - |
+| tls12 | CBLIB | TL | TL | - |
+| tls2 | CBLIB | **0.1** | 0.4 | - |
+| tls4 | CBLIB | **5.7** | 7.1 | - |
+| tls5 | CBLIB | TL | TL | - |
+| tls6 | CBLIB | TL | TL | - |
+| tls7 | CBLIB | TL | TL | - |
+| turbine07 | CBLIB | 0.1 | **0.0** | - |
+| turbine07GF | CBLIB | **0.0** | 0.0 | - |
+| turbine07_aniso | CBLIB | 0.1 | TL | - |
+| turbine07_lowb | CBLIB | **0.5** | 1.9 | - |
+| turbine07_lowb_aniso | CBLIB | 2.5 | **0.5** | - |
+| turbine54 | CBLIB | 1.2 | **0.4** | - |
+| turbine54GF | CBLIB | 0.0 | **0.0** | - |
+| uflquad-nopsc-10-100 | CBLIB | 29.7 | **7.4** | - |
+| uflquad-nopsc-10-150 | CBLIB | 46.3 | **7.2** | - |
+| uflquad-nopsc-20-100 | CBLIB | TL | 41.7 | - |
+| uflquad-nopsc-20-150 | CBLIB | TL | 64.5 | - |
+| uflquad-nopsc-30-100 | CBLIB | TL | 61.4 | - |
+| uflquad-nopsc-30-150 | CBLIB | TL | 54.0 | - |
+| uflquad-nopsc-30-200 | CBLIB | TL | TL | - |
+| uflquad-nopsc-30-300 | CBLIB | TL | TL | - |
+| uflquad-psc-10-100 | CBLIB | 4.0 | **2.6** | - |
+| uflquad-psc-10-150 | CBLIB | 7.0 | **5.8** | - |
+| uflquad-psc-20-100 | CBLIB | **16.1** | 21.0 | - |
+| uflquad-psc-20-150 | CBLIB | **23.0** | 39.5 | - |
+| uflquad-psc-30-100 | CBLIB | **18.8** | 32.7 | - |
+| uflquad-psc-30-150 | CBLIB | **2.4** | 27.1 | - |
+| uflquad-psc-30-200 | CBLIB | 24.7 | TL | - |
+| uflquad-psc-30-300 | CBLIB | TL | TL | - |
 
 </details>
 
@@ -689,6 +1115,7 @@ partly with other jobs running, so differences of a few percent are noise).
 | v0.5.0 | 58/63 | 10.7 |
 | v0.6.0 | 59/63 | 9.0 |
 | v0.7.0 | 61/63 | 9.4 |
+| v0.8.0 | 62/63 | 8.8 |
 
 v0.3.0 adds new features (barrier LP, logical constraints) rather than MILP speed, so its
 MIPLIB numbers match v0.2.1. v0.4.0 (new: QP / MIQP, better c-MIR aggregation, symmetry-breaking
@@ -706,8 +1133,10 @@ and solves 18 of the 43 hard instances against 15. v0.7.0 (objective propagation
 implications, a root cut loop that backs off on wide models, faster clique and c-MIR separation, the trivial
 objective bound, presolve substitution with implied bounds, a concurrent barrier on large roots) solves
 two more in this seed-0 run at a slightly higher geometric mean; over three seeds it is about 4% faster
-than v0.6.0 (all 189 runs: 8.7 s against 9.0 s, 184 against 179 solved). The plot shows the last four
-versions.
+than v0.6.0 (all 189 runs: 8.7 s against 9.0 s, 184 against 179 solved). v0.8.0 (quadratic
+constraints and cones; the MILP search unchanged apart from fixes) solves 62 in this run; over three
+seeds it is about 2% faster than v0.7.0 (all 189 runs: 8.5 s against 8.7 s, 184 solved each). The plot
+shows the last four versions.
 
 ## Commercial solvers
 

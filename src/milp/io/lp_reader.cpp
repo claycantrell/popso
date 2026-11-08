@@ -158,6 +158,15 @@ class LpParser {
 
   // Quadratic objective (lower triangle triplets, see Model).
   std::vector<Index> q_row_, q_col_;
+  // Quadratic constraint terms (Model::qr_*): those of the constraint being read wait in cq_ until its row exists.
+  struct CQTerm {
+    Index i, j;
+    double a;
+  };
+  std::vector<CQTerm> cq_;
+  bool in_constraint_ = false;
+  std::vector<Index> qr_row_, qr_i_, qr_j_;
+  std::vector<double> qr_val_;
   std::vector<double> q_val_;
 
   // Current expression terms (column, coefficient), in order of appearance.
@@ -468,6 +477,11 @@ void LpParser::parse_quadratic(double sign) {
     div = cur().value;
     ++pos_;
   }
+  if (in_constraint_) {
+    // A constraint's monomials as written (no 1/2): a x_i x_j adds a to the coefficient of x_i x_j.
+    for (const QTerm& t : qt) cq_.push_back({t.i, t.j, sign * t.a / div});
+    return;
+  }
   // Objective term a x_i x_j (after sign and divisor): Q_ii = 2a for a square, Q_ij = a otherwise.
   for (const QTerm& t : qt) {
     const double a = sign * t.a / div;
@@ -491,14 +505,15 @@ int LpParser::parse_expr(double& constant, int& nvars, bool quad) {
       ++pos_;
     }
     if (cur().type == T::Caret || cur().type == T::Star) {
-      error(std::string("unexpected ") + describe(cur()) + ": quadratic terms must be written inside '[ ]' in the " +
-            "objective (quadratic constraints are not supported yet)");
+      error(std::string("unexpected ") + describe(cur()) + ": quadratic terms must be written inside '[ ]'");
     }
     if (count > 0 && !had_sign) error("expected '+' or '-' before " + describe(t));
     const Token& u = cur();
     if (u.type == T::LBracket) {
-      if (!quad) error("quadratic constraints are not supported yet");
+      if (!quad) error("quadratic terms ('[ ]') are only allowed in the objective and on a constraint's left side");
+      const size_t before = cq_.size();
       parse_quadratic(sign);
+      if (in_constraint_) nvars += static_cast<int>(cq_.size() - before);
       ++count;
       continue;
     }
@@ -577,7 +592,14 @@ void LpParser::add_row(string_view name, uint32_t line, double lo, double hi) {
     row_names_.push_back(name);
     row_lb_.push_back(lo);
     row_ub_.push_back(hi);
+    for (const CQTerm& t : cq_) {
+      qr_row_.push_back(r);
+      qr_i_.push_back(std::max(t.i, t.j));
+      qr_j_.push_back(std::min(t.i, t.j));
+      qr_val_.push_back(t.a);
+    }
   }
+  cq_.clear();
   // Sum duplicate terms; keep the order of first appearance.
   if (acc_.size() < col_names_.size()) {
     acc_.resize(col_names_.size(), 0.0);
@@ -625,9 +647,13 @@ void LpParser::parse_constraint() {
     pos_ += 4;
   }
   terms_.clear();
+  cq_.clear();
   double c1 = 0.0;
   int nvars1 = 0;
-  const int n1 = parse_expr(c1, nvars1);
+  in_constraint_ = true;
+  const int n1 = parse_expr(c1, nvars1, ind_col_ < 0);
+  in_constraint_ = false;
+  if (!cq_.empty() && ind_col_ >= 0) error("quadratic terms are not allowed in an indicator constraint" + where());
   if (!is_op(cur().type)) {
     if (n1 == 0 && name.empty()) error("unexpected " + describe(cur()) + " in constraints section");
     error("expected '<=', '>=' or '='" + where() + ", found " + describe(cur()));
@@ -662,7 +688,10 @@ void LpParser::parse_constraint() {
   // "c1 op1 expr [op2 c2]": constant on the left (ranged constraints).
   double k = 0.0;
   int nvars2 = 0;
-  const int n2 = parse_expr(k, nvars2);
+  if (!cq_.empty()) error("a constraint with quadratic terms must be written 'expr op rhs'" + where());
+  in_constraint_ = true;
+  const int n2 = parse_expr(k, nvars2, true);
+  in_constraint_ = false;
   if (n2 == 0 || nvars2 == 0) error("expected a linear expression" + where() + ", found " + describe(cur()));
   if (!std::isfinite(k)) error("infinite constant term" + where());
   const double left = std::isfinite(c1) ? c1 - k : c1;
@@ -852,6 +881,11 @@ Model LpParser::parse() {
   m.sos = std::move(sos_);
   m.indicators = std::move(indicators_);
   m.q_row = std::move(q_row_);
+  m.qr_row = std::move(qr_row_);
+  m.qr_i = std::move(qr_i_);
+  m.qr_j = std::move(qr_j_);
+  m.qr_val = std::move(qr_val_);
+  m.compact_qrows();
   m.q_col = std::move(q_col_);
   m.q_val = std::move(q_val_);
   try {

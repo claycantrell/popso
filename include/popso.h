@@ -31,7 +31,14 @@
  *    semidefinite when maximizing; otherwise the status is
  *    POPSO_STATUS_NONCONVEX). Continuous QPs are solved by the barrier
  *    method (no basis); with integer variables by branch-and-bound on QP
- *    relaxations. Quadratic constraints are not supported.
+ *    relaxations.
+ *  - Rows may have quadratic terms (popso_add_qrow_terms). Each quadratic row
+ *    must be convex: one finite side, its quadratic part positive
+ *    semidefinite when the finite side is an upper bound (negative
+ *    semidefinite for a lower bound); otherwise the status is
+ *    POPSO_STATUS_NONCONVEX. Such models, continuous or not, are solved by
+ *    outer approximation (gradient cuts) inside the branch-and-bound; they
+ *    have no duals and no basis.
  *  - Besides linear rows, a model may have semi-continuous and semi-integer
  *    variables, SOS1/SOS2 constraints and indicator constraints. They are
  *    reformulated with auxiliary binaries internally; solutions and queries
@@ -114,7 +121,7 @@ extern "C" {
 #define POPSO_STATUS_INTERRUPTED 9 /* popso_interrupt or the incumbent callback stopped the solve */
 #define POPSO_STATUS_NUMERICAL_ERROR 10
 #define POPSO_STATUS_UNKNOWN 11
-#define POPSO_STATUS_NONCONVEX 12 /* the quadratic objective is not convex (concave when maximizing) */
+#define POPSO_STATUS_NONCONVEX 12 /* the quadratic objective or a quadratic row is not convex */
 
 typedef struct popso_model popso_model;
 
@@ -208,6 +215,19 @@ POPSO_API int popso_num_q_nonzeros(popso_model* m);
 /* Copies Q's lower triangle (rows[k] >= cols[k], sorted by column, then row)
  * into the arrays, which must hold popso_num_q_nonzeros() entries (size). */
 POPSO_API int popso_get_q(popso_model* m, int size, int* rows, int* cols, double* vals);
+
+/* Quadratic constraint terms: adds vals[k] * x_{vars1[k]} * x_{vars2[k]} to the
+ * activity of `row` for each k (plain monomial coefficients, no 1/2: the pair
+ * (i, j) with i != j is one term vals * x_i * x_j, (j, j) is vals * x_j^2).
+ * Repeated entries are summed. Example: row 0 as x^2 + 3 x y + 2 x <= 4 is
+ * popso_add_row with x: 2, upper bound 4, then terms (x, x, 1), (x, y, 3). */
+POPSO_API int popso_add_qrow_terms(popso_model* m, int row, int nnz, const int* vars1, const int* vars2,
+                                   const double* vals);
+/* Number of quadratic terms of a row, merged (-1 on a bad handle or row). */
+POPSO_API int popso_num_qrow_terms(const popso_model* m, int row);
+/* Copies a row's quadratic terms (vars1[k] >= vars2[k], sorted, duplicates
+ * merged) into the arrays, which must hold popso_num_qrow_terms() entries. */
+POPSO_API int popso_get_qrow_terms(const popso_model* m, int row, int size, int* vars1, int* vars2, double* vals);
 
 /* ---- Model queries (return -1 / NULL / NaN on a bad handle or index) ---- */
 

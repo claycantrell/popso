@@ -107,6 +107,12 @@ std::unique_ptr<Separator> make_mcf_separator();
 std::unique_ptr<Separator> make_clique_separator();
 std::unique_ptr<Separator> make_implied_bound_separator();
 std::unique_ptr<Separator> make_zerohalf_separator();
+// Gradient cuts of MipProblem::quad_rows at the LP point (outer approximation; quad_oa.cpp).
+std::unique_ptr<Separator> make_quad_oa_separator();
+// Gradient cuts of the quadratic rows violated at x by more than tol (absolute, as max_violation): for a row with g
+// convex in the direction of its finite side, g(x^) + grad g(x^) (x - x^) <= hi (>= lo), valid for every x. Returns
+// the number appended to `out`.
+int quad_oa_cuts(const MipProblem& p, const double* x, double tol, std::vector<Cut>& out);
 
 // Lifted cover inequality for the binary knapsack sum_k w_k z_k <= b (w_k > 0, LP values zs_k):
 // a minimal cover C chosen greedily by (1 - zs) / w, lifted with the superadditive function of

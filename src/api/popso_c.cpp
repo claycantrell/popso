@@ -624,6 +624,72 @@ int popso_get_q(popso_model* m, int size, int* rows, int* cols, double* vals) {
   });
 }
 
+namespace {
+
+// The quadratic terms of one row, duplicates merged and zeros dropped, sorted by (i, j) with i >= j.
+using QrowTerms = std::vector<std::pair<std::pair<Index, Index>, double>>;
+void qrow_terms(const popso_model* m, int row, QrowTerms& t) {
+  t.clear();
+  const milp::Model& md = m->model;
+  for (size_t k = 0; k < md.qr_val.size(); ++k) {
+    if (md.qr_row[k] == row) t.push_back({{md.qr_i[k], md.qr_j[k]}, md.qr_val[k]});
+  }
+  std::sort(t.begin(), t.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  size_t w = 0;
+  for (size_t k = 0; k < t.size(); ++k) {
+    if (w > 0 && t[w - 1].first == t[k].first) {
+      t[w - 1].second += t[k].second;
+    } else {
+      t[w++] = t[k];
+    }
+  }
+  t.resize(w);
+  t.erase(std::remove_if(t.begin(), t.end(), [](const auto& e) { return e.second == 0.0; }), t.end());
+}
+
+}  // namespace
+
+int popso_add_qrow_terms(popso_model* m, int row, int nnz, const int* vars1, const int* vars2, const double* vals) {
+  return guarded(m, [&] {
+    check_row(m, row);
+    if (nnz < 0 || (nnz > 0 && (!vars1 || !vars2 || !vals))) {
+      fail(POPSO_ERROR_INVALID_ARGUMENT, "add_qrow_terms: invalid entries");
+    }
+    for (int k = 0; k < nnz; ++k) {
+      check_var(m, vars1[k]);
+      check_var(m, vars2[k]);
+      if (!std::isfinite(vals[k])) fail(POPSO_ERROR_INVALID_ARGUMENT, "add_qrow_terms: coefficient must be finite");
+    }
+    for (int k = 0; k < nnz; ++k) {
+      if (vals[k] != 0.0) m->model.add_qrow(row, vars1[k], vars2[k], vals[k]);
+    }
+    touched(m);
+  });
+}
+
+int popso_num_qrow_terms(const popso_model* m, int row) {
+  if (!m || row < 0 || row >= m->model.num_rows()) return -1;
+  QrowTerms t;
+  qrow_terms(m, row, t);
+  return static_cast<int>(t.size());
+}
+
+int popso_get_qrow_terms(const popso_model* m, int row, int size, int* vars1, int* vars2, double* vals) {
+  return guarded(m, [&] {
+    check_row(m, row);
+    QrowTerms t;
+    qrow_terms(m, row, t);
+    const int n = static_cast<int>(t.size());
+    if (size < n) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_qrow_terms: the arrays need " + std::to_string(n) + " entries");
+    if (n > 0 && (!vars1 || !vars2 || !vals)) fail(POPSO_ERROR_INVALID_ARGUMENT, "get_qrow_terms: null array");
+    for (int k = 0; k < n; ++k) {
+      vars1[k] = t[k].first.first;
+      vars2[k] = t[k].first.second;
+      vals[k] = t[k].second;
+    }
+  });
+}
+
 int popso_num_vars(const popso_model* m) { return m ? m->model.num_cols() : -1; }
 int popso_num_rows(const popso_model* m) { return m ? m->model.num_rows() : -1; }
 int popso_num_sos(const popso_model* m) { return m ? static_cast<int>(m->model.sos.size()) : -1; }

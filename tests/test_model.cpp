@@ -85,3 +85,17 @@ TEST(model_validate_errors) {
   m3.row_names.push_back("extra");
   CHECK_THROWS(m3.validate(), std::runtime_error);
 }
+
+TEST(model_compact_qrows) {
+  // Duplicates (an MPS QCMATRIX lists both halves of an off-diagonal pair) merge, zeros drop, the order is (row, i, j).
+  Model m;
+  m.qr_row = {1, 0, 1, 0, 1, 0};
+  m.qr_i = {2, 1, 2, 0, 1, 1};
+  m.qr_j = {0, 0, 0, 0, 1, 0};
+  m.qr_val = {0.5, 3.0, 0.5, 2.0, 1.0, -3.0};
+  m.compact_qrows();
+  REQUIRE(m.qr_val.size() == 3);
+  CHECK(m.qr_row[0] == 0 && m.qr_i[0] == 0 && m.qr_j[0] == 0 && m.qr_val[0] == 2.0);  // (0, 1, 0) cancelled
+  CHECK(m.qr_row[1] == 1 && m.qr_i[1] == 1 && m.qr_j[1] == 1 && m.qr_val[1] == 1.0);
+  CHECK(m.qr_row[2] == 1 && m.qr_i[2] == 2 && m.qr_j[2] == 0 && m.qr_val[2] == 1.0);
+}

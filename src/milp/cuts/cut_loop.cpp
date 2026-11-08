@@ -222,6 +222,7 @@ CutLoopStats cut_loop(const MipProblem& p, DualSimplex& lp, const CutLoopOptions
   if (opt.clique) seps.push_back(make_clique_separator());
   if (opt.implied_bound && !std::getenv("MILP_NO_IMPLBD")) seps.push_back(make_implied_bound_separator());
   if (opt.zerohalf && !std::getenv("MILP_NO_ZEROHALF")) seps.push_back(make_zerohalf_separator());
+  if (!p.quad_rows.empty()) seps.push_back(make_quad_oa_separator());  // outer approximation of quadratic rows
   if (const char* only = std::getenv("MILP_ONLY_SEPA")) {
     // Diagnostics: keep only the named separators (comma list, e.g. "mir,implbd").
     const std::string list = std::string(",") + only + ",";

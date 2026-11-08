@@ -17,6 +17,7 @@
 #include "milp/core/model.hpp"
 #include "milp/core/timer.hpp"
 #include "milp/io/anonymize.hpp"
+#include "milp/io/cbf_reader.hpp"
 #include "milp/io/lp_reader.hpp"
 #include "milp/io/mps_reader.hpp"
 #include "milp/io/solution.hpp"
@@ -35,13 +36,14 @@ void on_sigint(int) {
 
 void print_usage(std::FILE* out) {
   std::fprintf(out,
-               "usage: popso <model.mps|model.lp>[.gz] [options]\n"
+               "usage: popso <model.mps|model.lp|model.cbf>[.gz] [options]\n"
                "options:\n"
                "  --sol <file>          write solution file (\"name value\" .sol format)\n"
                "  --start <file>        starting solution (same format; may be partial)\n"
                "  --duals <file>        write row duals and reduced costs (\"row|col name value\"): LPs and QPs;\n"
                "                        for a MILP those of the LP with the integers fixed at the solution\n"
-               "  --format <mps|lp>     input format (default: from the file extension, .lp = LP, else MPS;\n"
+               "  --format <mps|lp|cbf> input format (default: from the file extension, .lp = LP, .cbf = CBF\n"
+               "                        (conic benchmark format: linear, quadratic and rotated cones), else MPS;\n"
                "                        gzipped files (.mps.gz, .lp.gz) are detected and decompressed)\n"
                "  --time-limit <sec>    wall-clock time limit (default: none)\n"
                "  --threads <n>         number of threads (0 = all cores, default)\n"
@@ -88,13 +90,15 @@ double parse_double_arg(const char* opt, const char* s) {
   return v;
 }
 
-// Input format from --format, else from the extension (.lp or .lp.gz, case-insensitive).
-bool is_lp_format(const std::string& format, const std::string& file) {
-  if (!format.empty()) return format == "lp";
+// Input format from --format, else from the extension (.lp / .cbf, also .gz, case-insensitive; anything else MPS).
+std::string input_format(const std::string& format, const std::string& file) {
+  if (!format.empty()) return format;
   std::string name = file;
   for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   if (name.size() >= 3 && name.compare(name.size() - 3, 3, ".gz") == 0) name.resize(name.size() - 3);
-  return name.size() >= 3 && name.compare(name.size() - 3, 3, ".lp") == 0;
+  if (name.size() >= 3 && name.compare(name.size() - 3, 3, ".lp") == 0) return "lp";
+  if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".cbf") == 0) return "cbf";
+  return "mps";
 }
 
 long long parse_int_arg(const char* opt, const char* s) {
@@ -132,7 +136,7 @@ int main(int argc, char** argv) {
       start_path = value();
     } else if (!std::strcmp(a, "--format")) {
       format = value();
-      if (format != "mps" && format != "lp") usage_error("format must be 'mps' or 'lp'");
+      if (format != "mps" && format != "lp" && format != "cbf") usage_error("format must be 'mps', 'lp' or 'cbf'");
     } else if (!std::strcmp(a, "--time-limit")) {
       params.time_limit = parse_double_arg(a, value());
       if (params.time_limit < 0) usage_error("time limit must be nonnegative");
@@ -211,7 +215,8 @@ int main(int argc, char** argv) {
   milp::Timer timer;
   milp::Model model;
   try {
-    model = is_lp_format(format, model_path) ? milp::read_lp(model_path) : milp::read_mps(model_path);
+    const std::string fmt = input_format(format, model_path);
+    model = fmt == "lp" ? milp::read_lp(model_path) : fmt == "cbf" ? milp::read_cbf(model_path) : milp::read_mps(model_path);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "milp: error reading model: %s\n", e.what());
     return 1;

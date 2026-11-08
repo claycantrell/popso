@@ -21,6 +21,9 @@ struct FjLimits {
   const std::atomic<bool>* stop = nullptr;  // external abort flag
   // Called every ~1000 steps with the effort so far (may block); false stops FJ.
   std::function<bool(long long)> checkpoint;
+  // > 0: after the first, the best point is reported at most every this many effort units and at the end (each
+  // report is an incumbent check of the whole model: savsched1's 2335 improving points took 8.4 s of checks).
+  long long report_effort = 0;
 };
 
 struct FjStats {

@@ -143,7 +143,9 @@ def main():
     for (seed, (side, *_)), res in zip(plan, results):
         for r in res["results"]:
             name = r["instance"]
-            ok = r["class"] == "ok"
+            # Solved: agreeing with the reference, or optimal and verified where there is none (QPLIB / CBLIB
+            # instances without references counted as unsolved before: every time the limit, every ratio 1).
+            ok = r["class"] == "ok" or (r["class"] == "noref" and r.get("status") == "optimal")
             if r["class"] == "WRONG":
                 wrong[side].append((name, seed, r.get("message", "")))
             solved[side] += ok

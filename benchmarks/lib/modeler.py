@@ -171,7 +171,7 @@ def _merge(pairs):
 class Constraint:
     """expr (sense) 0, normalized to  terms (sense) rhs."""
 
-    __slots__ = ("terms", "sense", "rhs", "name", "index")
+    __slots__ = ("terms", "sense", "rhs", "name", "index", "quad")
 
     def __init__(self, expr, sense):
         self.terms = expr.terms
@@ -179,6 +179,7 @@ class Constraint:
         self.rhs = -expr.const
         self.name = None
         self.index = None
+        self.quad = {}  # quadratic terms c * x_i * x_j: {(i, j) with i >= j: c} (Model.add_qterm)
 
     def __bool__(self):  # guard against chained comparisons
         raise TypeError("constraints have no truth value")
@@ -193,6 +194,7 @@ class Model:
         self.sos = []         # (name, type, [Var], [weight])
         self.indicators = []  # (Var, value, Constraint)
         self.quad = {}        # objective terms coef * x_i * x_j: {(i, j) with i >= j: coef}
+        self.obj_const = 0.0  # objective constant (MPS: minus the objective row's RHS)
 
     def add_var(self, lb=0.0, ub=INF, obj=0.0, vtype="C", name=None):
         vtype = str(vtype)
@@ -227,6 +229,11 @@ class Model:
         i, j = max(v1.index, v2.index), min(v1.index, v2.index)
         self.quad[(i, j)] = self.quad.get((i, j), 0.0) + float(coef)
 
+    def add_qterm(self, con, v1, v2, coef):
+        """Adds coef * v1 * v2 (coef * v1^2 if v1 is v2) to constraint con's left side (written as QCMATRIX)."""
+        i, j = max(v1.index, v2.index), min(v1.index, v2.index)
+        con.quad[(i, j)] = con.quad.get((i, j), 0.0) + float(coef)
+
     def add_indicator(self, binvar, value, con, name=None):
         """binvar == value (0 or 1) implies the constraint con."""
         if not isinstance(con, Constraint) or value not in (0, 1) or binvar.vtype != "B":
@@ -260,6 +267,8 @@ class Model:
             f.write(text)
 
     def to_lp(self):
+        if any(c.quad for c in self.constrs):
+            raise ValueError("quadratic constraints are written as MPS (QCMATRIX) only")
         cols = [(v.name, v.obj, v.lb, v.ub, v.vtype) for v in self.vars]
         rows = []
         for c in self.constrs:
@@ -269,7 +278,7 @@ class Model:
         inds = [(c.name, b.name, val, c.sense, c.rhs, [(v.name, a) for v, a in c.terms.items()])
                 for b, val, c in self.indicators]
         quad = [(self.vars[i].name, self.vars[j].name, c) for (i, j), c in sorted(self.quad.items()) if c != 0.0]
-        return lp_text(self.name, self.sense, 0.0, cols, rows, sos, inds, quad)
+        return lp_text(self.name, self.sense, self.obj_const, cols, rows, sos, inds, quad)
 
     def to_mps(self):
         out = [f"NAME {self.name}"]
@@ -307,6 +316,8 @@ class Model:
         if in_int:
             out.append("    MARKER    'MARKER'                 'INTEND'")
         out.append("RHS")
+        if self.obj_const != 0.0:
+            out.append(f"    RHS1      {'OBJ':<8}  {_num(-self.obj_const)}")
         for c in allc:
             if c.rhs != 0.0:
                 out.append(f"    RHS1      {c.name:<8}  {_num(c.rhs)}")
@@ -326,6 +337,19 @@ class Model:
                 if c != 0.0:
                     q = 2.0 * c if i == j else c
                     out.append(f"    {self.vars[j].name:<8}  {self.vars[i].name:<8}  {_num(q)}")
+        for c in self.constrs:
+            if not any(v != 0.0 for v in c.quad.values()):
+                continue
+            # x' Q x without 1/2, Q symmetric: a monomial c x_i x_j (i != j) as two entries of c / 2
+            out.append(f"QCMATRIX   {c.name}")
+            for (i, j), q in sorted(c.quad.items()):
+                if q == 0.0:
+                    continue
+                if i == j:
+                    out.append(f"    {self.vars[i].name:<8}  {self.vars[j].name:<8}  {_num(q)}")
+                else:
+                    out.append(f"    {self.vars[i].name:<8}  {self.vars[j].name:<8}  {_num(0.5 * q)}")
+                    out.append(f"    {self.vars[j].name:<8}  {self.vars[i].name:<8}  {_num(0.5 * q)}")
         if self.indicators:
             out.append("INDICATORS")
             for b, val, c in self.indicators:

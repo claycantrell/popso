@@ -5,7 +5,9 @@
 [![ci](https://github.com/gozwei/popso/actions/workflows/ci.yml/badge.svg)](https://github.com/gozwei/popso/actions/workflows/ci.yml)
 
 **popso** (Polkowski's Optimization Solver) is an open-source solver for **mixed-integer linear programs (MILP)** and **linear programs
-(LP)**, and, since v0.4, for **convex quadratic programs (QP)** and **mixed-integer convex quadratic programs (MIQP)**. It is written from scratch in C++20 using only the standard library.
+(LP)**, since v0.4 for **convex quadratic programs (QP)** and **mixed-integer convex quadratic programs (MIQP)**, and, since v0.8, for
+**convex quadratically constrained and second-order cone programs** (QCQP / MIQCQP, SOCP / MISOCP) and quadratic models over
+binaries, convex or not. It is written from scratch in C++20 using only the standard library.
 
 This is a fun side project by [Marcin Polkowski](https://marcinpolkowski.com). The goal is
 a fully open-source solver that holds its own against the best solvers on real
@@ -18,17 +20,20 @@ instances, and is faster overall, than the open-source solvers HiGHS and SCIP:
 
 | solver | solved | shifted geomean (s) |
 |---|---|---|
-| popso | 61/63 | 9.4 |
+| popso | 62/63 | 8.8 |
 | HiGHS 1.15 | 53/63 | 18.9 |
 | SCIP 10 | 50/63 | 21.3 |
 
 On the 43 harder instances of the same collection that no solver finishes in 2 minutes, with a
 10-minute limit, popso solves 16, HiGHS 12 and SCIP 6. On the full 240-instance MIPLIB 2017
-benchmark set (2 minutes, another machine) it solves 89, HiGHS 74 and SCIP 65.
+benchmark set (2 minutes, another machine) it solves 89, HiGHS 74 and SCIP 65. On 346 models with
+quadratic constraints, second-order cones or nonconvex quadratics over binaries from
+[QPLIB](https://qplib.zib.de) and [CBLIB](https://cblib.zib.de) (2 minutes, 1 thread, another
+machine) it solves 186 and SCIP 101.
 
 These numbers come from single runs and have caveats. See **[BENCHMARKS.md](BENCHMARKS.md)** for
 the setup, per-instance results, the hard instances, the full benchmark set, the generated benchmark
-families and popso's progress across versions, and
+families, the quadratic models and popso's progress across versions, and
 **[CHANGELOG.md](CHANGELOG.md)** for what each version can do.
 
 ## Build
@@ -150,7 +155,7 @@ no names, no per-row or per-column data and no paths.
   reproduce the solution's objective (relative tolerance 1e-6; for fixed-MIP duals, if it is worse)
   they are dropped ("Duals: dropped" in the log, no duals returned). An interrupt or the time limit
   (at least 1 s is allowed for the recovery) also gives up on them.
-- **Continuous QPs**: from the barrier's final point (see below).
+- **Continuous QPs**: from the interior point's final point (see below).
 - Signs, in the model's objective sense: when minimizing, y_i >= 0 at an active row lower bound and
   <= 0 at an upper one, d_j >= 0 at a variable's lower bound and <= 0 at its upper one; the opposite
   when maximizing.
@@ -175,13 +180,20 @@ End
   semidefinite when maximizing. popso checks this before solving (a sparse factorization of the
   scaled Q) and reports the status `NONCONVEX` otherwise; Q that is semidefinite only up to a
   relative 1e-6 (round-off in the input) is accepted with that much added to its diagonal.
+  Exception: a nonconvex objective whose quadratic terms all involve **binaries** (products of two
+  binaries, a binary's square, a binary times a column with finite bounds, any term with a fixed
+  column) is linearized exactly (a product of binaries becomes a new column y with
+  y >= x_i + x_j - 1, y <= x_i, y <= x_j; a binary times a bounded column takes the four McCormick
+  rows, exact at a binary) and solved as a MILP.
 - **Presolve** for quadratic models removes fixed and empty columns (their quadratic terms move
   into the linear part), fixes columns without quadratic terms by dual arguments, turns
   singleton rows into bounds and drops empty and redundant rows; no column is substituted.
-- **Continuous QPs** are solved by the barrier method with Q in the Newton system (the augmented
-  system; the normal equations when Q is diagonal). There is no crossover and no basis: the
+- **Continuous QPs** are solved by the conic interior-point method (homogeneous self-dual
+  embedding, Q in the Newton system), with the barrier method (Q in the augmented system; the
+  normal equations when Q is diagonal) for anything it does not end with an optimum (an
+  infeasible or unbounded QP, numerical trouble). There is no crossover and no basis: the
   result is the primal point, the objective and the **dual values** (row duals y and reduced
-  costs d = c + Qx - A'y of the final interior point, so complementarity holds to the barrier's
+  costs d = c + Qx - A'y of the final interior point, so complementarity holds to the method's
   tolerance; when minimizing, y >= 0 at an active lower row bound and <= 0 at an upper one, the
   opposite when maximizing). Infeasible and unbounded QPs are confirmed by the simplex method on
   auxiliary LPs.
@@ -190,15 +202,17 @@ End
   method warm-started from the parent node. Node bounds are Lagrangian bounds that stay valid for
   inexact solves, and they also tighten integer bounds (reduced-cost fixing). The search uses
   domain propagation, reliability branching, rounding, a QP dive and feasibility jump on a
-  linearized objective; it is single-threaded and deterministic.
+  linearized objective; it is single-threaded and deterministic. With 2 or more threads (default
+  mode), it races the outer approximation in the MILP search (the objective's epigraph row and its
+  tangent planes) on the other threads: the first to finish stops the other, else the better
+  incumbent with the tighter bound is reported (`MILP_MIQP_RACE=0`: the MIQP search alone).
 - **Sums of squares of integer variables** (a diagonal Q whose columns are all integer, e.g.
   squared integer target errors, plus any linear terms) are solved as a MILP instead, with the full
   MILP machinery (presolve, cuts, parallel search): each square x^2 of an integer is exactly the
   maximum of its tangent lines at the integers, and popso adds those tangents around the continuous
   relaxation's point, checks every solution against the exact objective and adds more where needed.
   This relaxation is much tighter than the continuous x^2, often closing the gap at the root.
-- Cutting planes are not used for quadratic models yet, and quadratic constraints are not
-  supported (MPS `QCMATRIX`, LP brackets in constraints: an error).
+- Cutting planes are not used for MIQPs solved by this branch-and-bound yet.
 
 The C API sets Q with `popso_set_q` / `popso_add_q_entries` (and reads it with
 `popso_get_q`) and returns the duals of a continuous QP with `popso_get_duals` /
@@ -211,6 +225,60 @@ x = m.add_var(lb=-10, ub=10, name="x")
 y = m.add_var(lb=-10, ub=10, vtype=popso.INTEGER, name="y")
 m.set_objective((x - 1) ** 2 + x * y + 2 * y * y - 3 * y)   # a popso.QuadExpr
 r = m.solve()
+```
+
+### Quadratic constraints (convex QCQP and MIQCQP, since v0.8)
+
+Rows may have quadratic terms: `a'x + x'Q_i x <= b` (or `>= b`). In MPS they come in a `QCMATRIX
+<row>` section per row (the whole symmetric matrix, no 1/2) or a CPLEX `QSECTION <row>`; in the LP
+format in brackets on the constraint's left side:
+
+```
+Maximize
+ obj: x + y
+Subject To
+ disk: [ x ^ 2 + y ^ 2 ] <= 2
+ c2: x - 3 y + [ x ^ 2 + 2 x * y + 3 y ^ 2 ] <= 10
+General
+ y
+End
+```
+
+- Each quadratic row must be **convex**: one finite side, its quadratic part positive
+  semidefinite towards a finite upper side (negative semidefinite towards a lower side), or a
+  **second-order cone** over the columns' bounds: `x1^2 + ... + xk^2 <= t^2` with `t >= 0`
+  (weights, shifts and a constant allowed: one sheet of a hyperboloid) and the rotated
+  `x1^2 + ... + xk^2 <= c u v` with `u, v >= 0`. Ranged rows, equalities and other rows are
+  reported as `NONCONVEX`, except rows whose quadratic terms all involve **binaries** (as for the
+  objective above): convex or not, they are linearized exactly and become linear rows of the MILP
+  (a quadratic knapsack row over 262 binaries, QPLIB_10010: optimal in 10 s, where tangent planes
+  left a 2.3% gap after 60 s).
+- Such models, continuous or mixed-integer, are solved by **outer approximation inside the MILP
+  search**: the quadratic rows stay out of the LP and are represented by gradient cuts (tangent
+  planes) added at the start, in the root cut loop and at every node whose LP point violates them;
+  every candidate solution is checked against the exact rows, and one that violates only them gets
+  its continuous part from the fixed-integer outer approximation. A convex quadratic objective
+  goes along as an epigraph row. So the MILP machinery (cuts, heuristics, parallel tree) applies;
+  presolve, symmetry handling and restarts are off for these models for now.
+- **Continuous** models are solved by a **conic interior-point method** (homogeneous self-dual,
+  Nesterov-Todd scaling, as in ECOS) on the second-order cone form: each convex quadratic row
+  becomes a rotated cone through a factor of its matrix. With integer variables its optimum gives
+  the first tangent planes, so the root LP starts at the continuous relaxation's bound. A
+  continuous model gets **dual values** too (row duals, a quadratic row's multiplier, reduced costs
+  d = c + Qx - A'y - sum_q y_q grad q(x); none at a cone's apex, where no finite multiplier exists);
+  no basis.
+
+Conic models can also be read in the **CBF** format of CBLIB (`.cbf`, `.cbf.gz`, or `--format cbf`): cones
+F, L+, L-, L= and Q, QR on variables and on affine rows (a member that is not a single column gets its own
+column), integers; semidefinite and exponential / power cones are rejected.
+
+The C API adds a row's terms with `popso_add_qrow_terms` (monomial coefficients: `(i, j, c)` is
+`c x_i x_j`) and reads them with `popso_get_qrow_terms`; in Python, comparing a quadratic
+expression makes a quadratic constraint:
+
+```python
+m.add_constr(x * x + y ** 2 <= 2, name="disk")
+m.add_constr(t >= (z - 2.6) * (z - 2.6))   # an epigraph: t >= (z - 2.6)^2
 ```
 
 ### C library
@@ -317,8 +385,8 @@ pip install ./python
 
 ## What's inside
 
-- **QP and MIQP:** convexity test by a sparse factorization of the scaled Hessian; the barrier
-  method with the Hessian in the augmented system; branch-and-bound with a warm-started dual
+- **QP and MIQP:** convexity test by a sparse factorization of the scaled Hessian; the conic
+  interior-point method and the barrier method with the Hessian in the augmented system; branch-and-bound with a warm-started dual
   active-set QP solver at the nodes, safe Lagrangian bounds, reliability branching and QP-based
   heuristics. Sums of squares of integer variables are solved as a MILP with exact tangent rows.
 - **LP:** bounded dual simplex with hyper-sparse LU factorization, Forrest–Tomlin updates and
@@ -360,21 +428,28 @@ pip install ./python
 
 ## Current limitations
 
-- **Problem classes:** LP, MILP, and convex QP / MIQP (quadratic objective, linear
-  constraints). No quadratic constraints, no general nonlinear constraints, no nonconvex
-  objectives.
-- **Quadratic models:** a basic presolve only, no cutting planes, no parallel MIQP search; the
-  node QP solver keeps a dense copy of the Hessian, so MIQPs with more than 3000 columns fall back
-  to the much slower barrier at every node. Dual values for continuous QPs come from the interior
-  point (no basis); none for MIQPs. The incumbent callback is not called for quadratic
-  objectives. MIQP performance is far from the commercial solvers.
+- **Problem classes:** LP, MILP, convex QP / MIQP, and (since v0.8) convex QCQP / MIQCQP and
+  SOCP / MISOCP (quadratic rows, or the conic benchmark format CBF with linear, quadratic and
+  rotated cones). No semidefinite or exponential cones, no general nonlinear constraints, no
+  nonconvex objectives or constraints except those over binaries (linearized exactly).
+- **Quadratic models:** a basic presolve only, no cutting planes in the MIQP branch-and-bound, which
+  is single-threaded (with 2 or more threads it races the outer approximation in the parallel MILP
+  search); its node QP solver keeps a dense copy of the Hessian, so MIQPs with more than 3000
+  columns fall back to the much slower barrier at every node. Dual values for continuous QPs come
+  from the interior point (no basis); none for MIQPs. The incumbent callback is not called for
+  quadratic objectives. MIQP performance is far from the commercial solvers.
+- **Quadratic constraints:** presolve, symmetry handling and restarts are off for these models;
+  in deterministic mode the tangent cuts found at nodes are applied only between the rounds of the
+  parallel search, so such models can be much slower there. Rows are judged to the absolute 1e-6
+  tolerance (a cone by the distance in its norm form), which matters for rows on a scale far
+  below 1. Dual values only for continuous models.
 - **Model features:** semi-continuous variables, SOS constraints and indicator constraints
   are reformulated with binary variables (big-M rows where bounds allow). There is no
   specialized branching on SOS sets, and presolve is skipped for models with constraints
   that have no finite big-M. No other general constraints (abs, min/max, piecewise-linear
   objectives).
 - **Input and interfaces:**
-  - MPS and LP-format input only (plain or gzipped; no bzip2 / xz).
+  - MPS, LP-format and CBF input only (plain or gzipped; no bzip2 / xz).
   - The only callback is the incumbent callback (no cut, branching or heuristic callbacks, no
     progress callback). LP duals are recovered after the solve from the optimal point, which costs
     a crossover and a few simplex iterations on the original LP. No dual values for models with

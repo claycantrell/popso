@@ -536,6 +536,68 @@ static void test_quadratic(void) {
   popso_free(m);
 }
 
+static void test_quadratic_rows(void) {
+  /* max x + y s.t. x^2 + y^2 <= 2 (optimum 2 at (1, 1)); then y integer and x^2 + 3 y^2 <= 7 (x = 2, y = 1). */
+  popso_model* m = popso_create();
+  int x, y, row, n;
+  double obj, x_sol[2];
+  CHECK_OK(popso_add_var(m, -10.0, 10.0, 1.0, POPSO_CONTINUOUS, "x", &x));
+  CHECK_OK(popso_add_var(m, -10.0, 10.0, 1.0, POPSO_CONTINUOUS, "y", &y));
+  CHECK_OK(popso_set_objective_sense(m, POPSO_MAXIMIZE));
+  CHECK_OK(popso_add_row(m, 0, NULL, NULL, -POPSO_INFINITY, 2.0, "disk", &row));
+  {
+    const int v1[3] = {0, 1, 1}, v2[3] = {0, 1, 7};
+    const double c[3] = {0.5, 1.0, 1.0};
+    CHECK(popso_add_qrow_terms(m, row, 3, v1, v2, c) == POPSO_ERROR_INVALID_ARGUMENT); /* variable 7 */
+    CHECK(popso_add_qrow_terms(m, 5, 1, v1, v2, c) == POPSO_ERROR_INVALID_ARGUMENT);   /* row 5 */
+    CHECK(popso_num_qrow_terms(m, row) == 0);
+    CHECK_OK(popso_add_qrow_terms(m, row, 2, v1, v2, c));
+    CHECK_OK(popso_add_qrow_terms(m, row, 1, v1, v2, c)); /* x^2 twice: 0.5 + 0.5 */
+  }
+  CHECK(popso_num_qrow_terms(m, row) == 2);
+  CHECK(popso_num_qrow_terms(m, 3) == -1);
+  {
+    int a[2], b[2];
+    double c[2];
+    CHECK(popso_get_qrow_terms(m, row, 1, a, b, c) == POPSO_ERROR_INVALID_ARGUMENT);
+    CHECK_OK(popso_get_qrow_terms(m, row, 2, a, b, c));
+    CHECK(a[0] == 0 && b[0] == 0 && c[0] == 1.0);
+    CHECK(a[1] == 1 && b[1] == 1 && c[1] == 1.0);
+  }
+  CHECK_OK(popso_set_param(m, "threads", 1));
+  CHECK_OK(popso_solve(m));
+  CHECK(popso_get_status(m) == POPSO_STATUS_OPTIMAL);
+  CHECK_OK(popso_get_objective(m, &obj));
+  CHECK_NEAR(obj, 2.0);
+  CHECK(popso_has_duals(m) == 1);
+  {
+    double y[1];
+    CHECK_OK(popso_get_duals(m, y, 1));
+    CHECK(fabs(y[0] - 0.5) <= 1e-5); /* maximizing, upper side active: (1, 1) = 0.5 grad(x^2 + y^2) */
+  }
+  {
+    const int v1 = 1, v2 = 1;
+    const double c = 2.0;
+    CHECK_OK(popso_add_qrow_terms(m, row, 1, &v1, &v2, &c)); /* x^2 + 3 y^2 */
+  }
+  CHECK_OK(popso_set_row_bounds(m, row, -POPSO_INFINITY, 7.0));
+  CHECK_OK(popso_set_var_type(m, y, POPSO_INTEGER));
+  CHECK_OK(popso_solve(m));
+  CHECK(popso_get_status(m) == POPSO_STATUS_OPTIMAL);
+  CHECK_OK(popso_get_objective(m, &obj));
+  CHECK_NEAR(obj, 3.0);
+  CHECK_OK(popso_get_solution(m, x_sol, 2));
+  CHECK_NEAR(x_sol[0], 2.0);
+  CHECK_NEAR(x_sol[1], 1.0);
+  /* A lower side on a convex row is not convex. */
+  CHECK_OK(popso_set_row_bounds(m, row, 1.0, POPSO_INFINITY));
+  CHECK_OK(popso_solve(m));
+  CHECK(popso_get_status(m) == POPSO_STATUS_NONCONVEX);
+  n = popso_num_qrow_terms(NULL, 0);
+  CHECK(n == -1);
+  popso_free(m);
+}
+
 #define RUN(t)                     \
   do {                             \
     fprintf(stderr, "c_api: %s\n", #t); \
@@ -549,6 +611,7 @@ int main(void) {
   trace = getenv("C_API_TRACE") != NULL;
   RUN(test_basics);
   RUN(test_quadratic);
+  RUN(test_quadratic_rows);
   RUN(test_logical);
   RUN(test_build_and_solve);
   RUN(test_errors_and_params);

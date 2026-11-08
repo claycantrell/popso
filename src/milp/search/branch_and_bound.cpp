@@ -1,3 +1,5 @@
+#include "milp/conic/relaxation.hpp"
+#include "milp/conic/socp.hpp"
 #include "milp/search/branch_and_bound.hpp"
 
 #include <algorithm>
@@ -587,7 +589,21 @@ class Search : public BasisOwner {
         return;
       }
     }
-    if (!debug_sol_.empty() && p_.max_violation(debug_sol_) > 1e-6) debug_sol_.clear();  // sub-MIP rows
+    if (!debug_sol_.empty() && p_.max_violation(debug_sol_) > 1e-6) {  // sub-MIP rows
+      if (debug_root_) {
+        double iv = 0.0, lv = 0.0;
+        const double v = p_.max_violation(debug_sol_, &iv, &lv);
+        log_.log(0, "DEBUG-SOL: the point violates the problem by %.3g (integrality %.3g, linear %.3g)\n", v, iv, lv);
+        std::vector<double> act(static_cast<size_t>(p_.num_rows()), 0.0);
+        for (Index j = 0; j < p_.num_cols(); ++j)
+          for (Index k = p_.A.begin(j); k < p_.A.end(j); ++k) act[p_.A.index[k]] += p_.A.value[k] * debug_sol_[j];
+        for (Index i = 0; i < p_.num_rows(); ++i) {
+          const double vi = std::max(p_.row_lb[i] - act[i], act[i] - p_.row_ub[i]);
+          if (vi > 1e-6) log_.log(0, "DEBUG-SOL:   row %d of %d: activity %.10g, bounds [%.10g, %.10g]\n", i, p_.num_rows(), act[i], p_.row_lb[i], p_.row_ub[i]);
+        }
+      }
+      debug_sol_.clear();
+    }
     log_.log(0, "DEBUG-SOL: loaded %zu values\n", debug_sol_.size());
   }
 
@@ -1301,6 +1317,19 @@ class Search : public BasisOwner {
   std::atomic<long long> impl_branches_{0};  // branchings on violated implications
   // verified_point's fixed-integer re-solves: tried, succeeded, total LP iterations (statistics)
   mutable std::atomic<long long> polish_tried_{0}, polish_ok_{0}, polish_iters_{0};
+  // Quadratic rows: verified_point's fixed-integer repairs remembered, so a repeated candidate costs nothing:
+  // portqc_hard_1 in deterministic mode (no node outer approximation) repaired the same points node after node, each
+  // with conic solves (~1 s per node; TL at 60 s, 2.2 s with the caches). Successes by integer assignment (the repaired
+  // point is feasible for it whatever started the repair); failures by the whole point (the repair's tangents start
+  // from its continuous part, and another start may succeed: a failure kept by assignment made an all-integers-fixed
+  // node be dropped).
+  struct Repair {
+    std::vector<double> key, x;  // the assignment (successes) or the whole point (failures); the repaired point
+  };
+  mutable std::mutex repair_mu_;
+  mutable std::unordered_map<uint64_t, Repair> repair_cache_, repair_failed_;
+  mutable std::atomic<long long> repair_hits_{0};
+  std::atomic<long long> oa_rounds_{0}, oa_cuts_{0};  // outer approximation of quadratic rows at nodes
   std::atomic<long long> lp_polished_{0};  // integral node LP points re-solved warm (polish_integral_lp)
   double lost_bound_ = kInf;  // min bound of subtrees dropped for numerical reasons
   std::atomic<double> root_bound_{-kInf};  // also read by try_incumbent (incumbent callback) on other threads
@@ -1340,12 +1369,68 @@ LpStatus Search::solve_fixed_ints(const std::vector<double>& x_int, const std::v
   if (!params_.deterministic) {
     o.time_limit = time_cap >= 0.0 ? time_cap : std::max(0.0, std::min(5.0, params_.time_limit - timer_.elapsed()));
   }
-  const LpStatus st = lp.solve(o);
+  LpStatus st = lp.solve(o);
   polish_iters_ += lp.iterations();
+  // Quadratic rows: the outer approximation of the continuous part (gradient cuts at the point as rows, re-solved).
+  static const int kOaFixRounds = static_cast<int>(knob("MILP_OA_FIX_ROUNDS", 50));
+  const double oa_end = timer_.elapsed() + o.time_limit;  // the rounds share the first solve's time limit
+  for (int round = 0; st == LpStatus::Optimal && !p_.quad_rows.empty() && round < kOaFixRounds; ++round) {
+    std::vector<Cut> cuts;
+    if (quad_oa_cuts(p_, lp.x(), 1e-8, cuts) == 0) break;
+    std::vector<Index> start{0}, index;
+    std::vector<double> value, rlb, rub;
+    for (const Cut& c : cuts) {
+      index.insert(index.end(), c.idx.begin(), c.idx.end());
+      value.insert(value.end(), c.val.begin(), c.val.end());
+      start.push_back(static_cast<Index>(index.size()));
+      rlb.push_back(-kInf);
+      rub.push_back(c.rhs);
+    }
+    lp.add_rows(static_cast<Index>(rlb.size()), start, index, value, rlb, rub);
+    if (is_finite(o.time_limit)) {
+      o.time_limit = oa_end - timer_.elapsed();
+      if (o.time_limit <= 0.0) {
+        st = LpStatus::TimeLimit;
+        break;
+      }
+    }
+    const long long it0 = lp.iterations();
+    st = lp.solve(o);
+    polish_iters_ += lp.iterations() - it0;
+  }
   if (st == LpStatus::Optimal) {
     out = lp.col_values();
     for (Index j = 0; j < p_.num_cols(); ++j) {
       if (p_.is_int[j]) out[j] = lb[j];  // exact integers
+    }
+  }
+  // The rounds can stop short of the quadratic rows' tolerance (a cone's apex, where the norm form is judged and
+  // tangents converge slowly: estein4_A's all-integers-fixed nodes were dropped as failed LPs, the result NUMERIC):
+  // then the continuous part by the conic method, exactly (its infeasibility certificate settles the subproblem too).
+  if (!p_.quad_rows.empty() && (st != LpStatus::Optimal || p_.max_violation(out) > 0.1 * kFeasTol) &&
+      st != LpStatus::Infeasible && st != LpStatus::CutoffReached) {
+    MipProblem q = p_;
+    q.col_lb = lb;
+    q.col_ub = ub;
+    ConicProblem cp;
+    if (conic_relaxation(q, cp)) {
+      ConicOptions co;
+      co.time_limit = is_finite(o.time_limit) ? std::max(0.1, o.time_limit) : kInf;
+      const ConicResult cr = solve_conic(cp, co);
+      if (cr.status == ConicStatus::Optimal) {
+        std::vector<double> y(cr.x.begin(), cr.x.begin() + p_.num_cols());
+        for (Index j = 0; j < p_.num_cols(); ++j) {
+          if (p_.is_int[j]) y[j] = lb[j];
+        }
+        // Within the feasibility tolerance and better than the tangents' point (a reduced-accuracy exit can miss 1e-7:
+        // portqc_hard_1's all-integers-fixed node 1927, deterministic mode, kept the tangents' 2.5e-4 and was dropped).
+        if (p_.max_violation(y) <= kFeasTol && (st != LpStatus::Optimal || p_.max_violation(y) < p_.max_violation(out))) {
+          out = std::move(y);
+          st = LpStatus::Optimal;
+        }
+      } else if (cr.status == ConicStatus::PrimalInfeasible) {
+        st = LpStatus::Infeasible;
+      }
     }
   }
   return st;
@@ -1442,6 +1527,13 @@ bool Search::verified_point(const std::vector<double>& x_arg, std::vector<double
   for (Index j = 0; j < p_.num_cols(); ++j) {
     if (p_.is_int[j]) x[j] = std::round(x[j]);
   }
+  // The objective's epigraph row (outer approximation of a quadratic objective): eta raised to f(x), exactly feasible
+  // at the point's true objective.
+  for (const QuadRow& q : p_.quad_rows) {
+    if (q.epigraph < 0) continue;
+    const double a = q.activity(x.data());
+    if (a > q.hi) x[q.epigraph] += a - q.hi;
+  }
   if (p_.max_violation(x) > kFeasTol) {
     // Rounding hurt, or the point itself is only feasible within the LP's tolerance. The LP guarantees
     // row and bound violations up to its primal tolerance (1e-6, the same as this check), so a node LP
@@ -1451,14 +1543,48 @@ bool Search::verified_point(const std::vector<double>& x_arg, std::vector<double
     // from it (jobshop_medium_1: node LP points 610.99833 for the optimum 611). Re-solve the continuous
     // part with the rounded integers fixed at a tightened primal tolerance.
     std::vector<double> fixed;
+    double lin = 0.0;
     const double v_in = p_.max_violation(x_in), obj_in = p_.objective(x_in) - p_.offset;
     const bool in_ok = v_in <= kFeasTol;
-    if (in_ok ? obj_in < repair_below : v_in <= kPolishTol && obj_in < polish_below) {
-      ++polish_tried_;
-      for (const double tol : {1e-9, 1e-7}) {
-        const LpStatus fs = solve_fixed_ints(x, p_.col_lb, p_.col_ub, tol, kInf, fixed);
-        if (fs == LpStatus::Optimal && p_.max_violation(fixed) <= kFeasTol) break;
-        fixed.clear();
+    // Quadratic rows: a point that only violates them (its linear rows, bounds and integers within tolerance once
+    // rounded) gets its continuous part from the fixed-integer outer approximation (solve_fixed_ints).
+    const bool quad_only = !p_.quad_rows.empty() && (p_.max_violation(x, nullptr, &lin), lin <= kFeasTol);
+    if (in_ok ? obj_in < repair_below : (v_in <= kPolishTol || quad_only) && obj_in < polish_below) {
+      std::vector<double> ints;
+      uint64_t key = 0, xkey = 0;
+      bool cached = false;
+      auto mix = [](uint64_t h, uint64_t v) { return (h ^ (v + 0x9e3779b97f4a7c15ULL)) * 0x100000001b3ULL; };
+      if (quad_only) {
+        for (Index j = 0; j < p_.num_cols(); ++j) {
+          uint64_t bits;
+          std::memcpy(&bits, &x[j], sizeof bits);
+          xkey = mix(xkey, bits);
+          if (!p_.is_int[j]) continue;
+          ints.push_back(x[j]);
+          key = mix(key, bits);
+        }
+        std::lock_guard<std::mutex> lk(repair_mu_);
+        if (const auto it = repair_cache_.find(key); it != repair_cache_.end() && it->second.key == ints) {
+          fixed = it->second.x;
+          cached = true;
+        } else if (const auto jt = repair_failed_.find(xkey); jt != repair_failed_.end() && jt->second.key == x) {
+          cached = true;
+        }
+        if (cached) ++repair_hits_;
+      }
+      if (!cached) {
+        ++polish_tried_;
+        for (const double tol : {1e-9, 1e-7}) {
+          const LpStatus fs = solve_fixed_ints(x, p_.col_lb, p_.col_ub, tol, kInf, fixed);
+          if (fs == LpStatus::Optimal && p_.max_violation(fixed) <= kFeasTol) break;
+          fixed.clear();
+        }
+        if (quad_only) {
+          std::lock_guard<std::mutex> lk(repair_mu_);
+          if (repair_cache_.size() + repair_failed_.size() >= 20000) repair_cache_.clear(), repair_failed_.clear();
+          if (!fixed.empty()) repair_cache_[key] = Repair{std::move(ints), fixed};
+          else repair_failed_[xkey] = Repair{x, {}};
+        }
       }
     }
     if (!fixed.empty()) {
@@ -4066,6 +4192,71 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
       }
     }
   }
+  // Convex quadratic rows (MipProblem::quad_rows, kept out of the LP): while the LP point violates them, gradient cuts
+  // (outer approximation) through the cut pool (sub-MIPs: the global cuts) and a re-solve. Deterministic mode applies
+  // new cuts only at its round barriers: there a violating integral point is branched on as an unsolved node.
+  if (!p_.quad_rows.empty() && st == LpStatus::Optimal && !w.det) {
+    // An integral LP point cannot be branched on: there the outer approximation goes on (MILP_OA_INT_ROUNDS) until the
+    // point satisfies the rows (its node then closes or branches as usual). A fractional point is branched on after
+    // MILP_OA_NODE_ROUNDS rounds, or once its relative violations are below MILP_OA_NODE_TOL (1e-4: CBLIB A/B, 30 s,
+    // against 1e-7: solved 96 -> 102 of 157, sgm 0.851 [0.80, 0.90]; sssd-strong-20-8 37.9 -> 4.3 s: at 1e-7 about 13
+    // rounds per node; on the server 1e-4 / 1e-3 102 -> 110 / 101 -> 112 at 120 s; QPLIB QCQP + portqc / qcrand
+    // neutral, with the best bounds on the hard qcrand instances. Rounds 3 vs 20: neutral).
+    static const int kOaRounds = static_cast<int>(knob("MILP_OA_NODE_ROUNDS", 20));
+    static const int kOaIntRounds = static_cast<int>(knob("MILP_OA_INT_ROUNDS", 200));
+    static const double kOaNodeTol = knob("MILP_OA_NODE_TOL", 1e-4);
+    for (int round = 0;; ++round) {
+      bool integral = true;
+      for (Index j = 0; j < p_.num_cols() && integral; ++j) {
+        integral = !p_.is_int[j] || std::abs(lp.x()[j] - std::round(lp.x()[j])) <= params_.tol.integrality;
+      }
+      if (round >= (integral ? kOaIntRounds : kOaRounds)) break;
+      std::vector<Cut> cuts;
+      if (quad_oa_cuts(p_, lp.x(), integral ? 1e-7 : kOaNodeTol, cuts) == 0) break;
+      ++oa_rounds_;
+      oa_cuts_ += static_cast<long long>(cuts.size());
+      if (use_pool_ && w.m_base >= 0) {
+        std::vector<int> ids;
+        pool_publish(cuts, &ids);
+        pool_pull(w);
+        ids.erase(std::remove_if(ids.begin(), ids.end(), [&](int id) { return id < 0 || w.pool_pos[id] >= 0; }),
+                  ids.end());
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        if (ids.empty()) break;  // nothing new for this LP (a numerically repeated cut)
+        pool_add_rows(w, ids);
+      } else {
+        {
+          std::lock_guard<std::mutex> lk(gcut_mu_);
+          for (Cut& c : cuts) gcuts_.push_back(std::move(c));
+        }
+        apply_global_cuts(w);
+      }
+      // The node's opt.time_limit was the time left at its start: each re-solve gets what is left now.
+      opt.time_limit = params_.time_limit - timer_.elapsed();
+      if (opt.time_limit <= 0.0) {
+        st = LpStatus::TimeLimit;
+        break;
+      }
+      const long long it2 = lp.iterations();
+      st = lp.solve(opt);
+      lp_iters_ += lp.iterations() - it2;
+      if (st == LpStatus::Infeasible || st == LpStatus::CutoffReached) {
+        count_outcome(5, node.depth);
+        return 0;
+      }
+      if (st != LpStatus::Optimal) break;
+    }
+  } else if (!p_.quad_rows.empty() && st == LpStatus::Optimal) {
+    // Deterministic mode: the node's tangent cuts go to everyone after the round barrier (its integral point, if it
+    // violates the rows, is branched on as an unsolved node meanwhile).
+    std::vector<Cut> cuts;
+    if (quad_oa_cuts(p_, lp.x(), 1e-7, cuts) > 0) {
+      ++oa_rounds_;
+      oa_cuts_ += static_cast<long long>(cuts.size());
+      for (Cut& c : cuts) w.new_cuts.push_back(std::move(c));
+    }
+  }
   if (st != LpStatus::Optimal && st != LpStatus::TimeLimit && !recovery_tried) {
     // A cut re-solve failed (the first solve's failures went through the ladder above already).
     st = recover_lp(w, opt, node.id);
@@ -4580,8 +4771,10 @@ int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
       // at a tightened primal tolerance (its point then passes the model check with margin), then at
       // the default one (whose infeasibility / cutoff verdict prunes like any node LP's).
       std::vector<double> pt;
+      double relaxed = -kInf;  // the objective of an optimal LP over the tangent cuts: a bound for the subtree
       for (const double tol : {1e-9, params_.tol.primal_feas}) {
         const LpStatus s2 = solve_fixed_ints(w.lb, w.lb, w.ub, tol, cutoff(w), pt);
+        if (s2 == LpStatus::Optimal && !p_.quad_rows.empty()) relaxed = std::max(relaxed, p_.objective(pt) - p_.offset);
         std::vector<double> chk;
         double chk_obj;
         if (s2 == LpStatus::Optimal && p_.max_violation(pt) <= kFeasTol &&
@@ -4594,10 +4787,17 @@ int Search::unsolved_branch(Worker& w, Node& node, Node* children) {
           return 0;
         }
       }
+      // Quadratic rows whose point neither the tangents nor the conic method made feasible: the LP over the tangent
+      // cuts relaxes the subtree (portqc_hard_1, deterministic mode: node 1927's conic solve failed at 8e-6, the node
+      // was dropped with its weaker node bound and the result NUMERIC). Pruned if that bound reaches the cutoff.
+      if (relaxed >= cutoff(w)) {
+        ++fixed_recovered_;
+        return 0;
+      }
       // The LP over the continuous columns is unsolvable: give the subtree up.
       numerical_ = true;
       std::lock_guard<std::mutex> lk(stop_mu_);
-      lost_bound_ = std::min(lost_bound_, bound);
+      lost_bound_ = std::min(lost_bound_, std::max(bound, relaxed));
       log_.log(1, "  node %lld: LP failed with all integers fixed, dropped\n", node.id);
       return 0;
     }
@@ -5382,9 +5582,12 @@ void Search::run_deterministic() {
     int processed = 0;
     // Net open nodes this worker added (its batch, carried plunge and children against the start).
     const long long open0 = static_cast<long long>(local.size()) + carried[t];
+    // Past the time limit a round ends at its next node (the result at a time limit depends on timing anyway): nodes
+    // whose work the round budget does not see (the fixed-integer repairs of integral points that violate quadratic
+    // rows, ~0.4 s each on portqc_hard_1) made one round run 91 s past a 60 s limit.
     auto more = [&](long long open_now) {
-      return processed == 0 ||
-             (processed < kMaxNodes && clock_of(w) - it0 < round_budget && open_now - open0 < grow_cap[t]);
+      return processed == 0 || (processed < kMaxNodes && clock_of(w) - it0 < round_budget &&
+                                open_now - open0 < grow_cap[t] && timer_.elapsed() <= params_.time_limit);
     };
     if (batch <= 0) {
       // Old scheme: depth-first over the subtree of the single assigned node.
@@ -5795,6 +5998,11 @@ void Search::fj_start() {
     // ~3e8 effort units per second; stops early once it stops making progress.
     lim.effort = 10000000000LL;
     lim.stall_effort = 300000000LL;
+    // MILP_FJ_REPORT = e (default 3e7; 0: every improving point; default mode only, deterministic mode takes points at
+    // its syncs): after the first, FJ reports its best point at most every e effort units (~0.1 s) and at its end, as
+    // local MIP does (MILP_LMIP_REPORT): savsched1's 2335 improving points cost 8.4 s of incumbent checks. Server A/B
+    // (core, 4 seeds, 120 s, 2 threads): 0.986 [0.955, 1.019], solved 218 -> 219 of 252, WRONG 0.
+    lim.report_effort = fj_sync_ ? 0 : static_cast<long long>(knob("MILP_FJ_REPORT", 3e7));
     const double deadline =
         fj_sync_ ? kInf
                  : timer_.elapsed() + std::min(30.0, 0.25 * std::max(0.0, params_.time_limit - timer_.elapsed()));
@@ -6236,6 +6444,7 @@ void Search::barrier_root(DualSimplex& lp) {
 void Search::detect_symmetry_root() {
   if (std::getenv("MILP_NO_SYMMETRY") != nullptr || !params_.symmetry || !opts_.sub_mip_heuristics) return;
   if (!p_.implications.empty()) return;  // the implications are not part of the symmetry detection
+  if (!p_.quad_rows.empty()) return;     // nor the quadratic rows
   if (std::find(p_.is_int.begin(), p_.is_int.end(), 1) == p_.is_int.end()) return;
   SymmetryOptions so;
   // Deterministic mode: the work limit only (a binding time cap would be timing dependent).
@@ -6837,6 +7046,9 @@ MipResult Search::run() {
                  gr_fail_[8].load());
       }
     }
+    if (oa_rounds_.load() > 0) {
+      log_.log(1, "Outer approximation at nodes: %lld rounds, %lld cuts\n", oa_rounds_.load(), oa_cuts_.load());
+    }
     if (use_pool_ && ncp_rounds_.load() > 0) {
       log_.log(1, "Cut pool: %zu cuts (%lld deleted), %lld node rounds re-added %lld cuts, %lld rows aged out; rounds"
                " at every %d-th node, %lld strips\n",
@@ -7001,8 +7213,9 @@ MipResult Search::run() {
       log_.log(1, "Logical implications: %lld branchings\n", impl_branches_.load());
     }
     if (polish_tried_.load() > 0) {
-      log_.log(2, "Fixed-integer re-solves of near-feasible points: %lld, %lld feasible, %lld LP iterations\n",
-               polish_tried_.load(), polish_ok_.load(), polish_iters_.load());
+      log_.log(2, "Fixed-integer re-solves of near-feasible points: %lld, %lld feasible, %lld LP iterations; %lld repeated "
+               "integer assignments from the cache\n", polish_tried_.load(), polish_ok_.load(), polish_iters_.load(),
+               repair_hits_.load());
     }
     if (lp_polished_.load() > 0) {
       log_.log(2, "Integral node LP points re-solved warm with the integers fixed: %lld\n", lp_polished_.load());
@@ -7053,6 +7266,10 @@ MipResult Search::run() {
   static const bool root_floor = knob("MILP_ROOT_BOUND_FLOOR", 1) > 0;  // 0: the trivial bound only (as before)
   const double floor_lb = root_floor ? std::max({trivial_lb_, root_lp_lb_, root_bound_.load()}) : trivial_lb_;
   double lb = std::max(std::min(pool_->lower_bound(), inc), floor_lb);
+  // An incumbent that met the root LP (or trivial) bound within the gap tolerances ended the search: the nodes it
+  // closed never reached the pool, so the bound is the root's, not the incumbent (QCQP fuzz case: -19.17998 reported
+  // as its own bound, the optimum -19.18046 lay within the 1e-4 gap below it).
+  if (solved_.load()) lb = std::min(lb, floor_lb);
   if (root_unbounded_) {
     res.status = res.has_solution ? Status::Unbounded : Status::InfeasibleOrUnbounded;
     res.bound = -kInf;

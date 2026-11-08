@@ -29,6 +29,54 @@ bool Model::has_quadratic() const {
   return false;
 }
 
+bool Model::has_quadratic_rows() const {
+  for (double v : qr_val)
+    if (v != 0.0) return true;
+  return false;
+}
+
+void Model::add_qrow(Index row, Index i, Index j, double v) {
+  if (i < j) std::swap(i, j);
+  qr_row.push_back(row);
+  qr_i.push_back(i);
+  qr_j.push_back(j);
+  qr_val.push_back(v);
+}
+
+void Model::compact_qrows() {
+  const size_t k = qr_val.size();
+  if (k == 0) return;
+  std::vector<size_t> ord(k);
+  for (size_t t = 0; t < k; ++t) ord[t] = t;
+  std::stable_sort(ord.begin(), ord.end(), [&](size_t a, size_t b) {
+    if (qr_row[a] != qr_row[b]) return qr_row[a] < qr_row[b];
+    if (qr_i[a] != qr_i[b]) return qr_i[a] < qr_i[b];
+    return qr_j[a] < qr_j[b];
+  });
+  std::vector<Index> row, ii, jj;
+  std::vector<double> val;
+  for (size_t t = 0; t < k; ++t) {
+    const size_t e = ord[t];
+    if (!row.empty() && row.back() == qr_row[e] && ii.back() == qr_i[e] && jj.back() == qr_j[e]) {
+      val.back() += qr_val[e];
+    } else {
+      if (!val.empty() && val.back() == 0.0) row.pop_back(), ii.pop_back(), jj.pop_back(), val.pop_back();
+      row.push_back(qr_row[e]), ii.push_back(qr_i[e]), jj.push_back(qr_j[e]), val.push_back(qr_val[e]);
+    }
+  }
+  if (!val.empty() && val.back() == 0.0) row.pop_back(), ii.pop_back(), jj.pop_back(), val.pop_back();
+  qr_row.swap(row), qr_i.swap(ii), qr_j.swap(jj), qr_val.swap(val);
+}
+
+std::vector<double> Model::row_activity(const std::vector<double>& x) const {
+  std::vector<double> act(num_rows(), 0.0);
+  for (Index j = 0; j < num_cols(); ++j) {
+    for (Index p = A.begin(j); p < A.end(j); ++p) act[A.index[p]] += A.value[p] * x[j];
+  }
+  for (size_t k = 0; k < qr_val.size(); ++k) act[qr_row[k]] += qr_val[k] * x[qr_i[k]] * x[qr_j[k]];
+  return act;
+}
+
 void Model::add_q(Index i, Index j, double v) {
   if (i < j) std::swap(i, j);
   q_row.push_back(i);
@@ -89,6 +137,7 @@ Model::Violation Model::violation(const std::vector<double>& x) const {
     if (is_integral_type(col_type[j])) v.integrality = std::max(v.integrality, std::abs(x[j] - std::round(x[j])));
     for (Index p = A.begin(j); p < A.end(j); ++p) act[A.index[p]] += A.value[p] * x[j];
   }
+  for (size_t k = 0; k < qr_val.size(); ++k) act[qr_row[k]] += qr_val[k] * x[qr_i[k]] * x[qr_j[k]];
   for (Index i = 0; i < num_rows(); ++i) v.row = std::max({v.row, row_lb[i] - act[i], act[i] - row_ub[i]});
   for (const SosConstraint& s : sos) v.logical = std::max(v.logical, sos_violation(s, x));
   for (const IndicatorConstraint& c : indicators) {
@@ -120,6 +169,16 @@ void Model::validate() const {
       throw std::runtime_error("model: column index out of range in the quadratic objective");
     if (q_row[k] < q_col[k]) throw std::runtime_error("model: quadratic objective entries must be in the lower triangle");
     if (!std::isfinite(q_val[k])) throw std::runtime_error("model: non-finite quadratic objective coefficient");
+  }
+  if (qr_row.size() != qr_val.size() || qr_i.size() != qr_val.size() || qr_j.size() != qr_val.size())
+    throw std::runtime_error("model: quadratic constraint arrays have inconsistent sizes");
+  for (size_t k = 0; k < qr_val.size(); ++k) {
+    if (qr_row[k] < 0 || static_cast<size_t>(qr_row[k]) >= m)
+      throw std::runtime_error("model: row index out of range in a quadratic constraint term");
+    if (qr_i[k] < 0 || qr_j[k] < 0 || static_cast<size_t>(qr_i[k]) >= n || static_cast<size_t>(qr_j[k]) >= n)
+      throw std::runtime_error("model: column index out of range in a quadratic constraint term");
+    if (qr_i[k] < qr_j[k]) throw std::runtime_error("model: quadratic constraint terms must have i >= j");
+    if (!std::isfinite(qr_val[k])) throw std::runtime_error("model: non-finite quadratic constraint coefficient");
   }
   auto check_col = [&](Index j, const std::string& what) {
     if (j < 0 || static_cast<size_t>(j) >= n) throw std::runtime_error("model: column index out of range in " + what);
@@ -170,6 +229,13 @@ void Model::remove_rows(const std::vector<char>& del) {
     }
   }
   A = SparseMatrix::from_triplets(num_cols(), k, J, I, V);
+  size_t t = 0;  // quadratic terms of the rows kept
+  for (size_t q = 0; q < qr_val.size(); ++q) {
+    if (map[qr_row[q]] < 0) continue;
+    qr_row[t] = map[qr_row[q]], qr_i[t] = qr_i[q], qr_j[t] = qr_j[q], qr_val[t] = qr_val[q];
+    ++t;
+  }
+  qr_row.resize(t), qr_i.resize(t), qr_j.resize(t), qr_val.resize(t);
 }
 
 Index ModelBuilder::add_col(std::string name, double obj, double lb, double ub, VarType type) {

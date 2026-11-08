@@ -25,6 +25,11 @@ benchmarks/
   tools/highs_cli.py      HiGHS-based stand-in implementing our CLI contract (harness tests)
   tools/lp_crosscheck.py  LP-reader check: every instance as LP must read to the same model as its MPS
                           file (--highs N / --scip N: also solve LP files written by HiGHS / SCIP)
+  tools/qc_fuzz.py        random convex MIQCQPs / MISOCPs (quadratic rows) vs SCIP (--kind qcqp|soc)
+  tools/qplib.py          QPLIB's convex instances as MPS (checked with QPLIB's solution points); --binary:
+                          its nonconvex instances over binaries (sets/qplib_binary)
+  tools/cblib.py          CBLIB's mixed-integer SOC instances (CBF) as MPS with quadratic cone rows
+  tools/merge_refs.py     merges reference.py output files (e.g. from another machine) into solutions.json
 ```
 
 ## Setup

@@ -76,6 +76,8 @@ class Model:
     indicators: list = field(default_factory=list)
     # quadratic objective 1/2 x'Qx: {(i, j): Q_ij} with i >= j (lower triangle)
     quad: dict = field(default_factory=dict)
+    # quadratic constraint terms: {row: {(i, j): c}} adding c * x_i * x_j (i >= j, no 1/2) to the row's activity
+    qrows: dict = field(default_factory=dict)
 
     @property
     def num_vars(self):
@@ -135,6 +137,7 @@ def _float(tok):
 def read_mps(path) -> Model:
     m = Model()
     section = None
+    qrow = None  # the constraint row of a QCMATRIX section
     in_int = False
     rhs_vals = {}  # row name -> value
     range_vals = {}
@@ -188,10 +191,18 @@ def read_mps(path) -> Model:
                     if len(toks) > 1:
                         m.obj_name = toks[1]
                 elif head in ("QUADOBJ", "QMATRIX", "QSECTION"):
+                    qrow = None
                     if head == "QSECTION" and len(toks) > 1 and toks[1] != m.obj_name:
-                        raise MPSError(f"line {lineno}: quadratic constraints are not supported (QSECTION {toks[1]})")
-                    section = head
-                elif head in ("QCMATRIX", "GENERAL", "PWLOBJ"):
+                        if toks[1] not in m.row_index:
+                            raise MPSError(f"line {lineno}: QSECTION for unknown row {toks[1]}")
+                        qrow = m.row_index[toks[1]]
+                    section = head if qrow is None else "QCMATRIX"
+                elif head == "QCMATRIX":
+                    if len(toks) != 2 or toks[1] not in m.row_index:
+                        raise MPSError(f"line {lineno}: QCMATRIX needs a constraint row")
+                    qrow = m.row_index[toks[1]]
+                    section = "QCMATRIX"
+                elif head in ("GENERAL", "PWLOBJ"):
                     raise MPSError(f"unsupported section {head}")
                 else:
                     raise MPSError(f"line {lineno}: unknown section {head!r}")
@@ -280,6 +291,15 @@ def read_mps(path) -> Model:
                     raise MPSError(f"line {lineno}: unknown column {cname}")
                 m.sos[-1][2].append(m.col_index[cname])
                 m.sos[-1][3].append(w)
+            elif section == "QCMATRIX":
+                if len(toks) != 3:
+                    raise MPSError(f"line {lineno}: bad QCMATRIX line")
+                a, b = m.col_index.get(toks[0]), m.col_index.get(toks[1])
+                if a is None or b is None:
+                    raise MPSError(f"line {lineno}: unknown column in QCMATRIX")
+                terms = m.qrows.setdefault(qrow, {})
+                key = (max(a, b), min(a, b))
+                terms[key] = terms.get(key, 0.0) + _float(toks[2])  # (a, b) and (b, a) both listed: they add up
             elif section in ("QUADOBJ", "QMATRIX", "QSECTION"):
                 if len(toks) != 3:
                     raise MPSError(f"line {lineno}: bad {section} line")
@@ -468,6 +488,70 @@ def _scaled_viol(viol, bound):
     return viol / max(1.0, abs(bound))
 
 
+def _cone_violation(m, i, x):
+    """Row i as a second-order cone over its columns' bounds (as popso's solve_oa detect_cone): in its <= direction
+    sum_k c_k (x_k + d_k)^2 + gamma <= c_t (t - s)^2 (t - s of one sign over t's bounds) or <= c u v (u, v >= 0),
+    c > 0, gamma >= 0, no other linear terms. Returns its norm-form violation (sqrt(gamma + sum ...) - head) relative
+    to the row's constants (max(1, |side|, shifts)) as a linear row's to its side, or None if the row is no such cone.
+    The squared form's tolerance would let a column reach sqrt(tol) at the apex (x^2 <= t^2 + 1e-9 at t = 0:
+    |x| = 3e-5); relative to the head, a rotated cone written as (u - v)^2 + 4 x^2 <= (u + v)^2 lets x reach 1.5 at
+    u = 0, v = 6575 (CBLIB clay0304h)."""
+    lo, hi = m.row_lo[i], m.row_hi[i]
+    if math.isfinite(lo) and math.isfinite(hi):
+        return None
+    sgn = 1.0 if math.isfinite(hi) else -1.0
+    side = sgn * (hi if sgn > 0 else lo)
+    pos, t_col, uv = {}, None, None
+    for (a, b), c in m.qrows[i].items():
+        c *= sgn
+        if c == 0.0:
+            continue
+        if a == b:
+            if c > 0:
+                pos[a] = pos.get(a, 0.0) + c
+            elif t_col is None:
+                t_col, ct = a, -c
+            else:
+                return None
+        elif c < 0 and uv is None:
+            uv, cuv = (a, b), -c
+        else:
+            return None
+    if (t_col is None) == (uv is None):
+        return None
+    lin = {}
+    for j, v in zip(m.row_cols[i], m.row_vals[i]):
+        lin[j] = lin.get(j, 0.0) + sgn * v
+    H, r2, scale = side, 0.0, max(1.0, abs(side))
+    for j, c in pos.items():
+        if uv is not None and j in uv:
+            return None
+        bj = lin.pop(j, 0.0)
+        H += bj * bj / (4.0 * c)
+        r2 += c * (x[j] + bj / (2.0 * c)) ** 2
+        scale = max(scale, abs(bj / (2.0 * c)))
+    if t_col is not None:
+        bt = lin.pop(t_col, 0.0)
+        sh = bt / (2.0 * ct)
+        H -= bt * bt / (4.0 * ct)
+        scale = max(scale, abs(sh))
+        if m.lb[t_col] >= sh:
+            head = math.sqrt(ct) * (x[t_col] - sh)
+        elif m.ub[t_col] <= sh:
+            head = math.sqrt(ct) * (sh - x[t_col])
+        else:
+            return None
+    else:
+        u, v = uv
+        if not (m.lb[u] >= 0 and m.lb[v] >= 0):
+            return None
+        r2 += 0.25 * cuv * (x[u] - x[v]) ** 2
+        head = 0.5 * math.sqrt(cuv) * (x[u] + x[v])
+    if any(c != 0.0 for c in lin.values()) or H > 1e-12 * max(1.0, abs(side)):
+        return None
+    return (math.sqrt(max(0.0, r2 - H)) - head) / scale
+
+
 def verify(m: Model, values: dict, feastol=1e-6, inttol=1e-6) -> Verification:
     """Check a solution given as {var_name: value}.
 
@@ -512,16 +596,36 @@ def verify(m: Model, values: dict, feastol=1e-6, inttol=1e-6) -> Verification:
             if v > inttol and v > worst_v:
                 worst_v, worst = v, f"var {m.col_names[j]}={xj} not integral"
     for i in range(m.num_cons):
+        if i in m.qrows:
+            cv = _cone_violation(m, i, x)
+            if cv is not None:
+                if cv > mr:
+                    mr = cv
+                if cv > worst_v:
+                    worst_v, worst = cv, f"cone row {m.row_names[i]} violated by {cv:.3g} (norm form, relative)"
+                continue
         act = math.fsum(v * x[j] for j, v in zip(m.row_cols[i], m.row_vals[i]))
         lo, hi = m.row_lo[i], m.row_hi[i]
+        # Floating point: terms of 5e9 summing to 0 carry ~1e-6 of rounding (QPLIB_9002: a solution's row at 1.0003e-6),
+        # so a row's scale includes 1e-9 of its terms' magnitude (no effect below terms of ~1e9).
+        lmag = 1e-9 * math.fsum(abs(v * x[j]) for j, v in zip(m.row_cols[i], m.row_vals[i]))
+        scale_lo = max(abs(lo), lmag) if math.isfinite(lo) else lo
+        scale_hi = max(abs(hi), lmag) if math.isfinite(hi) else hi
+        if i in m.qrows:
+            # A quadratic row: relative to its terms' magnitude too (they may cancel).
+            q = [c * x[a] * x[b] for (a, b), c in m.qrows[i].items()]
+            act += math.fsum(q)
+            mag = math.fsum(abs(v * x[j]) for j, v in zip(m.row_cols[i], m.row_vals[i])) + math.fsum(abs(t) for t in q)
+            scale_lo = max(abs(lo) if math.isfinite(lo) else 0.0, mag)
+            scale_hi = max(abs(hi) if math.isfinite(hi) else 0.0, mag)
         if act < lo:
-            v = _scaled_viol(lo - act, lo)
+            v = _scaled_viol(lo - act, scale_lo)
             if v > mr:
                 mr = v
             if v > worst_v:
                 worst_v, worst = v, f"row {m.row_names[i]} activity {act} < {lo}"
         if act > hi:
-            v = _scaled_viol(act - hi, hi)
+            v = _scaled_viol(act - hi, scale_hi)
             if v > mr:
                 mr = v
             if v > worst_v:

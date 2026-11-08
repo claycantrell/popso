@@ -389,7 +389,7 @@ TEST(lp_reader_keywords_only_at_line_start) {
 }
 
 TEST(lp_reader_errors) {
-  CHECK(error_contains("min\n x\nst\n c: x + [ x ^ 2 ] <= 1\nend\n", "<string>:4: quadratic constraints are not supported"));
+  CHECK(error_contains("min\n x\nst\n c: b = 1 -> x + [ x ^ 2 ] <= 1\nbinary\n b\nend\n", "quadratic terms ('[ ]') are only allowed"));
   CHECK(error_contains("min\n x\nst\n c: x ^ 2 <= 1\nend\n", "quadratic terms must be written inside '[ ]'"));
   CHECK(error_contains("min\n x + [ x ^ 3 ] / 2\nst\n x >= 1\nend\n", "only squares"));
   CHECK(error_contains("min\n x + [ x ^ 2 + y ] / 2\nst\n x >= 1\nend\n", "linear terms are not allowed inside"));
@@ -545,4 +545,22 @@ TEST(lp_reader_crosscheck_dir) {
   }
   std::printf("lp_reader_crosscheck_dir: compared %d LP files with their MPS originals\n", compared);
   CHECK(compared > 0);
+}
+
+// Quadratic terms in constraints: "[ ... ]" on the left side, monomials as written (no 1/2, a divisor applies), signs
+// included; a row with only quadratic terms.
+TEST(lp_quadratic_constraints) {
+  const Model m = read_lp_string(
+      "min\n x + y\nst\n c1: x + y + [ x^2 + 2 x * y + 3 y^2 ] <= 4\n c2: - [ x * y ] / 2 >= -1\n c3: [ y ^ 2 ] <= 9\nend\n");
+  REQUIRE(m.num_rows() == 3);
+  CHECK(m.has_quadratic_rows());
+  const std::vector<double> act = m.row_activity(std::vector<double>{1.0, 2.0});
+  CHECK_NEAR(act[0], 3.0 + 1.0 + 4.0 + 12.0, 1e-12);
+  CHECK_NEAR(act[1], -1.0, 1e-12);
+  CHECK_NEAR(act[2], 4.0, 1e-12);
+  // A ranged quadratic row (convexity is the solver's business).
+  const Model r = read_lp_string("min\n x\nst\n c: 0 <= x + [ x ^ 2 ] <= 1\nend\n");
+  REQUIRE(r.num_rows() == 1);
+  CHECK(r.row_lb[0] == 0.0 && r.row_ub[0] == 1.0);
+  CHECK_NEAR(r.row_activity(std::vector<double>{2.0})[0], 6.0, 1e-12);
 }

@@ -17,6 +17,9 @@ bool stop_requested(const std::atomic<bool>* stop) {
   return (stop && stop->load(std::memory_order_relaxed)) || interrupted_or_expired();
 }
 
+// Thrown by Crossover::factorize when the LU factorization stopped at an interrupt or the deadline.
+struct CrossoverAborted {};
+
 class Crossover {
  public:
   Crossover(const SparseMatrix& A, const std::vector<double>& cost, const std::vector<double>& col_lb,
@@ -84,7 +87,9 @@ Index Crossover::factorize() {
   }
   col_.clear();
   std::vector<std::pair<Index, Index>> replaced;
+  lu_.interruptible = true;
   lu_.factorize(m_, start, index, value, &replaced);
+  if (lu_.aborted()) throw CrossoverAborted{};
   for (auto [p, row] : replaced) {
     const Index old = basic_[p];
     basic_[p] = n_ + row;
@@ -458,7 +463,12 @@ Basis crossover(const SparseMatrix& A, const std::vector<double>& cost, const st
                 const std::atomic<bool>* stop) {
   Timer t;
   Crossover c(A, cost, col_lb, col_ub, row_lb, row_ub);
-  Basis b = c.run(x, y, stats, stop);
+  Basis b;
+  try {
+    b = c.run(x, y, stats, stop);
+  } catch (const CrossoverAborted&) {
+    b = Basis{};  // stopped inside a factorization: no usable basis (the caller sees the interrupt / deadline)
+  }
   if (stats) stats->time = t.elapsed();
   return b;
 }
@@ -495,7 +505,8 @@ LpStatus barrier_solve(DualSimplex& lp, const SparseMatrix& A, const std::vector
     }
   }
   const Basis b = crossover(A, cost, col_lb, col_ub, row_lb, row_ub, s.ipm.x, s.ipm.y, &s.crossover, opt.stop);
-  if ((opt.stop && opt.stop->load()) || interrupted()) {
+  if ((opt.stop && opt.stop->load()) || interrupted_or_expired() || b.empty() ||
+      (is_finite(opt.time_limit) && timer.elapsed() >= opt.time_limit)) {
     s.total_time = timer.elapsed();
     return LpStatus::TimeLimit;
   }

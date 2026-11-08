@@ -75,6 +75,7 @@ class Fj {
     while (effort_ < lim_.effort) {
       if ((++step & 1023) == 0) {
         if ((lim_.stop && lim_.stop->load(std::memory_order_relaxed)) || interrupted()) break;
+        if (pending_ && effort_ - last_report_ >= lim_.report_effort) report(on_solution);
         if (lim_.checkpoint && !lim_.checkpoint(effort_)) break;
         const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (el > lim_.time_limit) break;
@@ -132,6 +133,7 @@ class Fj {
         w_[r] += 1.0;
       }
     }
+    if (pending_) report(on_solution);
     if (stats) {
       stats->effort = effort_;
       stats->moves = moves_;
@@ -246,6 +248,12 @@ class Fj {
     effort_ += cstart_[j + 1] - cstart_[j];
   }
 
+  void report(const std::function<void(const std::vector<double>&, double)>& on_solution) {
+    on_solution(best_x_, best_obj_);
+    pending_ = false;
+    last_report_ = effort_;
+  }
+
   // All rows satisfied: report the point, then tighten the objective row.
   bool found_point(const std::function<void(const std::vector<double>&, double)>& on_solution) {
     // Recompute activities to remove drift before trusting the point.
@@ -261,7 +269,8 @@ class Fj {
       best_obj_ = obj;
       best_x_ = x_;
       if (solutions_++ == 0) first_effort_ = effort_;
-      on_solution(x_, obj);
+      pending_ = true;
+      if (lim_.report_effort <= 0 || last_report_ < 0 || effort_ - last_report_ >= lim_.report_effort) report(on_solution);
     }
     if (!has_cost_) return false;
     const double delta = obj_integral_ ? 1.0 : std::max(1e-6, 1e-4 * std::abs(obj));
@@ -296,6 +305,8 @@ class Fj {
   std::vector<Index> pos_, viol_;
   std::vector<std::pair<double, double>> ev_;
   std::vector<double> best_x_;
+  long long last_report_ = -1;  // effort at the last report (FjLimits::report_effort)
+  bool pending_ = false;        // a better point than the last reported one
   double best_obj_ = kInf;
   bool obj_integral_ = false, has_cost_ = false;
   long long effort_ = 0, moves_ = 0, restarts_ = 0, min_viol_ = 1LL << 60, first_effort_ = -1;

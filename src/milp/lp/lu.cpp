@@ -1,5 +1,7 @@
 #include "milp/lp/lu.hpp"
 
+#include "milp/core/interrupt.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -204,6 +206,7 @@ FactorWork& factor_work() {
 
 Index LuFactor::factorize(Index m, const std::vector<Index>& start, const std::vector<Index>& index,
                           const std::vector<double>& value, std::vector<std::pair<Index, Index>>* replaced) {
+  aborted_ = false;
   const double t0 = lu_stats_enabled() ? now_seconds() : 0.0;
   m_ = m;
   piv_row_.clear();
@@ -542,6 +545,10 @@ Index LuFactor::factorize(Index m, const std::vector<Index>& start, const std::v
       live_cols += !col_done[i] && K.clen[i] > 0;
     }
     for (Index step = tri_steps; step < m; ++step) {
+      if (interruptible && (step & 63) == 0 && interrupted_or_expired()) {
+        aborted_ = true;
+        return 0;
+      }
       const double lr = live_rows, lc = live_cols;
       if (std::min(lr, lc) >= 50 && std::max(lr, lc) <= 1500 && active_nnz >= 0.5 * lr * lc) {
         dense_kernel = live_cols;

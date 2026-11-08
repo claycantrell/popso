@@ -219,7 +219,8 @@ TEST(qp_mps_sections) {
     CHECK_NEAR(q_entry(*m, 0, 1), 1.0, 1e-15);
     CHECK_NEAR(q_entry(*m, 1, 1), 4.0, 1e-15);
   }
-  CHECK(expect_error(head + "QSECTION c\n x x 1\nENDATA\n", false, "quadratic constraints are not supported yet"));
+  CHECK(read_mps_string(head + "QSECTION c\n x x 1\nENDATA\n").has_quadratic_rows());  // a quadratic constraint
+  CHECK(expect_error(head + "QSECTION z\n x x 1\nENDATA\n", false, "QSECTION for unknown row 'z'"));
   CHECK(expect_error(head + "QUADOBJ\n x z 1\nENDATA\n", false, "column 'z' in QUADOBJ"));
   CHECK(expect_error(head + "QUADOBJ\n x y\nENDATA\n", false, "QUADOBJ: expected"));
   // Round trip through the writer.

@@ -435,9 +435,16 @@ bool SparseCholesky::factor_supernode(Index J, std::vector<Index>& relmap, std::
       const double sgn = psign_.empty() ? 1.0 : psign_[fJ + j];
       const double d = sgn * cj[j];
       if (!(d > pivot_tol * std::abs(diag_[fJ + j])) || !(d > 1e-300)) {
-        // Dropped pivot: a huge diagonal makes this component of the solution ~0.
         ++dropped_;
         if (d < 0.0) ++wrong_sign_;
+        if (dynamic_reg > 0.0) {
+          // Dynamic regularization: the pivot becomes dynamic_reg with its sign (callers refine the solution).
+          const double sd = std::sqrt(dynamic_reg), inv = sgn / sd;
+          cj[j] = sd;
+          for (Index r = j + 1; r < nrJ; ++r) cj[r] *= inv;
+          continue;
+        }
+        // Dropped pivot: a huge diagonal makes this component of the solution ~0.
         cj[j] = 1e64;
         for (Index r = j + 1; r < nrJ; ++r) cj[r] *= 1e-64;
         continue;

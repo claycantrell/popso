@@ -129,6 +129,25 @@ Model anonymize(const Model& model, const AnonOptions& options, AnonMap* map_out
     }
   }
 
+  // Quadratic constraint terms: new row and columns (i >= j), sorted by (row, i, j); the stable sort keeps repeated
+  // entries in their order.
+  {
+    const size_t nq = model.qr_val.size();
+    std::vector<size_t> ord(nq);
+    std::vector<Index> rr(nq), ri(nq), rj(nq);
+    for (size_t k = 0; k < nq; ++k) {
+      const Index i = new_col[model.qr_i[k]], j = new_col[model.qr_j[k]];
+      rr[k] = new_row[model.qr_row[k]];
+      ri[k] = std::max(i, j);
+      rj[k] = std::min(i, j);
+      ord[k] = k;
+    }
+    std::stable_sort(ord.begin(), ord.end(), [&](size_t x, size_t y) {
+      return rr[x] != rr[y] ? rr[x] < rr[y] : ri[x] != ri[y] ? ri[x] < ri[y] : rj[x] < rj[y];
+    });
+    for (size_t k : ord) a.add_qrow(rr[k], ri[k], rj[k], model.qr_val[k]);
+  }
+
   // SOS sets: members in their order (with the weights, it is the set's order), renamed.
   a.sos.resize(model.sos.size());
   for (size_t s = 0; s < model.sos.size(); ++s) {
