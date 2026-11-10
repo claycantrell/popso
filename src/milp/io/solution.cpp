@@ -100,7 +100,9 @@ std::vector<double> read_solution_string(const std::string& text, const Model& m
       ++ntok;
     }
     p = nl ? nl + 1 : end;
-    if (ntok == 0 || tok[0].front() == '#') continue;
+    // '#' starts a comment, unless the line is "<column> <value>" for a column whose name starts with '#' (valid in
+    // LP files: a start whose names all began with '#' was ignored entirely).
+    if (ntok == 0 || (tok[0].front() == '#' && !(ntok == 2 && index.count(tok[0])))) continue;
     const std::string where = "solution line " + std::to_string(line) + ": ";
     if (ntok != 2) throw std::runtime_error(where + "expected '<name> <value>'");
     auto it = index.find(tok[0]);

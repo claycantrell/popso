@@ -6649,7 +6649,57 @@ MipResult Search::run() {
   // A rejected start: the cutoff from its own objective (SearchOptions::start_objective), not from the point.
   const double start_obj =
       opts_.start.empty() ? kInf : is_finite(opts_.start_objective) ? opts_.start_objective : p_.objective(opts_.start);
-  if (!opts_.start.empty() && !try_incumbent(opts_.start, start_source)) {
+  bool start_taken = !opts_.start.empty() && try_incumbent(opts_.start, start_source);
+  // Start repair: presolve's dual reductions (dominated columns, dual bounds) can make the crushed image of a
+  // feasible start infeasible here. Rather than keep only its objective as a cutoff, fix the start's integer
+  // values except in the violated rows and complete it with a small sub-MIP, so that the start can still feed
+  // the guided dive and RINS. Only the user's start (solver.cpp); MILP_START_REPAIR=0: off.
+  static const bool start_repair = knob("MILP_START_REPAIR", 1) > 0;
+  if (!opts_.start.empty() && !start_taken && start_repair && opts_.sub_mip_heuristics &&
+      opts_.restarts_done + opts_.tree_restarts_done == 0) {  // the user's start only, not a restart's incumbent
+    const double t0 = timer_.elapsed();
+    std::vector<double> act(p_.num_rows(), 0.0);
+    for (Index j = 0; j < p_.num_cols(); ++j)
+      for (Index k = p_.A.begin(j); k < p_.A.end(j); ++k) act[p_.A.index[k]] += p_.A.value[k] * opts_.start[j];
+    std::vector<char> bad(p_.num_rows(), 0);
+    Index nbad = 0;
+    for (Index i = 0; i < p_.num_rows(); ++i)
+      if (act[i] < p_.row_lb[i] - 1e-6 || act[i] > p_.row_ub[i] + 1e-6) bad[i] = 1, ++nbad;
+    std::vector<double> lb = p_.col_lb, ub = p_.col_ub;
+    Index fixed = 0, ints = 0;
+    for (Index j = 0; j < p_.num_cols(); ++j) {
+      if (!p_.is_int[j]) continue;
+      ++ints;
+      bool touches = false;
+      for (Index k = p_.A.begin(j); k < p_.A.end(j) && !touches; ++k) touches = bad[p_.A.index[k]];
+      const double v = std::round(opts_.start[j]);
+      if (touches || v < lb[j] || v > ub[j]) continue;
+      lb[j] = ub[j] = v;
+      ++fixed;
+    }
+    SubMipLimits lim;
+    lim.node_limit = 500;
+    const double left = std::max(0.0, params_.time_limit - timer_.elapsed());
+    // Deterministic mode: no wall-clock cap (it would make the result depend on the machine's speed), an LP
+    // iteration limit instead.
+    lim.time_limit = params_.deterministic ? left : std::min(5.0, 0.1 * left);
+    if (params_.deterministic) lim.iteration_limit = 200000;
+    std::vector<double> sol;
+    const bool ok = fixed > 0 && lim.time_limit > 0.0 && solve_sub_mip(p_, lb, ub, kInf, lim, sol) &&
+                    try_incumbent(sol, "start repair");
+    start_taken = ok;
+    if (ok) {
+      log_.log(1, "Start solution: violates %d rows after presolve; repaired (%d of %d integers kept), objective %.10g\n",
+               nbad, fixed, ints, p_.display_sense * (incumbent_.load() + p_.offset));
+    } else {
+      log_.log(1, "Start solution: violates %d rows after presolve; repair failed, its objective %.10g bounds the "
+               "search\n", nbad, p_.display_sense * start_obj);
+    }
+    log_.log(2, "  start repair: %s, %d violated rows, %d of %d integers fixed, %.2fs\n", ok ? "found" : "failed", nbad,
+             fixed, ints, timer_.elapsed() - t0);
+  }
+  // The start's own objective stays a cutoff unless the start itself (or a repair at least as good) is the incumbent.
+  if (!opts_.start.empty() && (!start_taken || incumbent_.load() > start_obj - p_.offset)) {
     external_cutoff_ = std::min(external_cutoff_, start_obj - p_.offset);
     cutoff_.store(prune_threshold(external_cutoff_));
   }

@@ -76,3 +76,14 @@ TEST(solution_read_partial_and_errors) {
   CHECK_THROWS(read_solution("/nonexistent/dir/x.sol", m), std::runtime_error);
   CHECK_THROWS(write_solution("/nonexistent/dir/x.sol", m, SolveResult{}), std::runtime_error);
 }
+
+TEST(solution_names_starting_with_hash) {
+  // '#' starts a comment, except in a "<column> <value>" line whose column name starts with '#' (valid in LP files).
+  ModelBuilder b;
+  b.add_col("#a", 1, 0, 10, VarType::Continuous);
+  b.add_col("b", 1, 0, 10, VarType::Continuous);
+  const Model m = b.build();
+  const std::vector<double> x = read_solution_string("# Solution\n#a 2.5\n# b 7\nb 1\n#unknown 3\n", m);
+  CHECK_NEAR(x[0], 2.5, 0.0);
+  CHECK_NEAR(x[1], 1.0, 0.0);
+}

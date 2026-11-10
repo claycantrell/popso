@@ -176,3 +176,43 @@ TEST(start_rejected_cutoff_from_its_own_objective) {
     }
   }
 }
+
+TEST(start_repaired_after_presolve) {
+  // A start that violates the (presolved) problem in one row: the repair keeps its integers outside that row (z, w)
+  // and completes the rest by a sub-MIP, which becomes the first incumbent ("start repair"), in both modes.
+  // min x + y + z + 2 w  s.t.  x + y >= 3,  z + w >= 1,  integers in [0, 10]: optimum 4 (z = 1, w = 0).
+  MipProblem p;
+  {
+    ModelBuilder b;
+    const Index x = b.add_col("x", 1, 0, 10, VarType::Integer);
+    const Index y = b.add_col("y", 1, 0, 10, VarType::Integer);
+    const Index z = b.add_col("z", 1, 0, 10, VarType::Integer);
+    const Index w = b.add_col("w", 2, 0, 10, VarType::Integer);
+    const Index r = b.add_row("r", 3, kInf);
+    b.add_coef(r, x, 1);
+    b.add_coef(r, y, 1);
+    const Index s = b.add_row("s", 1, kInf);
+    b.add_coef(s, z, 1);
+    b.add_coef(s, w, 1);
+    REQUIRE(MipProblem::from_model(b.build(), &p));
+  }
+  for (const bool det : {false, true}) {
+    SolverParams sp = quiet_params();
+    sp.deterministic = det;
+    Logger log(0);
+    SearchOptions opts;
+    opts.check_resident = false;
+    opts.feasibility_jump = false;
+    opts.start = {1.0, 0.0, 1.0, 0.0};  // violates r
+    opts.start_objective = 9.0;         // the user's start was feasible before presolve, at 9
+    std::vector<std::string> sources;
+    opts.on_trace = [&](double, const char* source, double) { sources.emplace_back(source); };
+    Timer timer;
+    const MipResult r = branch_and_bound(p, sp, log, timer, opts);
+    CHECK(r.status == Status::Optimal);
+    REQUIRE(r.has_solution);
+    CHECK_NEAR(r.objective, 4.0, 1e-9);
+    REQUIRE(!sources.empty());
+    CHECK(sources.front() == "start repair");
+  }
+}

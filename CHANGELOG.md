@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.3 — 2026-11
+
+- A user start that presolve's dual reductions cut off (its presolved image violates rows although the start is
+  feasible) is repaired: its integer values outside the violated rows are kept and the rest is completed by a small
+  sub-MIP, which becomes the first incumbent. Before, the start only bounded the search, and the heuristics that
+  start from an incumbent had nothing to work with (a 43k-column scheduling model: no solution beyond the start in
+  39 s; with the repair optimal in 11 s). The log says when a start is repaired or only bounds the search.
+  `MILP_START_REPAIR=0` turns it off. Contributed by Clay Cantrell (#1, #2).
+- Solution / start files: a line starting with `#` is a comment unless it reads `<column> <value>` for a column
+  whose name starts with `#` (valid in LP files; such a start was ignored entirely).
+- CLI: `--abs-gap <abs>` sets the absolute MIP gap (the C API's and Python's `mip_abs_gap`).
+
 ## v0.8.2 — 2026-11
 
 The first release on PyPI (`pip install popso`; v0.8.1's wheels were never uploaded). macOS wheels (Apple silicon
