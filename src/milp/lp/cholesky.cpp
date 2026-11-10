@@ -5,6 +5,9 @@
 
 #include "milp/core/worker_pool.hpp"
 #include "milp/lp/ordering.hpp"
+#include <string>
+#include <cstdio>
+#include <cstdlib>
 
 namespace milp {
 
@@ -132,6 +135,27 @@ bool SparseCholesky::analyze(Index n, const std::vector<Index>& start, const std
   }
   for (Index c = 0; c < n; ++c) {
     if (diag_entry[c] < 0) return false;
+  }
+  // EXPERIMENT: MILP_CHOL_DUMP=<prefix> writes each pattern to <prefix><n>.txt; MILP_CHOL_PERM=<prefix> reads an
+  // ordering from <prefix><n>.txt when present (one index per line).
+  std::vector<Index> ext_perm;
+  if (!perm) {
+    if (const char* d = std::getenv("MILP_CHOL_DUMP")) {
+      if (FILE* f = std::fopen((std::string(d) + std::to_string(n) + ".txt").c_str(), "w")) {
+        std::fprintf(f, "%d\n", n);
+        for (Index c = 0; c < n; ++c)
+          for (Index k = start[c]; k < start[c + 1]; ++k) std::fprintf(f, "%d %d\n", c, index[k]);
+        std::fclose(f);
+      }
+    }
+    if (const char* d = std::getenv("MILP_CHOL_PERM")) {
+      if (FILE* f = std::fopen((std::string(d) + std::to_string(n) + ".txt").c_str(), "r")) {
+        int v;
+        while (std::fscanf(f, "%d", &v) == 1) ext_perm.push_back(v);
+        std::fclose(f);
+        if (static_cast<Index>(ext_perm.size()) == n) perm = &ext_perm;
+      }
+    }
   }
   if (perm) {
     perm_ = *perm;

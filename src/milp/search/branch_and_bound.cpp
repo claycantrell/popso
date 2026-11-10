@@ -817,6 +817,7 @@ class Search : public BasisOwner {
   Index root_sb_var_ = -1;        // branching candidate of the last pass (and its exact child gains)
   double root_sb_dn_ = -kInf, root_sb_up_ = -kInf;
   bool root_redo_ = false, root_heur_done_ = false;
+  int root_heur_mode_ = 0;  // EXPERIMENT: 1 = the root LNS only, 2 = everything but the root LNS (MILP_ROOT_LNS_FIRST)
   std::vector<Index> root_seeds_;  // columns fixed by root strong branching (propagated on the next pass)
   // Root restart rule (root_restart_decision) for the current global fixings and the root's cost
   // (root_work: LP iterations x (rows + columns) of the root worker's LP; root_elapsed: seconds since the
@@ -3383,6 +3384,25 @@ void Search::root_heuristics(Worker& w, int nthreads, double t_root_in) {
   // restarted root only).
   const double t_root = t_root_in >= 0.0 ? t_root_in : timer_.elapsed() - t_start_;
   const int nthr = nthreads > 0 ? nthreads : threads_;
+  // EXPERIMENT MILP_ROOT_LNS_FIRST (default 0): with an incumbent at the start (a user start), the root LNS (RINS +
+  // mutation around it) runs before the dives and RENS instead of after them, and once more after them if they
+  // improved the incumbent.
+  static const bool lns_first = knob("MILP_ROOT_LNS_FIRST", 0) > 0;
+  if (lns_first && root_heur_mode_ == 0 && is_finite(incumbent(w)) && opts_.sub_mip_heuristics) {
+    root_heur_mode_ = 1;
+    root_heuristics(w, nthreads, t_root_in);
+    const double after_lns = incumbent(w);
+    if (!solved_.load()) {
+      root_heur_mode_ = 2;
+      root_heuristics(w, nthreads, t_root_in);
+      if (!solved_.load() && incumbent(w) < after_lns) {
+        root_heur_mode_ = 1;
+        root_heuristics(w, nthreads, t_root_in);
+      }
+    }
+    root_heur_mode_ = 0;
+    return;
+  }
   // MILP_SUBHEUR_DEBUG: the root heuristic lines of the sub-MIPs too (their log is silent).
   static const bool sub_debug = std::getenv("MILP_SUBHEUR_DEBUG") != nullptr;
   const int hlog = sub_debug && !opts_.sub_mip_heuristics ? 0 : 3;
@@ -3458,7 +3478,11 @@ void Search::root_heuristics(Worker& w, int nthreads, double t_root_in) {
   // Phase 1: one dive per rule, each on its own copy of the root LP. Restarted roots from the second
   // restart on skip the dives, RENS and the root LNS unless the search before the restart improved the
   // incumbent (SearchOptions::root_heuristics).
-  const bool no_dive = std::getenv("MILP_NO_DIVE") != nullptr || !opts_.root_heuristics;
+  // EXPERIMENT MILP_ROOT_DIVE_WITH_INC (default 1; 0: no root dives when an incumbent exists already, e.g. a user
+  // start: the root LNS (RINS + mutation) then runs right after RENS instead of after four dives at their caps).
+  static const bool dive_with_inc = knob("MILP_ROOT_DIVE_WITH_INC", 1) > 0;
+  const bool no_dive = std::getenv("MILP_NO_DIVE") != nullptr || !opts_.root_heuristics || root_heur_mode_ == 1 ||
+                       (!dive_with_inc && is_finite(incumbent(w)));
   static const bool no_dive_prop = std::getenv("MILP_NO_DIVE_PROP") != nullptr;
   // Without an incumbent the dives run beside the sub-MIP heuristics of phase 2 (queued after them)
   // instead of before them.
@@ -3656,12 +3680,14 @@ void Search::root_heuristics(Worker& w, int nthreads, double t_root_in) {
     dive_tasks.pop_back();
   }
   for (Task& t : dive_tasks) tasks.push_back(std::move(t));
+  if (root_heur_mode_ == 1) tasks.clear();
   run_tasks(tasks);
 
   // Phase 3: improve the incumbent around the root LP point after the cuts (HiGHS finds most
   // of its early incumbents this way): rounds of RINS plus mutation sub-MIPs (one per
   // thread), repeated while a round improves.
   static const bool no_root_lns = std::getenv("MILP_NO_ROOT_LNS") != nullptr;
+  if (root_heur_mode_ == 2) return;
   // Only after a root of some size (>= 2000 LP iterations incl. the cut loop, a barrier root as the iterations
   // it stands for): on quick roots the sub-MIP setup costs more than the tree's LNS would.
   const long long root_iters = w.lp.iterations() + (barrier_equiv() ? root_lp_equiv_iters_ : 0);
@@ -3682,7 +3708,13 @@ void Search::root_heuristics(Worker& w, int nthreads, double t_root_in) {
   const bool poor = is_finite(incumbent(w)) &&
                     incumbent(w) - root_bound_ > 1e-2 * std::max(1.0, std::abs(incumbent(w) + p_.offset));
   const double lns_secs = poor ? std::max(t_root, kPoorLnsSecs) : t_root;
-  const double lns_end = timer_.elapsed() + std::min({20.0, 0.1 * remaining(), lns_secs});
+  // EXPERIMENT MILP_ROOT_LNS_FRAC (default 0.1) / MILP_ROOT_LNS_CAP (default 20 s) / MILP_ROOT_LNS_ROUNDS (12): the
+  // root LNS budget as a share of the time left; with a larger share the rounds go on while they improve.
+  static const double lns_frac = knob("MILP_ROOT_LNS_FRAC", 0.1);
+  static const double lns_cap = knob("MILP_ROOT_LNS_CAP", 20.0);
+  static const int lns_rounds = static_cast<int>(knob("MILP_ROOT_LNS_ROUNDS", 12));
+  const double lns_end = timer_.elapsed() + (lns_frac > 0.1 ? std::min(lns_cap, lns_frac * remaining())
+                                                             : std::min({lns_cap, lns_frac * remaining(), lns_secs}));
   // MILP_DET_LNS_FACTOR (default 1): factor on that deterministic budget (see MILP_DET_SUB_FACTOR above).
   static const double det_lns_factor = knob("MILP_DET_LNS_FACTOR", 1.0);
   const long long lns_iters = static_cast<long long>(
@@ -3690,7 +3722,7 @@ void Search::root_heuristics(Worker& w, int nthreads, double t_root_in) {
   long long lns_used = 0;
   double fix = 0.7;
   bool rins_ok = true;
-  for (int round = 0; round < 12 && is_finite(incumbent(w)) && !solved_.load(); ++round) {
+  for (int round = 0; round < lns_rounds && is_finite(incumbent(w)) && !solved_.load(); ++round) {
     // Skip when the incumbent is already within 0.5% of the root bound.
     if (incumbent(w) - root_bound_ <= 5e-3 * std::max(1.0, std::abs(incumbent(w) + p_.offset))) break;
     if (params_.deterministic ? lns_used >= lns_iters : timer_.elapsed() >= lns_end) break;
@@ -4295,6 +4327,10 @@ int Search::process_impl(Worker& w, Node& node, Node* children) {
     root_bound_ = bnd;
     log_.log(1, "Root LP: objective %.10g, %lld iterations, %.2fs\n", p_.display_sense * (obj + p_.offset), lp.iterations(),
              timer_.elapsed());
+    // An incumbent found before the root LP ended (start, FJ, local MIP) may already close the gap at this bound:
+    // accept_incumbent only tests it when a new incumbent arrives.
+    static const bool root_gap_stop_lp = knob("MILP_ROOT_GAP_STOP", 1) > 0;
+    if (root_gap_stop_lp && !params_.deterministic && gap_closed(bnd)) trivial_solved(incumbent_.load(), true);
   }
   if (node.branch_var >= 0 && node.branch_dist > 0) {
     const double pobj = is_finite(node.parent_obj) ? node.parent_obj : node.bound;
@@ -5419,7 +5455,7 @@ void Search::worker_loop(int tid) {
     else if (prompt_restart_check_ && restart_check_due_.load(std::memory_order_relaxed) && restart_check_due_.exchange(false)) {
       check_tree_restart(false);
     }
-    if ((nodes_.load() & 15) == 0) {
+    if (const long long nn = nodes_.load(); nn < 256 || (nn & 15) == 0) {  // every node while nodes are few (slow)
       const double lb = pool_->lower_bound();
       if (gap_closed(lb)) {
         if (!debug_sol_.empty()) log_.log(0, "DEBUG-SOL: gap closed lb %.10g inc %.10g\n", lb, incumbent_.load());

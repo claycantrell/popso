@@ -49,6 +49,7 @@ void print_usage(std::FILE* out) {
                "  --threads <n>         number of threads (0 = all cores, default)\n"
                "  --verbosity <n>       0 silent, 1 summary (default), 2 progress, 3 debug\n"
                "  --gap <rel>           relative MIP gap tolerance (default 1e-4)\n"
+               "  --abs-gap <abs>       absolute MIP gap tolerance (default 1e-10)\n"
                "  --no-presolve         disable presolve\n"
                "  --symmetry <on|off>   symmetry handling (default on)\n"
                "  --lp-method <m>       LP algorithm for pure LPs and the MIP root LP: auto (default),\n"
@@ -149,6 +150,9 @@ int main(int argc, char** argv) {
     } else if (!std::strcmp(a, "--gap")) {
       params.mip_rel_gap = parse_double_arg(a, value());
       if (params.mip_rel_gap < 0) usage_error("gap must be nonnegative");
+    } else if (!std::strcmp(a, "--abs-gap")) {
+      params.mip_abs_gap = parse_double_arg(a, value());
+      if (params.mip_abs_gap < 0) usage_error("abs-gap must be nonnegative");
     } else if (!std::strcmp(a, "--no-presolve")) {
       params.presolve = false;
     } else if (!std::strcmp(a, "--symmetry")) {
